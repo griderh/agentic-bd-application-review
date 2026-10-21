@@ -19,6 +19,7 @@ from bd_packet_builder.evidence import (
 from bd_packet_builder.inventory import InventoryError, build_inventory, publish_inventory
 from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
+from bd_packet_builder.review import ReviewError, run_review
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -66,6 +67,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     ocr.add_argument("--timeout-seconds", type=int, default=ocr_defaults.timeout_seconds)
     ocr.add_argument("--max-pixels", type=int, default=ocr_defaults.max_pixels)
     ocr.add_argument("--max-output-bytes", type=int, default=ocr_defaults.max_output_bytes)
+    review = commands.add_parser(
+        "review", help="Check manual requirements/proposals; internal report only, no filling"
+    )
+    review.add_argument("--root", type=Path, required=True)
+    review.add_argument(
+        "--source", type=Path, required=True, help="Root-relative blank application PDF"
+    )
+    review.add_argument("--requirements", type=Path, required=True, help="JSON under outputs/")
+    review.add_argument("--proposals", type=Path, required=True, help="JSON under outputs/")
     args = parser.parse_args(argv)
     try:
         if args.command == "inspect":
@@ -104,18 +114,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limits=OcrLimits(args.timeout_seconds, args.max_pixels, args.max_output_bytes),
             )
             print(f"Unverified local OCR only, not approved answers: {result / 'ocr.json'}")
+        elif args.command == "review":
+            result = run_review(args.root, args.source, args.requirements, args.proposals)
+            data = json.loads((result / "review.json").read_text(encoding="utf-8"))
+            print(
+                f"Internal review only, no packet: {len(data['items'])} requirements. "
+                f"Review report: {result / 'review.json'}"
+            )
         else:
             result = create_demo(args.root, args.source)
             print(f"Synthetic demo only, not a completed application: {result}")
-    except (PdfDemoError, InventoryError, EvidenceError, OcrError) as error:
+    except (PdfDemoError, InventoryError, EvidenceError, OcrError, ReviewError) as error:
         label = (
-            args.command.capitalize() if args.command in ("inventory", "evidence", "ocr") else "PDF"
+            args.command.capitalize()
+            if args.command in ("inventory", "evidence", "ocr", "review")
+            else "PDF"
         )
         print(f"{label} command rejected: {error}", file=sys.stderr)
         return 1
     except OSError:
         label = (
-            args.command.capitalize() if args.command in ("inventory", "evidence", "ocr") else "PDF"
+            args.command.capitalize()
+            if args.command in ("inventory", "evidence", "ocr", "review")
+            else "PDF"
         )
         print(
             f"{label} I/O failed. Check the input exists and output folder is writable.",

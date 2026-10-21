@@ -6,6 +6,7 @@ import os
 import re
 import stat
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -302,17 +303,21 @@ def publish_inventory(root: Path, inventory: Inventory) -> Path:
 
 def publish_json_run(
     root: Path,
-    kind: Literal["inventory", "evidence", "ocr"],
+    kind: Literal["inventory", "evidence", "ocr", "review"],
     payload: dict[str, object],
     inventory: Inventory,
+    *,
+    verify_inputs: Callable[[], None] | None = None,
 ) -> Path:
     """Publish one JSON document atomically within a unique local output run."""
-    if kind not in ("inventory", "evidence", "ocr"):
+    if kind not in ("inventory", "evidence", "ocr", "review"):
         raise InventoryError("Unsupported local output kind")
     root = root.resolve(strict=True)
     output = root / "outputs"
     if output.resolve() != output:
         raise InventoryError("Local output folder must not resolve through a symlink")
+    if verify_inputs is not None:
+        verify_inputs()
     for source in inventory.sources:
         read_source_bytes(root, inventory, source.source_id)
     output.mkdir(exist_ok=True)
@@ -324,5 +329,7 @@ def publish_json_run(
         )
         for source in inventory.sources:
             read_source_bytes(root, inventory, source.source_id)
+        if verify_inputs is not None:
+            verify_inputs()
         staging.rename(final)
     return final

@@ -195,7 +195,7 @@ An explicit local run on page 1 of the August 2026 FOCUS report produced 551 OCR
 
 ## Application requirements and answer proposals
 
-The [contracts module](src/bd_packet_builder/contracts.py) defines the offline boundary between application interpretation and future answer generation. It is a developer API, not a new CLI command or automated form reader. It does not extract application questions yet.
+The [contracts module](src/bd_packet_builder/contracts.py) defines the offline boundary between application interpretation and future answer generation. The local review command below exercises it with manually supplied data; it is not an automated form reader and does not extract application questions yet.
 
 - `ApplicationRequirements`: one application hash/version and unique requirement IDs. Each requirement retains the issuer instruction, one-based page, answer/attachment/signing kind, explicit financial units, optional requested reporting-period start/end, and optional required signer role. The supplied instruction and location remain unverified until checked against the actual application.
 - `AnswerProposal`: a requirement ID, explicit outcome, typed value, source/page/quote citations, optional claimed reporting period, and model confidence. A proposed answer requires citations and confidence. Missing/conflicting evidence, unreadable forms, unsupported requirements, unresolved signers, and signing deferrals require an explanation and no answer value.
@@ -217,5 +217,58 @@ A citation identifies the inventory's path-and-content source ID and a one-based
 This deliberately separates a well-formed proposal from a grounded, approved answer. Approval, source governance, financial exact-value/consistency validation, semantic support evaluation, signer resolution, PDF placement, and the application-driven end-to-end workflow still need implementation. Do not bypass validation with Pydantic `model_construct()`/unchecked updates or log untrusted payloads/validation error structures; structured errors can still contain input data even though rendered validation messages hide inputs.
 
 Pydantic and its transitive dependencies are now pinned in the runtime requirements; rerun `python -m pip install -r requirements-dev.txt` in an existing venv. Python 3.12 compatibility and a fresh venv installation were validated. No Foundry SDK, endpoint, or model call is introduced.
+
+## Local requirement/proposal review
+
+The [review harness](src/bd_packet_builder/review.py) connects the contracts, native citation resolver, and internal report publication. It is an implemented developer tool, not itself a pytest test runner. To run the automated synthetic integration tests, with the venv activated:
+
+```bash
+python -m pytest tests/integration/test_review.py -v
+```
+
+Those tests create their own temporary PDFs and JSON inputs, execute the review workflow, and check its outputs. No manual input preparation or business documents are needed.
+
+**The following is a usage template, not a ready-to-run demo.** First prepare both JSON files as described below; the repository does not include or automatically generate them. Running the template without those files results in an I/O error. After preparing them, run this from the repository root:
+
+```bash
+bd-packet review --root . \
+  --source "bd_agreements/Blank/New_Mexico_State/NMSTO - FY26-27-B_D-Application.pdf" \
+  --requirements "outputs/review-inputs/requirements.json" \
+  --proposals "outputs/review-inputs/proposals.json"
+```
+
+All input paths are relative to the explicit root. The application must be a readable, nonempty, unencrypted PDF in `bd_agreements/Blank/`. JSON input files must be under the local `outputs/` tree; absolute paths, traversal and symlinks are rejected. The PDF limit is 64 MiB and each JSON file limit is 2 MiB. Keep these manually prepared inputs confidential and Git-ignored.
+
+Prepare the requirements file as `{"schema_version": 1, "requirements": [...]}`, with each entry following `Requirement`. Each entry must use the actual SHA-256 of the selected application and a valid one-based page. For example, **replace the placeholder hash, page, and instruction with your actual reviewed requirement**:
+
+```json
+{
+  "schema_version": 1,
+  "requirements": [
+    {
+      "requirement_id": "firm-name",
+      "application_sha256": "<actual 64-character lowercase SHA-256>",
+      "page": 1,
+      "instruction": "Name of Firm",
+      "kind": "text"
+    }
+  ]
+}
+```
+
+The placeholder is intentionally invalid; it must not be treated as a verified application identity. A hash can be calculated with standard-library `hashlib.sha256(path.read_bytes()).hexdigest()` or your platform's SHA-256 utility. The command verifies the hash/page, not that the supplied instruction actually occurs there or that every question has been found.
+
+Prepare proposals as `{"schema_version": 1, "proposals": [...]}`. Each proposal follows `AnswerProposal`, including source-version/page/exact-quote citations for proposed values. An empty `proposals` array is valid: it produces unanswered records for supplied answerable requirements, not invented values. Duplicate proposals and IDs not present in the requirements are input failures. An unanswered item can instead carry an explicit `missing_evidence`, `conflicting_evidence`, or other contract outcome with an explanation.
+
+The command publishes a unique `outputs/review-<run-id>/review.json` containing:
+
+- Application identity/page count and hashes of both input JSON files.
+- Each supplied requirement in order, its proposal or absence, check issues, and status counts.
+- Explicit missing proposals and human-signing deferrals; bad citations reject only their own proposal while other supplied requirements are still checked.
+- Potentially confidential values, instructions, quotes, and reviewer explanations. Console output contains only the number of supplied requirements and output location.
+
+**This is an internal diagnostic JSON report, not the scoped reviewer-summary PDF or a completed packet.** Coverage is explicitly limited to supplied requirements. All `fill_value` fields remain null; a successful command means the report was saved, not that its answers passed review. No PDF is filled, merged, approved, signed, or submitted. The input PDF is preserved even when it is unreadable; in that case the command fails explicitly rather than claiming a report/completed packet.
+
+The application/JSON versions and inventoried supporting sources are rechecked around atomic publication; detected changes or I/O failures prevent a successful published report and clean staging on normal exceptions. This is not immutable archiving or a filesystem isolation boundary. No human source-approval workflow, semantic support decision, per-field placement, automatic requirement extraction, OCR citation support, or model adapter is added. Different issuer questions are data, not new hardcoded question lists.
 
 See the [foundation decision record](docs/decisions/0001-local-foundation.md) for library choices, verified behavior, and remaining work.

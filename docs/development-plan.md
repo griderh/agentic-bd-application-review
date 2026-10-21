@@ -36,6 +36,8 @@ An approved [local Tesseract experiment](../README.md#opt-in-local-ocr-feasibili
 
 ## 2. Engineering decisions and remaining choices
 
+The [local review harness](../README.md#local-requirementproposal-review) now exercises the contracts with a selected blank PDF and manually prepared requirements/proposals. It verifies application hash/page bounds, resolves native citations, reports every supplied requirement (including missing proposals), and publishes a separate internal diagnostic JSON with no fillable answers. Supplied-question coverage is not full-form detection, and this is not the scoped reviewer-summary PDF. Application interpretation and approved-answer generation remain future increments; there are no new model calls or OCR changes.
+
 The offline [application-requirement and answer-proposal contracts](../README.md#application-requirements-and-answer-proposals) are now implemented using strict, versioned Pydantic schemas. They preserve issuer instructions/locations, requested periods, typed values/units, exact native-text citations, explicit unanswered outcomes, and signing prohibitions. A proposal checker resolves citations but always leaves values unfillable pending semantic support, source approval, and application validation; a model's reporting-period claim cannot verify a period. This does not implement application interpretation, governed facts, answer approval, or end-to-end filling. Foundry vision comparison remains deferred until the first approved endpoint integration; OCR remains separate and experimental.
 
 There is no single universal agentic Python stack. The baseline is TDD, strong contracts, a deterministic core, constrained model interactions, and measured evaluations.
