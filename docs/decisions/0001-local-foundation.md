@@ -60,3 +60,21 @@ Only explicit, narrowly labeled reporting dates are compared to filename periods
 Native text may be incomplete, out of reading order, or inconsistent with visible content. OCR and rendered validation remain necessary. The local run found usable text on 124 of 195 pages; all six financial-document date checks stayed unverified. No dependency, service, model integration, real-document fixture, or remote upload was added.
 
 TDD started with missing-module failures and includes page/quote provenance, reporting-date matches/conflicts/mismatches, no-text pages, extraction failures, strict limits, source mutation, and staged-write cleanup. Model-quality metrics are not applicable: this increment makes no model calls.
+
+## Follow-on: optional local Tesseract feasibility
+
+Date: October 21, 2026.
+
+The user approved local Tesseract after considering local OCR, Azure Document Intelligence, and Foundry vision. Start with a bounded single-page experiment, not automatic conversion of all textless pages. The native evidence command and reporting-date rules remain unchanged. No remote service or Python OCR package is added.
+
+Use Tesseract 5.x with English data, 300-DPI PDFium rendering, and page-segmentation mode 6. Record the actual engine version and rendered-image hash. Local installation is Tesseract 5.5.3 through Homebrew; system packages and English trained data are not pinned by pip. Treat distro/version variation as an evaluation concern, not proven equivalence. Respect Apache-2.0 and bundled dependency/data licenses when redistributing.
+
+The subprocess receives fixed arguments and a generated temporary image path, never document-supplied commands. Suppress raw engine diagnostics, enforce process timeouts, check raster size before rendering, and spool output before bounded parsing. TSV word data is validated for hierarchy, finite confidence, and in-image geometry. Record the original source/page/hash and top-left pixel coordinates; do not imply PDF-point geometry, table cells, or trustworthy financial facts.
+
+The image and raw TSV are temporary; only unverified local JSON is published using the shared source-rechecking, atomic-output boundary. Failures clean working files on normal exception paths. This does not provide a disk quota, native-rendering sandbox, immutable source archive, or protection from every concurrent filesystem race.
+
+TDD observed the missing module before implementation. Contracts cover source/page limits, symlinks, unavailable/unsupported engines, timeout/failure cleanup, malformed TSV, invalid word geometry/confidence, source changes, empty recognition, and safe CLI output. Real OCR tests are explicitly opted in and use generated image-only PDFs. One clean synthetic page recovered 6/6 exact target strings; this does not establish general OCR, table, or model quality.
+
+A local FOCUS page produced 551 words, 128 below engine confidence 80; no independent transcript exists to turn those scores into accuracy. The source hash remained unchanged. Default tests do not require Tesseract; an added Linux CI step installs it and executes the real synthetic recognition test. Remote CI verification remains pending the next push.
+
+PDFium's runtime documentation accepts float render scale, but its untyped `scale=1` default causes Pylance to infer integer-only input. A narrowly scoped `reportArgumentType` suppression is limited to the float-scale call; actual 300-DPI rendering is covered by integration tests. No blanket type suppression or cast is introduced.

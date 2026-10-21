@@ -9,7 +9,7 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
-The foundation, local evidence inventory, and native-PDF text increment are implemented: a Python package, offline synthetic tests, lint/type checks, deterministic monthly/annual filename selection, read-only source metadata, page-level native text and literal date checks, and a narrow native-field PDF feasibility demo. This is not yet an automated application-completion workflow. Foundry integration, governed fact extraction, OCR, flattened overlays, reviewer summaries, and packet assembly remain future increments.
+The foundation, local evidence inventory, native-PDF text, and opt-in local OCR experiment are implemented: a Python package, offline synthetic tests, lint/type checks, deterministic monthly/annual filename selection, read-only source metadata, page-level native text and literal date checks, single-page OCR, and a narrow native-field PDF feasibility demo. This is not yet an automated application-completion workflow. Foundry integration, governed fact extraction, integrated OCR validation, flattened overlays, reviewer summaries, and packet assembly remain future increments.
 
 The initial deliverable is a locally executed Python PoC using [blank forms](bd_agreements/Blank/) and [supporting documents](bd_agreements/supporting_data/) already in this repository. It calls a remote model through an approved Foundry endpoint, validates the results, and generates outputs locally; the model does not directly access the local folders. [Completed packets](bd_agreements/Completed/) support validated evaluation and wording precedent, not current factual authority. Network-drive mapping, cloud application hosting, Azure Blob document storage, and production integrations are deferred until the working PoC has been reviewed.
 
@@ -135,5 +135,62 @@ bd-packet evidence --root . \
 These are the defaults; source reads retain the inventory's 64 MiB limit. Limits must be positive integers. A limit violation aborts rather than publishing truncated evidence. Sources are rechecked after extraction and before/after output writing; detected mutation or I/O failure prevents publication and cleans staging. This is not an immutable archive, concurrent-filesystem isolation, or a hard wall-clock/memory sandbox for native PDF parsing.
 
 The explicit local run retained 195 PDF pages from 27 supporting files: 124 pages had usable native text and 71 did not. All six configured financial-document period checks stayed unverified; the three audited statements yielded labeled date observations but lacked complete native-text coverage. All 27 source hashes remained unchanged. OCR feasibility is needed before claiming complete coverage of these inputs.
+
+## Opt-in local OCR feasibility
+
+Tesseract is an optional **system dependency**, separate from the Python venv. No Python OCR wrapper, model SDK, or remote OCR service is needed. The experiment requires Tesseract 5.x and English trained data. Local validation used Tesseract 5.5.3; distribution-provided versions and trained data are not locked by the Python requirements files.
+
+On macOS:
+
+```bash
+brew install tesseract
+tesseract --version
+tesseract --list-langs
+```
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install tesseract-ocr tesseract-ocr-eng
+```
+
+Check that `eng` is listed and the `tesseract` executable is on `PATH`. Windows OCR setup has not been validated. Tesseract uses the Apache-2.0 license; retain applicable engine, trained-data, and dependency notices if redistributing.
+
+With the Python venv activated, explicitly choose **one** supporting PDF and one-based page:
+
+```bash
+bd-packet ocr --root . \
+  --source "bd_agreements/supporting_data/Focus_Reports/InspereXLLC_Aug2026_FocusReport-Public.pdf" \
+  --page 1
+```
+
+The command renders that page locally at 300 DPI, runs English Tesseract with page-segmentation mode 6 (single text block), and writes a unique `outputs/ocr-<run-id>/ocr.json`. The source must be in the read-only supporting-document inventory; blank/completed packets, non-PDFs, unreadable/encrypted sources, symlinks, and invalid pages are rejected. Source hashes are rechecked before and after output writing. The command does not modify the PDF or add a text layer.
+
+The result includes the source identity/hash, selected page, engine version, rendering hash/dimensions, text, and per-word bounding boxes and engine-confidence scores. Boxes use **rendered pixels from the top-left**, not PDF points; line grouping follows Tesseract's block/paragraph/line hierarchy, not reconstructed table cells. The temporary page image is removed after processing. The JSON contains potentially confidential text and remains local and Git-ignored. The console does not print page text or raw engine diagnostics.
+
+**OCR is unverified.** The output always carries `ocr_unverified` and `not_semantic_grounding`, and an empty recognition result adds `no_ocr_text`. It is separate from the native evidence bundle: no automatic OCR fallback, native-text replacement, quote-resolution integration, reporting-date promotion, or financial-value approval is implemented. A confidence score is not an accuracy percentage or approval threshold. Scans, table relationships, financial punctuation, handwriting, rotations, and layout require further evaluation.
+
+Optional positive-integer limits:
+
+```bash
+bd-packet ocr --root . \
+  --source "bd_agreements/supporting_data/Focus_Reports/InspereXLLC_Aug2026_FocusReport-Public.pdf" \
+  --page 1 --timeout-seconds 30 --max-pixels 20000000 --max-output-bytes 4000000
+```
+
+These are the defaults. The timeout applies to each Tesseract process; the pixel limit is checked before rendering, and engine output size is checked before parsing. Output is spooled to a temporary file rather than accumulated in memory during the process. This is not a hard temporary-disk quota or a timeout/memory sandbox around PDFium rendering. Limits, malformed output, engine errors, and timeouts fail explicitly without publishing a successful run; working files are cleaned up on normal exceptions. Missing Tesseract does not affect native extraction or default tests.
+
+### OCR verification and limits
+
+Default tests mock the engine boundary for deterministic safety/error contracts. Explicitly run real recognition against a generated **image-only synthetic PDF**, without business documents:
+
+```bash
+BD_RUN_OCR=1 python -m pytest tests/integration/test_ocr.py -m ocr -v
+```
+
+The local fixture recovered 6/6 exact target strings on one clean synthetic page: a heading, date, decimal financial value, leading-zero identifier, and two simple labeled numeric rows including parentheses. This is a small feasibility case, **not** a corpus accuracy or table-reconstruction metric. The Linux CI job installs Tesseract and runs this opt-in test; macOS CI retains the default synthetic contract suite. The added CI step must be verified on GitHub after pushing.
+
+An explicit local run on page 1 of the August 2026 FOCUS report produced 551 OCR words; 128 had engine confidence below 80. This is diagnostic output only, not a measured error count: that business page has no independently annotated accuracy result. Its source hash remained unchanged. No documents were uploaded or submitted to a model.
 
 See the [foundation decision record](docs/decisions/0001-local-foundation.md) for library choices, verified behavior, and remaining work.

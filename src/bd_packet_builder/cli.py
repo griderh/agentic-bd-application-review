@@ -17,6 +17,7 @@ from bd_packet_builder.evidence import (
     publish_evidence,
 )
 from bd_packet_builder.inventory import InventoryError, build_inventory, publish_inventory
+from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
 
 
@@ -57,6 +58,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=defaults.max_chars_per_run,
         help="Positive extracted character limit per run (default: %(default)s)",
     )
+    ocr = commands.add_parser("ocr", help="Opt-in single supporting PDF page OCR; unverified")
+    ocr.add_argument("--root", type=Path, required=True)
+    ocr.add_argument("--source", type=Path, required=True, help="Root-relative supporting PDF")
+    ocr.add_argument("--page", type=int, required=True, help="One-based PDF page")
+    ocr_defaults = OcrLimits()
+    ocr.add_argument("--timeout-seconds", type=int, default=ocr_defaults.timeout_seconds)
+    ocr.add_argument("--max-pixels", type=int, default=ocr_defaults.max_pixels)
+    ocr.add_argument("--max-output-bytes", type=int, default=ocr_defaults.max_output_bytes)
     args = parser.parse_args(argv)
     try:
         if args.command == "inspect":
@@ -87,15 +96,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{flagged} needing review. Review confidential local bundle: "
                 f"{result / 'evidence.json'}"
             )
+        elif args.command == "ocr":
+            result = run_ocr(
+                args.root,
+                args.source,
+                args.page,
+                limits=OcrLimits(args.timeout_seconds, args.max_pixels, args.max_output_bytes),
+            )
+            print(f"Unverified local OCR only, not approved answers: {result / 'ocr.json'}")
         else:
             result = create_demo(args.root, args.source)
             print(f"Synthetic demo only, not a completed application: {result}")
-    except (PdfDemoError, InventoryError, EvidenceError) as error:
-        label = args.command.capitalize() if args.command in ("inventory", "evidence") else "PDF"
+    except (PdfDemoError, InventoryError, EvidenceError, OcrError) as error:
+        label = (
+            args.command.capitalize() if args.command in ("inventory", "evidence", "ocr") else "PDF"
+        )
         print(f"{label} command rejected: {error}", file=sys.stderr)
         return 1
     except OSError:
-        label = args.command.capitalize() if args.command in ("inventory", "evidence") else "PDF"
+        label = (
+            args.command.capitalize() if args.command in ("inventory", "evidence", "ocr") else "PDF"
+        )
         print(
             f"{label} I/O failed. Check the input exists and output folder is writable.",
             file=sys.stderr,

@@ -21,6 +21,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib", "--strict-markers"]
+markers = ["ocr: opt-in local Tesseract recognition with synthetic scanned documents"]
 
 [tool.ruff]
 target-version = "py312"
