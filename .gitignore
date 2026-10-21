@@ -208,6 +208,10 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Local PoC artifacts and operating-system metadata
+outputs/
+.DS_Store
+
 # PyPI configuration file
 .pypirc
 

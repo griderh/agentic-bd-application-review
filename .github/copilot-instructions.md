@@ -4,7 +4,7 @@
 
 - Read the [Phase 1 scope](../Broker-Dealer%20Packet%20Automation%20Phase%201%20Scoping%20Document.md) and [development plan](../docs/development-plan.md) before changing behavior. The scope governs business requirements; the plan governs implementation sequencing. Surface conflicts rather than silently changing either.
 - Build a Python document-builder application with grounded model-assisted interpretation and deterministic document operations. Prefer one bounded workflow over autonomous or multi-agent complexity.
-- This repository is initially documentation and source documents, not an executable application. Do not invent existing commands, dependencies, services, or test results. Add exact setup and validation commands to the README when tooling is implemented.
+- The repository currently implements a local Python foundation, supporting-document inventory, native-PDF text/date evidence, and a narrow PDF demo, not the complete agent workflow. Use the README for actual setup and validation commands. Do not invent existing dependencies, services, capabilities, or test results; update commands when tooling changes.
 
 ## Test-driven development (TDD)
 

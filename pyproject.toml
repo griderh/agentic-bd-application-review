@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bd-packet-builder"
+version = "0.1.0"
+description = "Local broker-dealer packet builder proof of concept"
+requires-python = ">=3.12,<3.13"
+dynamic = ["dependencies"]
+
+[project.scripts]
+bd-packet = "bd_packet_builder.cli:main"
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib", "--strict-markers"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["pypdfium2", "pypdfium2.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+branch = true
+source = ["bd_packet_builder"]
+
+[tool.coverage.report]
+show_missing = true

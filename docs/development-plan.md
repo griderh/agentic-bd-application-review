@@ -26,7 +26,11 @@ Live interpretation requires endpoint reachability, approved credentials, and ap
 
 **Sequencing:** M0-M3 establish the working local PoC; M4 broadens local coverage and evaluation. M5-M6 are a deferred production roadmap, not PoC completion criteria. Begin production/network integration planning and implementation only after the business sponsor has reviewed the working PoC and agreed to proceed.
 
-This change creates documentation only. Python tooling, dependencies, application code, CI, Azure resources, model deployments, and electronic-signature integration are not yet implemented.
+Implementation has started with the [local foundation increment](decisions/0001-local-foundation.md): Python 3.12 tooling, offline synthetic tests, a deterministic monthly source-selection rule, and a narrow native-field PDF read/write/render demo. This does not complete M0 or the end-to-end PoC: SDK/framework and OCR/overlay choices remain open. No Azure application deployment, model integration, or signing integration has been implemented.
+
+The first M1 slice now adds a read-only supporting-document metadata inventory, source hashes/identities, PDF page counts, duplicate-content flags, monthly FOCUS and annual audited-financial filename selection, and version/page reference checks. The [README](../README.md#local-supporting-document-inventory) documents the runnable command and limits. This is a metadata snapshot, not an immutable source archive or approved fact sheet. Content-period verification, staleness policy, external/model contracts, fact extraction, consistency checks, and semantic evidence adequacy remain outstanding; M1 is not complete.
+
+A second M1 slice adds bounded native-PDF page text, exact-substring quote resolution, and narrow labeled reporting-date comparison against filename periods. The [evidence command](../README.md#native-pdf-text-and-reporting-date-evidence) writes confidential text only to local Git-ignored outputs. It preserves textless/error pages and does not promote incomplete coverage to verified evidence. The local corpus yielded native text on 124 of 195 PDF pages; all six financial-document period checks remain unverified. This establishes an OCR feasibility dependency, not a reason to infer missing dates or claim M1 complete. Governed facts, general financial extraction, semantic support, and broad date/layout interpretation remain outstanding.
 
 ## 2. Engineering decisions and remaining choices
 
@@ -34,14 +38,14 @@ There is no single universal agentic Python stack. The baseline is TDD, strong c
 
 | Area | Baseline or decision |
 | --- | --- |
-| Language | Python. Select a supported minor version in M0 after checking the chosen Foundry SDK, PDF/OCR libraries, hosting runtime, and local development compatibility; pin it explicitly |
+| Language | Python 3.12, initially validated with 3.12.13 and the selected native-PDF tools. Recheck compatibility when the Foundry SDK/framework, OCR approach, and production runtime are selected |
 | Dependency management | Standard-library `venv` plus pip. Commit version-pinned `requirements.txt` and `requirements-dev.txt`, including transitive dependencies; development requirements include runtime requirements. Use `pyproject.toml` for package metadata and tool configuration; no uv or separate lockfile tooling |
 | Quality tooling | pytest; Ruff for lint, imports, and format; strict mypy for application code; branch coverage reporting for deterministic rules |
 | Data contracts | Dataclasses for internal domain values; Pydantic for external inputs/configuration and model/tool responses; Protocol-based provider boundaries |
 | Orchestration | Explicit bounded workflow, one packet per run, deterministic state transitions; no multi-agent architecture unless an evidenced requirement justifies it |
 | Model integration | Foundry-backed adapter isolated from domain logic. Compare a thin supported SDK integration and Microsoft Agent Framework in M0; document compatibility, maintenance, preview risk, and the reason for the choice |
 | Model deployment | Configuration, not a hardcoded model name. Benchmark candidates on the model-selection set; reserve the final holdout for evaluation |
-| PDF/layout/OCR | Select through a representative feasibility spike; verify licenses, confidentiality, native field support, rendered placement, scanned pages, and deployment compatibility |
+| PDF/layout/OCR | Native-field feasibility uses pypdf and pypdfium2/PDFium, with Pillow for image handling; ReportLab creates synthetic test fixtures only. Flattened overlays/OCR and production compatibility remain open feasibility work |
 | First entry point | Local command using the repository's blank forms and supporting documents through configurable input/source/output paths; no network drive or chat interface required |
 | Production (deferred) | Foundry plus deterministic compute tools as scoped; compute host, network-drive/source-access pattern, private networking, and Teams/Copilot integration are later decisions after the working PoC is reviewed |
 | Electronic signing | Human electronic signing after review. DocuSign availability, issuer acceptance, and an approved alternative remain open; no automated signing integration assumed |
@@ -225,7 +229,7 @@ For each behavior:
 
 Keep PR checks offline and reproducible. Schedule or explicitly trigger paid/live evaluations against approved data; do not expose confidential inputs/results as ordinary GitHub Actions artifacts. Measure branch coverage to find gaps, but do not equate an arbitrary coverage percentage with correctness. All critical rules need explicit positive and negative assertions.
 
-Documentation-only changes require link/content and whitespace review, not an application test run. Exact executable commands are added when M0 establishes tooling; the roadmap must not imply they exist today.
+Documentation-only changes require link/content and whitespace review, not an application test run. Exact executable setup, validation, and native-PDF demo commands are documented in the [README](../README.md); later milestone commands must not be implied to exist before implementation.
 
 ## 6. Decisions and business inputs to close
 
