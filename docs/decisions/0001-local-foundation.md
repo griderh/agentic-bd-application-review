@@ -78,3 +78,15 @@ TDD observed the missing module before implementation. Contracts cover source/pa
 A local FOCUS page produced 551 words, 128 below engine confidence 80; no independent transcript exists to turn those scores into accuracy. The source hash remained unchanged. Default tests do not require Tesseract; an added Linux CI step installs it and executes the real synthetic recognition test. Remote CI verification remains pending the next push.
 
 PDFium's runtime documentation accepts float render scale, but its untyped `scale=1` default causes Pylance to infer integer-only input. A narrowly scoped `reportArgumentType` suppression is limited to the float-scale call; actual 300-DPI rendering is covered by integration tests. No blanket type suppression or cast is introduced.
+
+## Follow-on: application-driven contracts
+
+Use the already planned Pydantic boundary for untrusted application interpretation and answer proposals. Pydantic 2.14.1 supports Python >=3.10; its required core is pinned to 2.50.1, with annotated-types 0.8.0, typing-inspection 0.4.4, and typing_extensions 4.16.0 pinned in runtime requirements. Fresh Python 3.12 installation and focused contracts tests were verified. No additional framework or model SDK is introduced.
+
+Keep application requirements separate from answer proposals so a proposed value cannot override the issuer's expected type, financial unit, or requested period. Preserve the actual instruction, application hash/page, and signer role. Require typed values and resolvable native quotations rather than accepting a citation string or confidence score as proof. Unknown extra fields and unintended scalar coercion fail schema validation. A regression caught Pydantic's literal-version comparison accepting `true` and `1.0` as version 1 even under strict configuration; an explicit integer-type check now rejects them.
+
+Money crosses JSON as a bounded plain decimal string with explicit units and converts to `Decimal`, never binary float. String identifiers preserve leading zeros. False and zero are valid sourced proposals, not substitutes for missing evidence. Proposed attachments identify sources, not arbitrary paths or delivery actions.
+
+Schema validity and literal quote resolution never approve a value. All check results leave `fill_value` unset, with explicit source approval, semantic support, and application interpretation still unverified. Reporting-period claims are proposals only; no filename or model claim bypasses the observed filing/reporting-month ambiguity. Signature fields and signature dates defer to human signing. A technical source-change/I/O error propagates rather than being disguised as missing evidence.
+
+No new command, application parser, PDF field writer, fact sheet, OCR integration, or external payload logging is added. JSON Schemas are generated directly from the models rather than duplicated as hand-maintained files. Contract tests are synthetic/offline and demonstrate malformed payload rejection and non-approval, not model grounding quality. A real but unrelated quote is explicitly tested to remain unfillable.

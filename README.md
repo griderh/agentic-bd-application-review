@@ -193,4 +193,29 @@ The local fixture recovered 6/6 exact target strings on one clean synthetic page
 
 An explicit local run on page 1 of the August 2026 FOCUS report produced 551 OCR words; 128 had engine confidence below 80. This is diagnostic output only, not a measured error count: that business page has no independently annotated accuracy result. Its source hash remained unchanged. No documents were uploaded or submitted to a model.
 
+## Application requirements and answer proposals
+
+The [contracts module](src/bd_packet_builder/contracts.py) defines the offline boundary between application interpretation and future answer generation. It is a developer API, not a new CLI command or automated form reader. It does not extract application questions yet.
+
+- `ApplicationRequirements`: one application hash/version and unique requirement IDs. Each requirement retains the issuer instruction, one-based page, answer/attachment/signing kind, explicit financial units, optional requested reporting-period start/end, and optional required signer role. The supplied instruction and location remain unverified until checked against the actual application.
+- `AnswerProposal`: a requirement ID, explicit outcome, typed value, source/page/quote citations, optional claimed reporting period, and model confidence. A proposed answer requires citations and confidence. Missing/conflicting evidence, unreadable forms, unsupported requirements, unresolved signers, and signing deferrals require an explanation and no answer value.
+- Typed values: text, string identifiers preserving leading zeros, boolean, ISO date, explicit-unit money, or attachment source identity. Money uses a plain decimal string at the JSON boundary and exposes `Decimal` internally; floats, comma formatting, exponents, and non-finite values are rejected. Attachment proposals do not accept arbitrary file paths or destinations.
+- `check_proposal`: checks requirement identity, value kind/units, attachment citation identity, and exact native-text source/page/quote resolution through the existing read-only inventory. Unknown citations or altered quotes reject the proposal; source mutation and I/O failures remain technical exceptions. A requested period is compared to the proposal's claim, but neither a claim nor filename proves the actual reporting period.
+
+These frozen Pydantic contracts are strict, versioned, reject unknown fields, and generate JSON Schema using `model_json_schema()`. Use `model_validate_json()` for untrusted JSON; strict Python validation expects actual date/tuple types rather than coercing strings/lists. Resource/call/payload-byte limits remain the responsibility of the future adapter; collection/string bounds here are not a complete model budget.
+
+For example, a synthetic proposed money value has this shape:
+
+```json
+{"kind": "money", "amount": "1234.50", "unit": "USD"}
+```
+
+A citation identifies the inventory's path-and-content source ID and a one-based page, with `start`, `end`, and `quote` into normalized native text. The quote length must match the offsets and the resolver must find the exact text in the unchanged source. OCR and vision citations are not accepted through this native-text route. An attachment currently also requires a native-page citation; image/DOCX and textless attachment validation remain deferred.
+
+**No proposal is approved or fillable by this increment.** Check results are `rejected`, `unanswered`, `deferred_to_signing`, or `review_required`, and `fill_value` is always `None`. Even a real, exact citation retains explicit unverified semantic support, source approval, and application-requirement issues. Signer roles and requested reporting periods remain unverified; signatures and signature dates are always deferred to human signing. A true/false attestation can be proposed with evidence, but missing evidence never becomes a false answer.
+
+This deliberately separates a well-formed proposal from a grounded, approved answer. Approval, source governance, financial exact-value/consistency validation, semantic support evaluation, signer resolution, PDF placement, and the application-driven end-to-end workflow still need implementation. Do not bypass validation with Pydantic `model_construct()`/unchecked updates or log untrusted payloads/validation error structures; structured errors can still contain input data even though rendered validation messages hide inputs.
+
+Pydantic and its transitive dependencies are now pinned in the runtime requirements; rerun `python -m pip install -r requirements-dev.txt` in an existing venv. Python 3.12 compatibility and a fresh venv installation were validated. No Foundry SDK, endpoint, or model call is introduced.
+
 See the [foundation decision record](docs/decisions/0001-local-foundation.md) for library choices, verified behavior, and remaining work.

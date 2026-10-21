@@ -36,6 +36,8 @@ An approved [local Tesseract experiment](../README.md#opt-in-local-ocr-feasibili
 
 ## 2. Engineering decisions and remaining choices
 
+The offline [application-requirement and answer-proposal contracts](../README.md#application-requirements-and-answer-proposals) are now implemented using strict, versioned Pydantic schemas. They preserve issuer instructions/locations, requested periods, typed values/units, exact native-text citations, explicit unanswered outcomes, and signing prohibitions. A proposal checker resolves citations but always leaves values unfillable pending semantic support, source approval, and application validation; a model's reporting-period claim cannot verify a period. This does not implement application interpretation, governed facts, answer approval, or end-to-end filling. Foundry vision comparison remains deferred until the first approved endpoint integration; OCR remains separate and experimental.
+
 There is no single universal agentic Python stack. The baseline is TDD, strong contracts, a deterministic core, constrained model interactions, and measured evaluations.
 
 | Area | Baseline or decision |
