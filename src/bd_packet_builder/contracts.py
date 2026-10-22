@@ -16,7 +16,7 @@ from pydantic import (
 )
 
 from bd_packet_builder.evidence import EvidenceError, TextCitation, resolve_quote
-from bd_packet_builder.inventory import EvidenceReference, Inventory
+from bd_packet_builder.inventory import Inventory
 
 Nonblank = Annotated[str, StringConstraints(min_length=1, max_length=20_000, pattern=r"\S")]
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
@@ -178,6 +178,26 @@ class ProposalCheck:
     fill_value: None = None
 
 
+def check_native_citations(
+    root: Path, inventory: Inventory, citations: tuple[Citation, ...]
+) -> tuple[int, tuple[str, ...]]:
+    """Resolve exact native quotes; technical freshness/access errors propagate."""
+    issues: list[str] = []
+    resolved = 0
+    for citation in citations:
+        source = next((s for s in inventory.sources if s.source_id == citation.source_id), None)
+        if source is None or source.page_count is None or citation.page > source.page_count:
+            issues.append("citation_unresolved")
+            continue
+        try:
+            resolve_quote(root, inventory, citation.text_citation())
+        except EvidenceError:
+            issues.append("citation_quote_mismatch")
+        else:
+            resolved += 1
+    return resolved, tuple(dict.fromkeys(issues))
+
+
 def check_proposal(
     root: Path, inventory: Inventory, requirement: Requirement, proposal: AnswerProposal
 ) -> ProposalCheck:
@@ -202,19 +222,8 @@ def check_proposal(
             citation.source_id == proposal.value.source_id for citation in proposal.citations
         ):
             issues.append("attachment_source_not_cited")
-    resolved = 0
-    for citation in proposal.citations:
-        source = next((s for s in inventory.sources if s.source_id == citation.source_id), None)
-        if source is None or source.page_count is None or citation.page > source.page_count:
-            issues.append("citation_unresolved")
-            continue
-        EvidenceReference(citation.source_id, citation.page)
-        try:
-            resolve_quote(root, inventory, citation.text_citation())
-        except EvidenceError:
-            issues.append("citation_quote_mismatch")
-        else:
-            resolved += 1
+    resolved, citation_issues = check_native_citations(root, inventory, proposal.citations)
+    issues.extend(citation_issues)
     if issues:
         return ProposalCheck(identity, "rejected", tuple(dict.fromkeys(issues)), resolved)
     if proposal.outcome != "proposed":

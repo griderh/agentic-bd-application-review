@@ -5,6 +5,7 @@ import json
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 
 from pypdf.errors import PdfReadError
@@ -16,9 +17,12 @@ from bd_packet_builder.evidence import (
     extract_evidence,
     publish_evidence,
 )
+from bd_packet_builder.fact_sheet import FactSheetError, run_fact_sheet_check
+from bd_packet_builder.history import HistoryError, run_history_check
 from bd_packet_builder.inventory import InventoryError, build_inventory, publish_inventory
 from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
+from bd_packet_builder.poc import initialize_poc, run_poc
 from bd_packet_builder.review import ReviewError, run_review
 
 
@@ -76,9 +80,60 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     review.add_argument("--requirements", type=Path, required=True, help="JSON under outputs/")
     review.add_argument("--proposals", type=Path, required=True, help="JSON under outputs/")
+    fact_sheet = commands.add_parser(
+        "fact-sheet-check", help="Check a local draft; never approve, release or fill facts"
+    )
+    fact_sheet.add_argument("--root", type=Path, required=True)
+    fact_sheet.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="Draft .xlsx under outputs/ (internal .json supported)",
+    )
+    fact_sheet.add_argument("--as-of", required=True, help="Explicit validation date YYYY-MM-DD")
+    setup = commands.add_parser(
+        "poc-init", help="Create the one maintained workbook once; no facts"
+    )
+    setup.add_argument("--root", type=Path, required=True)
+    poc = commands.add_parser(
+        "poc", help="Read maintained workbook; validate intake, no packet yet"
+    )
+    poc.add_argument("--root", type=Path, required=True)
+    poc.add_argument("--as-of", help="Evaluation date YYYY-MM-DD (default: local date today)")
+    history = commands.add_parser(
+        "history-check", help="Check manually supplied historical pairs; no retrieval or filling"
+    )
+    history.add_argument("--root", type=Path, required=True)
+    history.add_argument(
+        "--manifest", type=Path, required=True, help="Partition JSON under outputs/"
+    )
+    history.add_argument("--comparisons", type=Path, required=True, help="Pair JSON under outputs/")
     args = parser.parse_args(argv)
     try:
-        if args.command == "inspect":
+        if args.command == "history-check":
+            result = run_history_check(args.root, args.manifest, args.comparisons)
+            print(
+                "Historical review only, no packet or replacements: "
+                f"{result / 'history-check.json'}"
+            )
+        elif args.command == "poc-init":
+            path = initialize_poc(args.root)
+            print(f"Setup complete. The only workbook to maintain: {path}")
+        elif args.command == "poc":
+            as_of_text = args.as_of or date.today().isoformat()
+            try:
+                as_of = date.fromisoformat(as_of_text)
+            except ValueError:
+                raise FactSheetError("Validation as-of date must be YYYY-MM-DD") from None
+            if as_of.isoformat() != as_of_text:
+                raise FactSheetError("Validation as-of date must be YYYY-MM-DD")
+            result = run_poc(args.root, as_of=as_of)
+            print(
+                f"PoC intake checked. No packet or answers generated. "
+                f"Validation results: {result / 'validation.html'}. "
+                "Continue editing the same workbook under outputs/maintained/."
+            )
+        elif args.command == "inspect":
             print(json.dumps(asdict(inspect_pdf(args.source))))
         elif args.command == "inventory":
             snapshot = build_inventory(args.root)
@@ -121,13 +176,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Internal review only, no packet: {len(data['items'])} requirements. "
                 f"Review report: {result / 'review.json'}"
             )
+        elif args.command == "fact-sheet-check":
+            try:
+                as_of = date.fromisoformat(args.as_of)
+            except ValueError:
+                raise FactSheetError("Validation as-of date must be YYYY-MM-DD") from None
+            if as_of.isoformat() != args.as_of:
+                raise FactSheetError("Validation as-of date must be YYYY-MM-DD")
+            result = run_fact_sheet_check(args.root, args.source, as_of=as_of)
+            data = json.loads((result / "fact-sheet-check.json").read_text(encoding="utf-8"))
+            print(
+                f"Draft validation only, not approved: {len(data['items'])} facts, "
+                f"{data['facts_with_exceptions']} with exceptions. "
+                f"Excel fact sheet: {result / 'fact-sheet.xlsx'}. "
+                f"Internal report: {result / 'fact-sheet-check.json'}"
+            )
         else:
             result = create_demo(args.root, args.source)
             print(f"Synthetic demo only, not a completed application: {result}")
-    except (PdfDemoError, InventoryError, EvidenceError, OcrError, ReviewError) as error:
+    except (
+        PdfDemoError,
+        InventoryError,
+        EvidenceError,
+        OcrError,
+        ReviewError,
+        FactSheetError,
+        HistoryError,
+    ) as error:
         label = (
             args.command.capitalize()
-            if args.command in ("inventory", "evidence", "ocr", "review")
+            if args.command
+            in (
+                "inventory",
+                "evidence",
+                "ocr",
+                "review",
+                "fact-sheet-check",
+                "poc",
+                "poc-init",
+                "history-check",
+            )
             else "PDF"
         )
         print(f"{label} command rejected: {error}", file=sys.stderr)
@@ -135,7 +223,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError:
         label = (
             args.command.capitalize()
-            if args.command in ("inventory", "evidence", "ocr", "review")
+            if args.command
+            in (
+                "inventory",
+                "evidence",
+                "ocr",
+                "review",
+                "fact-sheet-check",
+                "poc",
+                "poc-init",
+                "history-check",
+            )
             else "PDF"
         )
         print(

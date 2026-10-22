@@ -14,7 +14,7 @@ The immediate development deliverable is a working proof of concept (PoC) runnin
 | --- | --- |
 | [Blank issuer forms](../bd_agreements/Blank/) | Application inputs; choose a supported PDF form for the first end-to-end run |
 | [Supporting documents](../bd_agreements/supporting_data/) | Read-only evidence and attachments, with explicit source provenance and period selection |
-| [Completed packets](../bd_agreements/Completed/) | Human-validated comparison/evaluation and permitted development precedent for wording only; never current factual authority or held-out answer input |
+| [Completed packets](../bd_agreements/Completed/) | Explicit reference partition for wording/historical discrepancy checks, separate held-out evaluation partition; never current factual authority or held-out answer input |
 
 Use configurable repository-relative paths, resolved from an explicit repository/data root rather than the caller's working directory. Preserve these inputs unchanged. Write generated packets, reviewer summaries, manifests, and evaluation results to a separate configured, Git-ignored local output location. Maintain dataset partitions so completed holdout packets cannot leak into the answering workflow.
 
@@ -35,6 +35,26 @@ A second M1 slice adds bounded native-PDF page text, exact-substring quote resol
 An approved [local Tesseract experiment](../README.md#opt-in-local-ocr-feasibility) now renders and recognizes one explicitly selected supporting PDF page. Tesseract is an optional system dependency; OCR output remains separate and unverified, with source/page provenance, rendered-pixel word boxes, engine confidence, and explicit limits/failures. One clean synthetic scanned page recovered 6/6 target strings; a local FOCUS page produced text but has no annotated accuracy result. Automatic fallback, OCR quote validation, financial/table accuracy, rotation/handwriting coverage, and integration into period/answer checks remain outstanding. This is a feasibility candidate, not the final production OCR decision or completion of M0/M1.
 
 ## 2. Engineering decisions and remaining choices
+
+### Latest direction: evidence-first extraction and conversational revisions
+
+This decision supersedes the workbook-maintenance and separate fact-sheet approval proposals recorded below. The user wants minimal human involvement: extract application-needed facts from approved independent supporting documents, validate current proposals, and ask humans only about exceptions plus final packet review/signing. Do not require a human to populate identity or financial facts in a parallel workbook. An Excel view is optional inspection/export; machine-readable snapshots, evidence and correction history belong in a separate internal JSON archive, without generating new Excel files per run.
+
+Add the scoped reviewer-revision capability (FR19): target a packet/base version and answer, clarify ambiguity, distinguish supported factual edits from wording changes and reviewer-only assertions, revalidate/regenerate affected outputs, preserve prior versions, and return a change summary. No separate auditor, automatic source mutation, global fact updates from packet-specific edits, signing or issuer delivery is introduced. Foundry/Microsoft 365 Copilot is an eventual conversation/deployment candidate, not an offline development prerequisite.
+
+**Implemented in this increment:** strict `ArchiveManifest` / `HistoryRequest` contracts, an explicit Completed-PDF reference/evaluation allowlist, hash/version and native quote checks, conservative context/value comparisons, and a developer-only `history-check` JSON report. The reference reader never extracts evaluation text; identical PDF bytes cannot cross declared partitions or enter current supporting evidence during this check. Only supplied pairs are checked; differences flag review and never replace a current answer. The existing support inventory still supplies current evidence independently.
+
+**Not implemented:** automated historical retrieval/question mapping, evidence-backed fact extraction, narrative support evaluation, chat correction/packet regeneration, derivative-lineage enforcement or production authorization. Manual partition assignment must be trusted and access-controlled; exact hashes do not detect reformatted copies or answer-bearing derivatives. Existing workbook intake commands remain earlier prototypes, not target prerequisites. See the [current workflow and precise limits](evidence-review-workflow.md). M1 and the end-to-end PoC remain incomplete.
+
+### Earlier implementation decisions (retained history)
+
+The first [governed fact-sheet draft increment](fact-sheet-workflow.md) now defines strict identity/signer-role records, owner and review/effectiveness metadata, exact native evidence citations, and draft version labels/hashes. A local validator reports missing/invalid evidence, date exceptions, annual-review scheduling violations, and overlapping/conflicting records without selecting a winner or making facts fillable. A self-contained synthetic demo creates its own inputs. This is not authenticated approval, immutable release/version history, or a released-fact reader; those controls still require a named business steward/approver, permissions, and implementation. Financial facts/disclosures, automated updates, signer resolution and model integration remain outside this increment. M1 remains incomplete.
+
+The agreed business-facing deliverable for this increment is now an **editable Excel workbook**, not a manually maintained JSON file. The demo creates Excel inputs and outputs; the validator imports human-entered values/evidence and publishes a workbook with dated checks, plus internal JSON diagnostics. Business users supply supporting paths/pages/quotes, not hashes or character offsets. Excel editing and successful validation do not grant approval. Controlled approval/release remains deferred.
+
+**Subsequent ownership decision:** the business owner maintains and checks the fact sheet without a separate auditor or second-person fact-sheet approval. This supersedes the distinct steward/reviewer/approver workflow proposed above for fact-sheet maintenance. The owner may also be the recorded reviewer. Business maintainers only edit/check/save Excel; a technical operator runs the local validation commands until automatic application intake exists. Future intake must authorize the designated workbook through controlled access and record the exact version/record/value used in answers. Plausible source-data typos may pass validation and remain the owner's responsibility; conflicting evidence still produces exceptions. Packet signatory review is unchanged. Current drafts remain unfillable until the missing technical intake/grounding controls are implemented.
+
+**Implemented local workflow correction:** `poc-init` creates one blank `outputs/maintained/fact-sheet.xlsx` without overwriting an existing workbook. `poc --root .` always reads that file and validates during intake; operators no longer choose a source or run a separate validator. The owner keeps editing the same file. Exact input snapshots, internal diagnostics and a readable HTML report are published separately per run; no competing maintained workbook is generated. Synthetic generation and the legacy workbook round-trip command are developer-only tools. This brings the single-workbook interaction forward from the production roadmap; production permissions/retention, GUI launch, packet generation and answer-level provenance remain outstanding.
 
 The [local review harness](../README.md#local-requirementproposal-review) now exercises the contracts with a selected blank PDF and manually prepared requirements/proposals. It verifies application hash/page bounds, resolves native citations, reports every supplied requirement (including missing proposals), and publishes a separate internal diagnostic JSON with no fillable answers. Supplied-question coverage is not full-form detection, and this is not the scoped reviewer-summary PDF. Application interpretation and approved-answer generation remain future increments; there are no new model calls or OCR changes.
 
@@ -112,17 +132,19 @@ Requirements: FR1, FR4, FR7, FR10, FR11, FR15, FR16, FR18.
 
 Deliverables:
 
-- Define validated domain/tool schemas and a governed fact-sheet format with owner, review date, and source provenance.
+- Define validated domain/tool schemas and an application-derived fact register with source/version/page and reporting context. Do not require humans to maintain duplicate identity/financial data or per-fact owner/reviewer metadata.
 - Implement read-only source inventory and per-run source manifests, filename/period parsing, explicit requested-period matching, latest-applicable selection, and unresolved tie/unparseable outcomes.
 - Make staleness thresholds configurable; pending sponsor approval, represent scoped defaults explicitly rather than silently treating them as approved policy.
 - Implement evidence lookup, exact-value and cross-field consistency checks, and review-exception records. Keep prior packets separate from authoritative current evidence.
 - Enforce configured source/output boundaries, including traversal and symlink checks, and make restricted-tier access unavailable through tools.
+- Partition historical packets explicitly into permitted reference and held-out evaluation collections. Enforce reference access and duplicate-hash exclusions; keep derivatives/annotations out of model inputs via controlled dataset lineage. Start with a curated subset; unknown/unlisted content is not automatically reference material.
 
 Acceptance:
 
 - Parameterized tests cover competing periods, explicit unavailable as-of dates, stale sources, ties, missing files, malformed names, conflicting facts, invalid schemas, and disallowed paths.
 - Missing evidence produces a blank/flagged outcome; relevant nonmatching evidence can be identified without claiming the requirement is met.
 - All filled-value candidates have resolvable provenance; a fabricated source ID or unrelated citation is not accepted as grounding. Semantic evidence adequacy still requires evaluation in M3/M4.
+- Historical discrepancies are review flags, not current factual authority or ground truth. Unknown/mismatched issuer/question/period/signer contexts are incomparable; identical answers are not an accuracy pass. Test evaluation text exclusion and duplicate-content leakage independently of model quality.
 
 ### M2 - Deterministic local packet assembly
 
@@ -148,7 +170,7 @@ Acceptance:
 
 Dependencies: M2; a configured approved Foundry endpoint and source set for live model experiments. Offline contract tests remain available without them.
 
-Requirements: FR1-FR12, FR15-FR18.
+Requirements: FR1-FR12, FR15-FR19.
 
 Deliverables:
 
@@ -156,6 +178,8 @@ Deliverables:
 - Build the local end-to-end command: intake, source snapshot, interpretation, validation, filling, consistency/render checks, assembly, summary, archive, and explicit final status.
 - Bound calls, tokens, elapsed time, and retries; validate outputs before deterministic tools run. Record model/prompt/schema versions in the run manifest.
 - Treat legitimate issuer requirements as task data, while rejecting embedded attempts to override permissions or direct unrelated actions.
+- After current evidence-backed proposals exist, add bounded reference-only historical comparison; never use prior packets to fill missing current facts.
+- Add a bounded reviewer-revision operation against a packet/base version and answer IDs, before a hosted chat surface. Preserve evidence, distinguish reviewer assertions, revalidate/render affected outputs, keep unrelated answers unchanged, and return a versioned change summary. JSON records retain provenance without generating spreadsheet copies.
 
 Acceptance:
 
@@ -165,6 +189,7 @@ Acceptance:
 - Human evidence review verifies the first live run's answers and rendered placement. Confidence or a second model's approval is not accepted as proof of correctness.
 - A reviewer can repeat the PoC using documented local setup, data-path configuration, and execution commands, without any mapped network drive, storage synchronization, deployed application host, or production notification service. Local output paths and status provide the review handoff.
 - Present the working PoC and its known gaps to the business sponsor before starting the deferred production/network integration work. M4 can continue locally without that integration.
+- Test correct revision targets, missing/ambiguous references, unsupported factual requests, stale base versions, repeated/idempotent requests, failed publication recovery, and unchanged signatures/date prohibitions. Human-only assertions cannot become document-supported answers.
 
 ### M4 - Broader coverage and repeatable evaluation
 
@@ -188,6 +213,8 @@ Acceptance:
 - Present pilot-size limitations, unresolved gaps, runtime/cost, and reviewer-time baseline. Do not claim universal zero hallucinations from a finite test set.
 
 ### M5 - Deferred production integrations and operational hardening
+
+**Evidence/review production handoff requirement (supersedes maintained-workbook handoff):** configure access-controlled supporting evidence and separate reference/evaluation archives, plus internal JSON run/correction storage. Human-maintained Excel is not required; any Excel view is optional inspection/export, not a new workbook on every run. Enforce reviewer authorization, packet/base-version targeting, bounded evidence-backed revisions and visible change summaries through the eventual conversation surface. Keep issuer packets separate from confidential diagnostics and snapshots. Exclude synthetic artifacts and held-out answers/derivatives from production reference access. Review obsolete demo artifacts deliberately under retention policy rather than automatically deleting business records. Verify input identity, reference partitions, recovery/concurrency and reviewer-facing entry points before handover.
 
 Dependencies: sponsor review of the working local PoC and agreement to proceed, plus the relevant M4 regression suite for each integration and IT-approved infrastructure/access. Network-drive mapping and network/sync design belong here, not in M0-M4; they are not prerequisites for demonstrating the PoC.
 

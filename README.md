@@ -13,6 +13,12 @@ The foundation, local evidence inventory, native-PDF text, and opt-in local OCR 
 
 The initial deliverable is a locally executed Python PoC using [blank forms](bd_agreements/Blank/) and [supporting documents](bd_agreements/supporting_data/) already in this repository. It calls a remote model through an approved Foundry endpoint, validates the results, and generates outputs locally; the model does not directly access the local folders. [Completed packets](bd_agreements/Completed/) support validated evaluation and wording precedent, not current factual authority. Network-drive mapping, cloud application hosting, Azure Blob document storage, and production integrations are deferred until the working PoC has been reviewed.
 
+The offline foundation also includes strict requirement/proposal contracts, a manual-input review harness, and a fact-sheet **draft** validator. No fact-sheet approval, authorized release reader, or automatic application-answer generation is implemented.
+
+**Latest agreed direction:** answers will come from supporting-document evidence, with conversational reviewer corrections and exception-only human involvement. A human-maintained Excel workbook is no longer a required target input; Excel is optional inspection/export. Existing workbook commands remain earlier prototype tools, not the final user workflow. Automatic extraction and chat revisions are not implemented yet. See the [evidence/revision/archive workflow](docs/evidence-review-workflow.md).
+
+This increment adds explicit historical **reference versus evaluation** partitions and offline, manually supplied discrepancy checks. Historical packets can flag differences or inform wording, never establish current facts. Held-out packets are excluded from the reference reader; copies with identical hashes cannot cross partitions. No real archive was automatically assigned to a split.
+
 Treat business samples and generated outputs as potentially confidential. Do not publish them, copy them into ordinary test fixtures, or upload them to model/OCR services without approved access. Use synthetic or sanitized fixtures for offline development and CI.
 
 ## Local setup
@@ -270,5 +276,75 @@ The command publishes a unique `outputs/review-<run-id>/review.json` containing:
 **This is an internal diagnostic JSON report, not the scoped reviewer-summary PDF or a completed packet.** Coverage is explicitly limited to supplied requirements. All `fill_value` fields remain null; a successful command means the report was saved, not that its answers passed review. No PDF is filled, merged, approved, signed, or submitted. The input PDF is preserved even when it is unreadable; in that case the command fails explicitly rather than claiming a report/completed packet.
 
 The application/JSON versions and inventoried supporting sources are rechecked around atomic publication; detected changes or I/O failures prevent a successful published report and clean staging on normal exceptions. This is not immutable archiving or a filesystem isolation boundary. No human source-approval workflow, semantic support decision, per-field placement, automatic requirement extraction, OCR citation support, or model adapter is added. Different issuer questions are data, not new hardcoded question lists.
+
+## Offline historical-reference checks
+
+Run the self-contained synthetic tests (no real archive inputs or model access):
+
+```bash
+.venv/bin/python -m pytest tests/integration/test_history.py -q
+```
+
+The [workflow guide](docs/evidence-review-workflow.md) documents strict schemas, partition trust/limitations, and the developer-only `history-check` command for manually prepared JSON pairs. It writes internal JSON only, never Excel or a packet, and never replaces current answers with historical values. Exact quote resolution or matching old answers is not proof of correctness.
+
+## Earlier Excel fact-sheet prototype (retained, not the target workflow)
+
+**Superseded design:** the following commands still work as implemented, but a maintained workbook is not required by the agreed evidence-first target. They do not implement model extraction or conversational corrections. Do not populate a parallel spreadsheet merely to make progress on the target workflow.
+
+### Earlier prototype workflow: one maintained workbook
+
+**Edit only `outputs/maintained/fact-sheet.xlsx`.** Save your changes, then run the PoC. It reads that exact workbook each time; it does not search demo outputs or regenerate facts. The business owner edits/checks/saves Excel, with no code or separate auditor required.
+
+One-time **technical setup** (refuses to overwrite an existing workbook):
+
+```bash
+bd-packet poc-init --root .
+```
+
+This creates a blank template, not synthetic business facts. Fill in `Details > steward` and at least one row in Facts, with evidence in Evidence as available. An incomplete template is rejected rather than counted as a successful run.
+
+**PoC entry point**, run by the local operator after saving Excel:
+
+```bash
+bd-packet poc --root .
+```
+
+Evaluation defaults to today's local date; operators can supply `--as-of YYYY-MM-DD` for reproducible checks. Intake validates the workbook automatically. The command prints a link/path to **`validation.html`**, showing per-record exceptions. A zero exit status means validation results were saved, not that all facts are correct or that a packet was generated.
+
+Continue editing the same maintained file after every run. The application never overwrites it, and its Checks sheet is not refreshed. Read the separate HTML results instead. Exact input bytes are archived as `input.snapshot.xlsx` beside internal `fact-sheet-check.json` and `validation.html` under unique `outputs/fact-sheet-check-<run-id>/` directories. Those are internal run records, not alternate current workbooks; no `fact-sheet.xlsx` is generated there by `poc`.
+
+**Current limit:** this PoC entry point implements fact-sheet intake and validation only. Model interpretation, answer generation, packet assembly and answer-level fact-sheet provenance are not yet implemented. This provides the intended single-workbook interaction now without pretending the end-to-end packet workflow exists.
+
+### Developer-only Excel round-trip experiment
+
+A fact sheet records recurring firm information with an owner, review dates, effective dates, and supporting evidence. The first [draft schema and validator](src/bd_packet_builder/fact_sheet.py) cover firm identity and named signer roles only. Real financial extraction, disclosures, contact delivery, and approved release management remain deferred.
+
+The business-facing deliverable is **`fact-sheet.xlsx`**, not JSON. Business users edit the **Facts**, **Details**, and **Evidence** sheets in Excel. **Instructions** explains the fields; **Checks** contains dated validation results, not approval. Identifiers are text-formatted to preserve leading zeros, with dropdowns for categories/value types. Source hashes are application-maintained in a hidden evidence column; users do not type offsets or JSON.
+
+**Ready-to-run synthetic demo**, with the development venv activated:
+
+```bash
+python examples/fact_sheet_demo.py
+```
+
+It creates its own fake source PDF and Excel draft under a unique local `outputs/` run, validates three facts, and reports one deliberately overdue review. It uses a fixed synthetic evaluation date and does not read real business documents. Open the **Excel file** printed by the script to inspect/edit values, evidence, and checks.
+
+**Manual-input usage template**, after preparing a draft under `outputs/`:
+
+```bash
+bd-packet fact-sheet-check --root . \
+  --source "outputs/fact-sheets/draft.xlsx" \
+  --as-of 2026-10-21
+```
+
+This checks schema, exact native evidence quotes, current effective dates, review dates/annual scheduling, and overlapping/conflicting versions of the same fact key. Missing evidence is visible, not invented. It preserves every supplied record and writes a **new Excel workbook** with updated checks, alongside an internal `fact-sheet-check.json` for application diagnostics. Never edit the JSON to maintain facts. A successful command means the files were saved, not that the draft was approved; all facts stay unfillable.
+
+When revalidating the synthetic demo, set `--root` to the printed run's `synthetic-root` directory and `--source` to the workbook path **relative to that root**. Do not move its evidence into the real supporting-data directory. Editing a workbook makes its existing Checks sheet stale until validation runs again. The input workbook is never overwritten.
+
+The business owner maintains and checks the workbook; **no separate auditor or second-person fact-sheet approval is required**. `Reviewed by` may be the same person as `Owner`. Business maintainers save Excel and do not run code or edit technical hashes. Normal PoC intake now validates automatically through `bd-packet poc`; the separate `fact-sheet-check` command and synthetic generator above are developer tools, not the maintenance workflow. A graphical launch/upload interface is not implemented.
+
+The owner is responsible for accurate source data. Mechanical checks cannot reliably detect a plausible typo. Future answers must trace to the exact workbook version/record/value used so a fact-sheet error can be identified rather than confused with a generation error. Conflicting evidence still requires an explicit exception, and packet signatories still review generated applications. The current validator does not generate answers or authorize filling. Controlled workbook access and input version tracking remain technical work, not a requirement for an additional human approver.
+
+See the [fact-sheet workflow guide](docs/fact-sheet-workflow.md) for the fields, exact date/conflict rules, validation limits, and proposed steward/domain-reviewer/approver responsibilities. Excel support uses pinned openpyxl, et-xmlfile, and defusedxml dependencies; no remote service is involved. After pulling dependency changes, install `requirements-dev.txt` in the development venv as described above.
 
 See the [foundation decision record](docs/decisions/0001-local-foundation.md) for library choices, verified behavior, and remaining work.
