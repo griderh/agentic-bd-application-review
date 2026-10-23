@@ -23,7 +23,17 @@ Identifier = Annotated[str, StringConstraints(min_length=1, max_length=128, patt
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 Unit = Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r"\S")]
 RequirementKind = Literal[
-    "text", "identifier", "money", "date", "boolean", "attachment", "signature", "signature_date"
+    "text",
+    "identifier",
+    "money",
+    "date",
+    "boolean",
+    "attachment",
+    "signature",
+    "signature_date",
+    "single_select",
+    "multi_select",
+    "narrative",
 ]
 
 
@@ -49,6 +59,23 @@ class ReportingPeriod(Contract):
         return self
 
 
+class ChoiceOption(Contract):
+    option_id: Identifier
+    label: Nonblank
+    instruction: Nonblank
+    write_in: bool = False
+
+
+class ChoiceGroup(Contract):
+    options: Annotated[tuple[ChoiceOption, ...], Field(min_length=2, max_length=100)]
+
+    @model_validator(mode="after")
+    def unique_options(self) -> Self:
+        if len({o.option_id for o in self.options}) != len(self.options):
+            raise ValueError("Choice option identities must be unique")
+        return self
+
+
 class Requirement(Contract):
     """An interpreted requirement; its issuer wording/location still needs validation."""
 
@@ -60,11 +87,14 @@ class Requirement(Contract):
     unit: Unit | None = None
     requested_period: ReportingPeriod | None = None
     required_signer_role: Nonblank | None = None
+    choices: ChoiceGroup | None = None
 
     @model_validator(mode="after")
     def units(self) -> Self:
         if (self.kind == "money") != (self.unit is not None):
             raise ValueError("Money requirements need explicit units; other kinds must omit units")
+        if (self.kind in ("single_select", "multi_select")) != (self.choices is not None):
+            raise ValueError("Choice requirements need options; other kinds must omit options")
         return self
 
 
@@ -118,8 +148,46 @@ class AttachmentValue(Contract):
     source_id: Sha256
 
 
+class ChoiceWriteIn(Contract):
+    option_id: Identifier
+    text: Nonblank
+
+
+class MultiSelectValue(Contract):
+    kind: Literal["multi_select"]
+    selected: Annotated[tuple[Identifier, ...], Field(min_length=1, max_length=100)]
+    write_ins: Annotated[tuple[ChoiceWriteIn, ...], Field(max_length=100)] = ()
+
+    @model_validator(mode="after")
+    def unique_selections(self) -> Self:
+        if len(set(self.selected)) != len(self.selected):
+            raise ValueError("Selected options must be unique")
+        if len({w.option_id for w in self.write_ins}) != len(self.write_ins):
+            raise ValueError("Option write-ins must be unique")
+        return self
+
+
+class SingleSelectValue(Contract):
+    kind: Literal["single_select"]
+    selected: Annotated[tuple[Identifier, ...], Field(min_length=1, max_length=1)]
+    write_ins: Annotated[tuple[ChoiceWriteIn, ...], Field(max_length=1)] = ()
+
+
+class NarrativeValue(Contract):
+    kind: Literal["narrative"]
+    value: Nonblank
+
+
 AnswerValue = Annotated[
-    TextValue | IdentifierValue | MoneyValue | DateValue | BooleanValue | AttachmentValue,
+    TextValue
+    | IdentifierValue
+    | MoneyValue
+    | DateValue
+    | BooleanValue
+    | AttachmentValue
+    | SingleSelectValue
+    | MultiSelectValue
+    | NarrativeValue,
     Field(discriminator="kind"),
 ]
 
@@ -222,6 +290,24 @@ def check_proposal(
             citation.source_id == proposal.value.source_id for citation in proposal.citations
         ):
             issues.append("attachment_source_not_cited")
+        if isinstance(proposal.value, (SingleSelectValue, MultiSelectValue)):
+            if requirement.choices is None:
+                issues.append("choice_structure_missing")
+            else:
+                options = {o.option_id: o for o in requirement.choices.options}
+                selected = set(proposal.value.selected)
+                write_ins = {w.option_id for w in proposal.value.write_ins}
+                if not selected <= options.keys():
+                    issues.append("unknown_choice_option")
+                if write_ins - selected:
+                    issues.append("choice_write_in_not_selected")
+                if any(key not in options or not options[key].write_in for key in write_ins):
+                    issues.append("choice_write_in_not_allowed")
+                if any(
+                    options[key].write_in and key not in write_ins
+                    for key in selected & options.keys()
+                ):
+                    issues.append("choice_write_in_missing")
     resolved, citation_issues = check_native_citations(root, inventory, proposal.citations)
     issues.extend(citation_issues)
     if issues:

@@ -118,6 +118,32 @@ def test_difference_is_a_review_flag_never_a_factual_replacement(history: tuple)
     assert (root / "outputs/comparisons.json").read_bytes() == before
 
 
+@pytest.mark.parametrize("kind", ["single_select", "multi_select"])
+def test_identical_choice_ids_do_not_prove_historical_option_equivalence(
+    history: tuple,
+    kind: str,
+) -> None:
+    root, manifest, request = history
+    requirement = request["requirements"]["requirements"][0]
+    requirement.update(
+        kind=kind,
+        choices={
+            "options": [
+                {"option_id": "one", "label": "One", "instruction": "Current option One"},
+                {"option_id": "two", "label": "Two", "instruction": "Current option Two"},
+            ]
+        },
+    )
+    value = {"kind": kind, "selected": ["one"], "write_ins": []}
+    request["proposals"]["proposals"][0]["value"] = value
+    request["comparisons"][0]["value"] = value
+    save(root, manifest, request)
+    item = run(root)["items"][0]
+    assert item["status"] == "not_comparable"
+    assert "historical_choice_mapping_unverified" in item["issues"]
+    assert item["fill_value"] is None
+
+
 @pytest.mark.parametrize(
     "change,issue",
     [

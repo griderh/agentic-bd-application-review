@@ -1,4 +1,4 @@
-"""Local-only command line entry points for the foundation increment."""
+"""Local workflows and an explicitly opted-in synthetic model connection test."""
 
 import argparse
 import json
@@ -8,9 +8,11 @@ from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
+from pydantic import ValidationError
 from pypdf.errors import PdfReadError
 from pypdfium2 import PdfiumError
 
+from bd_packet_builder.discovery import discover_requirements
 from bd_packet_builder.evidence import (
     EvidenceError,
     ExtractionLimits,
@@ -18,8 +20,10 @@ from bd_packet_builder.evidence import (
     publish_evidence,
 )
 from bd_packet_builder.fact_sheet import FactSheetError, run_fact_sheet_check
+from bd_packet_builder.foundry import FoundryConfig, FoundryError, run_foundry_smoke
 from bd_packet_builder.history import HistoryError, run_history_check
 from bd_packet_builder.inventory import InventoryError, build_inventory, publish_inventory
+from bd_packet_builder.local_inputs import LocalInputError
 from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
 from bd_packet_builder.poc import initialize_poc, run_poc
@@ -27,7 +31,7 @@ from bd_packet_builder.review import ReviewError, run_review
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Local PDF feasibility tools; no model calls")
+    parser = argparse.ArgumentParser(description="Local PDF tools; model smoke test is opt-in")
     commands = parser.add_subparsers(dest="command", required=True)
     inspect = commands.add_parser("inspect", help="Report PDF page/text-field counts, not values")
     inspect.add_argument("source", type=Path)
@@ -108,9 +112,66 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--manifest", type=Path, required=True, help="Partition JSON under outputs/"
     )
     history.add_argument("--comparisons", type=Path, required=True, help="Pair JSON under outputs/")
+    smoke = commands.add_parser("foundry-smoke", help="One paid synthetic-only model request")
+    smoke.add_argument("--root", type=Path, required=True)
+    smoke.add_argument("--endpoint", required=True, help="HTTPS Azure OpenAI /openai/v1 endpoint")
+    smoke.add_argument("--deployment", required=True)
+    smoke.add_argument(
+        "--allow-paid", action="store_true", help="Explicitly permit one paid request"
+    )
+    discovery = commands.add_parser(
+        "discover", help="Paid native-text discovery from one explicitly approved blank PDF"
+    )
+    discovery.add_argument("--root", type=Path, required=True)
+    discovery.add_argument("--source", type=Path, required=True, help="Root-relative blank PDF")
+    discovery.add_argument("--endpoint", required=True)
+    discovery.add_argument("--deployment", required=True)
+    discovery.add_argument(
+        "--checklist", type=Path, help="Independent local evaluation JSON under outputs/"
+    )
+    discovery.add_argument("--allow-paid", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.command == "history-check":
+        if args.command in ("foundry-smoke", "discover"):
+            try:
+                config = FoundryConfig(endpoint=args.endpoint, deployment=args.deployment)
+            except ValidationError:
+                raise FoundryError(
+                    "Invalid Azure v1 endpoint or deployment configuration"
+                ) from None
+            if args.command == "discover":
+                result = discover_requirements(
+                    args.root,
+                    args.source,
+                    config,
+                    allow_paid=args.allow_paid,
+                    checklist_path=args.checklist,
+                )
+                data = json.loads((result / "discovery.json").read_text(encoding="utf-8"))
+                print(
+                    f"Requirement discovery needs review; {len(data['findings'])} findings. "
+                    f"No answers or packet. Report: {result / 'discovery.json'}"
+                )
+                complete_evaluation = data["evaluation"] is None or (
+                    data["evaluation"]["covered"] == data["evaluation"]["total"]
+                )
+                return (
+                    0
+                    if (
+                        not data["page_issues"]
+                        and set(data["counts"]) == {"anchored"}
+                        and complete_evaluation
+                    )
+                    else 1
+                )
+            result = run_foundry_smoke(args.root, config, allow_paid=args.allow_paid)
+            data = json.loads((result / "foundry-smoke.json").read_text(encoding="utf-8"))
+            print(
+                f"Synthetic checks: {data['checks_passed']}/{data['checks_total']}. "
+                f"Not a packet or general grounding evaluation: {result / 'foundry-smoke.json'}"
+            )
+            return 0 if data["status"] == "synthetic_smoke_passed_not_packet" else 1
+        elif args.command == "history-check":
             result = run_history_check(args.root, args.manifest, args.comparisons)
             print(
                 "Historical review only, no packet or replacements: "
@@ -202,6 +263,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ReviewError,
         FactSheetError,
         HistoryError,
+        FoundryError,
+        LocalInputError,
     ) as error:
         label = (
             args.command.capitalize()
@@ -215,6 +278,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "poc",
                 "poc-init",
                 "history-check",
+                "foundry-smoke",
+                "discover",
             )
             else "PDF"
         )
@@ -233,6 +298,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "poc",
                 "poc-init",
                 "history-check",
+                "foundry-smoke",
+                "discover",
             )
             else "PDF"
         )

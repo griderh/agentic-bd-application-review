@@ -179,6 +179,9 @@ Each run produces two files: the packet, which is the deliverable, and a reviewe
 
 - The issuer's own forms, completed, in the issuer's order
 - Available support documents appended in the order of the issuer's checklist, selected under Section 6; missing or nonmatching evidence is identified in the internal summary
+- Treat single-choice groups, multiple-choice groups, and conditional "Other" write-ins as distinct response structures. Preserve each option's conditions and link write-ins to the selected option; validate visual groups and placement against rendered pages, not native-text order alone.
+- Prefer complete, readable narrative answers on the issuer's lines, with references to relevant appended evidence where appropriate. If the full response will not fit, place a question-labeled answer on a supplemental answers page and cross-reference it on the form, where issuer instructions permit. A supplemental answer is not a substitute for its supporting evidence. Never truncate an answer or shrink it below the validated readable size just to fit.
+- Resolve visible packet-page references from the final assembled submission order, separately from immutable internal source/version/page citations. Keep internal reviewer summaries out of that pagination and out of submission packets.
 - Signature and mandatory signature-date fields left blank for completion electronically at signing, with no other open fields except those flagged
 - A page index and bookmarks per section
 - Name pattern: `Issuer_PacketType_YYYY-MM-DD_RunID.pdf`

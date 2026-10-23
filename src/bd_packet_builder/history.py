@@ -220,6 +220,8 @@ def run_history_check(root: Path, manifest_path: Path, request_path: Path) -> Pa
             issues.append("unit_mismatch")
         if comparison.value.kind == "attachment":
             issues.append("attachment_comparison_unsupported")
+        if comparison.value.kind in ("single_select", "multi_select"):
+            issues.append("historical_choice_mapping_unverified")
         status = "not_comparable"
         if not issues and proposal is not None:
             same = proposal.value == comparison.value

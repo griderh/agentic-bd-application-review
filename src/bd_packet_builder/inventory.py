@@ -303,7 +303,16 @@ def publish_inventory(root: Path, inventory: Inventory) -> Path:
 
 def publish_json_run(
     root: Path,
-    kind: Literal["inventory", "evidence", "ocr", "review", "fact-sheet-check", "history-check"],
+    kind: Literal[
+        "inventory",
+        "evidence",
+        "ocr",
+        "review",
+        "fact-sheet-check",
+        "history-check",
+        "foundry-smoke",
+        "discovery",
+    ],
     payload: dict[str, object],
     inventory: Inventory,
     *,
@@ -311,7 +320,16 @@ def publish_json_run(
     write_artifacts: Callable[[Path], None] | None = None,
 ) -> Path:
     """Publish JSON and optional companion artifacts atomically in one local run."""
-    if kind not in ("inventory", "evidence", "ocr", "review", "fact-sheet-check", "history-check"):
+    if kind not in (
+        "inventory",
+        "evidence",
+        "ocr",
+        "review",
+        "fact-sheet-check",
+        "history-check",
+        "foundry-smoke",
+        "discovery",
+    ):
         raise InventoryError("Unsupported local output kind")
     root = root.resolve(strict=True)
     output = root / "outputs"

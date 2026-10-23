@@ -9,7 +9,7 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
-The foundation, local evidence inventory, native-PDF text, and opt-in local OCR experiment are implemented: a Python package, offline synthetic tests, lint/type checks, deterministic monthly/annual filename selection, read-only source metadata, page-level native text and literal date checks, single-page OCR, and a narrow native-field PDF feasibility demo. This is not yet an automated application-completion workflow. Foundry integration, governed fact extraction, integrated OCR validation, flattened overlays, reviewer summaries, and packet assembly remain future increments.
+The foundation, local evidence inventory, native-PDF text, opt-in local OCR experiment, opt-in synthetic Foundry connection test, and synthetic PDF-to-proposals experiment are implemented: a Python package, offline synthetic tests, lint/type checks, deterministic monthly/annual filename selection, read-only source metadata, page-level native text and literal date checks, single-page OCR, and a narrow native-field PDF feasibility demo. This is not yet an automated application-completion workflow. Real-document model interpretation, governed fact extraction, integrated OCR validation, flattened overlays, reviewer summaries, and packet assembly remain future increments.
 
 The initial deliverable is a locally executed Python PoC using [blank forms](bd_agreements/Blank/) and [supporting documents](bd_agreements/supporting_data/) already in this repository. It calls a remote model through an approved Foundry endpoint, validates the results, and generates outputs locally; the model does not directly access the local folders. [Completed packets](bd_agreements/Completed/) support validated evaluation and wording precedent, not current factual authority. Network-drive mapping, cloud application hosting, Azure Blob document storage, and production integrations are deferred until the working PoC has been reviewed.
 
@@ -35,7 +35,142 @@ python -m pip check
 
 On Windows, create the environment with `py -3.12 -m venv .venv` and activate it with `.venv\Scripts\Activate.ps1`, then use the same `python -m pip` commands. Windows execution has not yet been validated.
 
-Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for this increment.
+Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for the offline commands or tests.
+
+## Opt-in synthetic Foundry connection test
+
+The local application sends versioned instructions from [the connection module](src/bd_packet_builder/foundry.py), not from the Foundry playground. This experiment does **not** create a hosted agent or change the workbook workflow. It sends only a fixed fictional company, a leading-zero identifier, conflicting fictional phone numbers, and an adversarial document instruction. It never reads application, support, archive or Excel files.
+
+Use the authorized Azure CLI work-account sign-in (`az login` if needed). The identity needs an inference data-plane role on the model resource: **Cognitive Services OpenAI User** is the narrower OpenAI-specific choice; **Foundry User** is broader and has been verified for this development account. Ordinary Contributor management access alone is insufficient. Do not use resource keys or change permissions to bypass a failure.
+
+After local setup, explicitly authorize one paid request:
+
+```bash
+bd-packet foundry-smoke --root . \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --allow-paid
+```
+
+Endpoint and deployment are nonsecret configuration, not credentials. Each invocation requires `--allow-paid` and uses `AzureCliCredential` only, with a 10-second credential-process timeout and the `https://cognitiveservices.azure.com/.default` scope verified against this resource. It makes at most one Responses request, with SDK retries disabled, a 60-second HTTP timeout and 2,048 output tokens maximum (including reasoning). The HTTP timeout is not a hard total workflow deadline. The input is fixed and bounded; output size is checked locally as well. No tools, uploads, conversation state or real document payloads are supplied. `store=False` requests no stored Responses object; it is not a guarantee about service-level retention or monitoring. The deployment's tokens-per-minute allocation is **not** a spending cap.
+
+A completed call writes one internal `foundry-smoke.json` in a unique Git-ignored `outputs/foundry-smoke-.../` directory, never another spreadsheet. It records prompt/input/schema hashes, versions, requested limits, returned model and token usage, synthetic answers, and six deterministic checks: exact legal name/citation, exact identifier/citation, missing tax ID, conflicting phone numbers, blank signature and blank signing date. A failed check is recorded as failed and gives a nonzero exit code. Authentication, refusal, incomplete output, malformed output and technical failures produce an explicit error, not a successful report; retries must be deliberate.
+
+**Connection verified October 23, 2026:** after assigning resource-scoped Foundry User, the standard `openai.azure.com` endpoint and Cognitive Services token audience succeeded: **6/6 controlled synthetic checks**, with 429 input tokens and 82 output tokens (511 total). The response identified `gpt-6.1-sol`; management metadata separately confirmed deployment version `2026-09-29` in `centralus`. The originally supplied `services.ai.azure.com` endpoint still rejected the Responses request with HTTP 401, and the newer `ai.azure.com` token audience was rejected even for model-list metadata. Use the tested endpoint/scope above; no automatic hostname or credential fallback is implemented. This one synthetic result does not establish general grounding, PDF completion, narrative quality or zero hallucinations. No real documents were sent.
+
+## Synthetic PDF-to-proposals experiment
+
+A **proposal** is an untrusted model-suggested answer, including its typed value, source/page/quote references, claimed reporting period where relevant, or an explanation for leaving it unanswered. It is not permission to fill an application.
+
+From the repository root with development dependencies installed and the authorized CLI sign-in, explicitly run:
+
+```bash
+python -m examples.proposal_demo --root . \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --allow-paid
+```
+
+The [demo](examples/proposal_demo.py) creates four deterministic, fictional PDFs using the existing ReportLab development dependency: a blank questionnaire, company identity, conflicting contact record, and July financial report. You do not supply or maintain any test documents. It creates them beneath a unique Git-ignored `outputs/proposal-demo-.../synthetic-root/`, **never reads your real document folders**, and does not create Excel workbooks.
+
+The application:
+
+1. Inventories and extracts native text from the three generated supporting PDFs through the existing local code.
+2. Sends nine predefined requirements and that extracted evidence in **one** Responses request. Expected answers and evaluation results are never included in the model request. This is not automatic question discovery from the blank form.
+3. Requests a typed batch through [the proposal adapter](src/bd_packet_builder/proposals.py), then validates it against the existing `AnswerProposals` contract. The wire schema uses nondiscriminated `anyOf` for model API compatibility; application validation retains the discriminated value contract. Unknown/duplicate IDs and malformed values fail explicitly; missing proposals remain explicit missing-answer failures.
+4. Runs the existing [review checker](src/bd_packet_builder/review.py) against the blank application's hash and returned citations. Exact source/page/offset/quote checks are deterministic. All fill values remain null; literal quotes, model confidence and schema validity are not semantic approval.
+5. Separately scores nine controlled expectations: legal name and leading-zero CRD with supporting quotations; missing tax ID despite an adversarial instruction to invent one; conflicting phone numbers; September net capital requested but only July supplied (including an explanation of both periods); unresolved CCO; missing disclosure evidence rather than an invented “no”; and deferred signature/date.
+
+Each run preserves the generated PDFs, internal requirements/proposals JSON, `review.json`, and `proposal-evaluation.json` together. The evaluation report is under the synthetic root's unique `outputs/review-.../` directory, printed by the command. It records source/application hashes, prompt/input/schema hashes, model/deployment, limits, usage, every proposal/check, and assertion denominators. Failed behavioral assertions are published as failed with a nonzero exit code. Technical/contract failures publish no final demo directory; staging is cleaned. Repeated runs are isolated and never overwrite an earlier run.
+
+The shared connection boundary uses the same identity, `store=False`, timeout and no-retry behavior as the smoke test. This experiment allows up to **4,096 output tokens**, at most **64 KiB request JSON**, and **64 KiB parsed output**; native extraction is limited to 10 pages per document, 10,000 characters per page and 30,000 characters per run. An incomplete/refused response is an explicit failure, not a reason to silently retry or raise limits. These synthetic examples are not a general authorized upload interface.
+
+**Live observation, October 23, 2026:** one synthetic case passed **9/9 requirement assertions**: 2/2 supported values with exact citations, 5/5 review exceptions, and 2/2 signing deferrals. The request used 2,175 input and 1,781 output tokens (3,956 total). This is a small controlled evaluation, separate from offline contract tests; it does not establish general semantic grounding, zero hallucinations, real-document accuracy, complete form discovery or PDF placement. No completed packet was produced and no business documents were sent.
+
+## Real blank-form requirement discovery experiment
+
+The [native discovery command](src/bd_packet_builder/discovery.py) reads **one explicitly selected blank PDF**, never a supporting-document or completed-packet folder. Obtain approval to send that blank's contents to Foundry first; a public website download may still contain prefilled personal/business data. Inspect it locally before authorizing a call.
+
+```bash
+bd-packet discover --root . \
+  --source bd_agreements/Blank/Broward_County/BrokerDealerQuestionnaire.pdf \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --allow-paid
+```
+
+Unlike the synthetic proposal experiment, the model is **not given a hand-authored question list**. The command reads bounded native text and asks for exact question/label quotations, nearby section/question context, and candidate answer kinds. It makes at most one request per nonempty page, **five requests per run**, with 4,096 output tokens and a 60-second HTTP timeout per request, SDK retries disabled, and the shared 64 KiB JSON input/output bounds. Each request includes only the current page plus up to 2,000 characters from the previous page as continuation context. Source paths are confined to the blank tree; symlinks and concurrent source changes are rejected. `store=False` has the same retention caveat as the connection test.
+
+Each finding must resolve to an exact native-text span, within the section boundaries available from the returned contexts. Repeated quotations without unique context, invented quotations and duplicate same-kind actions are flagged rather than promoted. A boolean attestation and initials may legitimately share the same source statement as distinct action kinds. Money questions without interpreted units/periods are withheld rather than assigned guessed metadata. Empty/textless pages are reported as needing review, with no model call for that page. Encrypted/unreadable PDFs or technical/model failures produce an explicit failure, no final report and no automatic retry.
+
+The unique Git-ignored `outputs/discovery-.../discovery.json` contains the source hash, all findings and issues, candidate `ApplicationRequirements`, prompt/schema/input hashes, per-page usage and limits. The source PDF is unchanged. Candidate requirements remain **unapproved**: quotation existence does not validate meaning, answer kind, conditional dependencies, signer role, period interpretation, placement or completeness. No proposals, filled PDF, spreadsheet, supporting documents or historical references are involved in this command.
+
+For evaluation, an independent checklist can optionally be supplied with `--checklist outputs/.../checklist.json`. It must match the blank's SHA-256 and contain unique `anchor_id`, `page`, exact `quote`, and optional exact `context` entries under `anchors`. Prepare it **before** the live call. Checklist contents/expected results are never sent to the model. The report scores literal anchor coverage separately from discovery validity; unmatched findings are review candidates, not automatically invented questions. Exit status is nonzero for flagged pages/findings or uncovered evaluation anchors. Even a zero exit status would not mean a form is completely understood or approved.
+
+### Broward observation, October 23, 2026
+
+With explicit user approval, the five-page public blank was inspected locally: native text on all pages, no AcroForm fields, and no apparent applicant-filled answers in the extracted text. Preprinted issuer contact names are task context, not evidence about the applicant. An independent **82-anchor** checklist was stored locally outside Git and withheld from both model runs.
+
+| Run | Findings | Accepted literal anchors | Checklist coverage | Tokens |
+| --- | --- | --- | --- | --- |
+| Initial prompt v1 | 72 | 66; 2 duplicate-span actions and 4 ambiguous quotations flagged | 81/82 | 8,391 |
+| Deliberate prompt v2 rerun | 72 | 71; 1 ambiguous `Other` blank withheld | 82/82 | 8,961 |
+
+The initial report is preserved under its original validation rules. Synthetic regressions were added before fixing broad-context ambiguity and distinguishing checkbox attestations from signing actions on the same statement. Prompt v2 improved Yes/No classification and gave repeated follow-up questions exact preceding-question context. **Two runs / ten requests / 17,352 total tokens** were used; there were no automatic retries.
+
+**This is not 100% discovery accuracy.** The checklist counts source anchors (including conditions/options), not an exhaustive number of independently fillable fields; several anchors can match one compound finding. The second run still has an ambiguous `Other` blank, classified part of an open-ended narrative as boolean, and does not explicitly link cross-page conditional dependencies. Relative periods, eligibility conditions and signer context remain quoted, not fully structured executable rules. Section boundaries also depend on model-supplied context and are not a layout parser. All 71 accepted candidates still require semantic review before driving answer generation. No applicant answers or submission packet were generated, and no supporting or completed documents were sent.
+
+## Choice groups, write-ins, and narrative layout
+
+The strict [requirement/answer contracts](src/bd_packet_builder/contracts.py) now distinguish:
+
+| Answer kind | Contract |
+| --- | --- |
+| `single_select` | Explicit option identities and instructions; proposed answer selects exactly one |
+| `multi_select` | Explicit option identities; proposed answer selects one or more distinct options |
+| `narrative` | Complete supported prose, separate from its eventual placement |
+
+Each option has its own instruction/conditions and a `write_in` flag. Proposed `write_ins` link text to an `option_id`; unknown choices, duplicate selections, missing required write-ins, unselected write-ins and write-ins on options that do not allow them are rejected. Absence of a selected option does not establish a negative fact. Selecting an eligibility label does not validate its business conditions; evidence/citation/semantic checks remain mandatory, and **all proposal fill values remain null**. The model wire schema and strict application validation both support the new types. Historical choice comparisons remain unsupported until option mappings are independently verified.
+
+Native discovery prompt v3 can propose choice options/narratives instead of treating compound choices as plain text. It preserves candidate options in findings, but withholds choice findings from executable requirements with `choice_options_and_layout_need_interpretation`: text alone does not validate control geometry or grouped relationships. The earlier Broward discovery report remains unchanged; v3 is not claimed as a newly measured real-form discovery result.
+
+### Local Broward layout example
+
+From the repository root with development dependencies installed:
+
+```bash
+python -m examples.broward_response_layout --root .
+```
+
+This **offline** example reads only the previously inspected Broward blank and supports exactly its recorded SHA-256. It makes no model calls and does not read supporting/completed documents. It uses a developer-mapped subset, not an automatically learned template or a workbook the business must maintain:
+
+- Q1: three radio-button options with eligibility wording preserved.
+- Q2: twelve checkboxes across two columns; `other-instrument` and `other-agency` each own their text region.
+- Q11: the full two-sentence narrative question and its writable area, rather than a standalone boolean.
+
+The [layout validator](src/bd_packet_builder/layout.py) checks source version, instruction/option text, page dimensions, label text within visual regions, and option/write-in relationships. Coordinates are unrotated PDF points with bottom-left origin; rotated mappings fail explicitly. Rendered control appearance still needs visual verification; these checks do not automatically recognize bubbles/checkboxes, approve source facts or prove a whole form's coverage.
+
+Outputs go to one unique Git-ignored `outputs/broward-layout-.../` directory:
+
+- `response-layout.json`: the mapped subset and fictional narrative placement examples.
+- Original and annotated PNGs for pages 2 and 4, identifying controls, write-ins and narrative region.
+- `narrative-short-preview.pdf/.png`: a conspicuously synthetic one-page overlay preview of a readable inline answer and evidence reference.
+- `narrative-overflow-preview.pdf/.png`: a synthetic preview of a supplemental-answer redirect. The full overflow text remains in JSON; it is not truncated. A supplemental answer PDF is not generated by this example.
+
+These are **layout previews, not a completed application**. No applicant facts, signatures, dates or option marks are applied; the real blank remains unchanged. Manual inspection of the generated renders confirmed the three radio locations, twelve checkbox locations, separate write-in regions and Q11 narrative region. Automated synthetic PDF tests check the same contracts and actual narrative preview text placement without using the real business document as a test fixture.
+
+The [narrative planner](src/bd_packet_builder/responses.py) measures text using supplied font metrics, including evidence references, at a fixed size of at least 10 points and line spacing of at least font size + 2. It uses the full inline answer when it fits. Otherwise it returns a readable "See Supplemental Answers, Question ..., packet page ..." marker and preserves the complete answer plus evidence references for a supplement. If even the marker cannot fit, it fails explicitly; it never truncates or silently reduces font size. Inline-plus-supplement hybrid delivery is supported at this level (form marker plus complete supplemental answer), but automatic meaning-preserving short summaries are not generated.
+
+`PacketPagination` resolves 1-based page references from ordered form/supplement/evidence sections. It rejects missing/out-of-range/wrong-role references and does not accept reviewer-summary sections. Internal source/version/page citations remain unchanged. **The example uses hypothetical pagination** to demonstrate the rule; a real packet must supply the actual assembled order, paginate the full supplement, resolve references and verify final renders before publication. The helper alone does not verify PDF contents, source hashes or evidence support, and actual packet assembly remains unfinished.
+
+### Synthetic model evaluation for structured answers
+
+The existing fictional proposal demo has an opt-in extension:
+
+```bash
+python -m examples.proposal_demo --root . \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --structured-responses --allow-paid
+```
+
+This adds a documented eligibility category, a multi-select product list with a required Other description, and a short narrative to the original nine cases. One synthetic-only live call passed **12/12 requirement assertions**, including all three new response cases, exact citations and the existing exceptions/signing deferrals. Usage: 3,120 input + 2,544 output = **5,664 tokens**. The fixed 4,096 output-token ceiling, no-retry/explicit opt-in behavior and no-packet status are unchanged. The original nine-case demo remains the default. This does not measure real eligibility determination, general visual discovery, narrative quality or zero hallucinations; no additional real blank/evidence content was uploaded for this increment.
 
 ## Quality checks
 
