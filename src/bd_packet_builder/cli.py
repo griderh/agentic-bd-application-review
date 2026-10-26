@@ -27,6 +27,7 @@ from bd_packet_builder.local_inputs import LocalInputError
 from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
 from bd_packet_builder.poc import initialize_poc, run_poc
+from bd_packet_builder.retrieval import RetrievalError, run_targeted_retrieval
 from bd_packet_builder.review import ReviewError, run_review
 from bd_packet_builder.visual import map_visual
 
@@ -145,8 +146,55 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--reference", type=Path, help="Withheld local reference JSON under outputs/"
     )
     visual.add_argument("--allow-paid", action="store_true")
+    retrieval = commands.add_parser(
+        "retrieve", help="Requirement-driven evidence reading; no packet"
+    )
+    retrieval.add_argument("--root", type=Path, required=True)
+    retrieval.add_argument(
+        "--requirements", type=Path, required=True, help="Requirements JSON under outputs/"
+    )
+    retrieval.add_argument(
+        "--catalog", type=Path, help="Optional source-family catalog JSON under outputs/"
+    )
+    retrieval.add_argument(
+        "--plan",
+        type=Path,
+        help="Offline routing JSON under outputs/; otherwise paid model routing",
+    )
+    retrieval.add_argument(
+        "--cache",
+        type=Path,
+        help="Prior retrieval report under outputs/; unapproved native proposals only",
+    )
+    retrieval.add_argument("--endpoint")
+    retrieval.add_argument("--deployment")
+    retrieval.add_argument("--allow-paid", action="store_true")
+    retrieval.add_argument(
+        "--allow-ocr", action="store_true", help="Explicitly allow local Tesseract on sparse pages"
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "retrieve":
+            config = None
+            if args.endpoint or args.deployment:
+                if not args.endpoint or not args.deployment:
+                    raise RetrievalError("Specify both endpoint and deployment")
+                config = FoundryConfig(endpoint=args.endpoint, deployment=args.deployment)
+            result = run_targeted_retrieval(
+                args.root,
+                args.requirements,
+                catalog_path=args.catalog,
+                plan_path=args.plan,
+                config=config,
+                allow_paid=args.allow_paid,
+                allow_ocr=args.allow_ocr,
+                cache_path=args.cache,
+            )
+            print(
+                f"Targeted evidence is unapproved and needs review; no packet. "
+                f"Report: {result / 'retrieval.json'}"
+            )
+            return 0
         if args.command in ("foundry-smoke", "discover", "map-visual"):
             try:
                 config = FoundryConfig(endpoint=args.endpoint, deployment=args.deployment)
@@ -299,6 +347,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         HistoryError,
         FoundryError,
         LocalInputError,
+        RetrievalError,
     ) as error:
         label = (
             args.command.capitalize()
@@ -315,10 +364,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "foundry-smoke",
                 "discover",
                 "map-visual",
+                "retrieve",
             )
             else "PDF"
         )
         print(f"{label} command rejected: {error}", file=sys.stderr)
+        return 1
+    except ValidationError:
+        print(
+            "Invalid input: check strict requirements, catalog or routing JSON.",
+            file=sys.stderr,
+        )
         return 1
     except OSError:
         label = (
@@ -336,6 +392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "foundry-smoke",
                 "discover",
                 "map-visual",
+                "retrieve",
             )
             else "PDF"
         )

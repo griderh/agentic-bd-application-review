@@ -17,6 +17,7 @@ import pypdfium2 as pdfium
 
 from bd_packet_builder.inventory import (
     EvidenceReference,
+    Inventory,
     InventoryError,
     build_inventory,
     publish_json_run,
@@ -154,12 +155,19 @@ def _text(words: tuple[OcrWord, ...]) -> str:
     return "\n".join(" ".join(line) for line in lines)
 
 
-def run_ocr(root: Path, source: Path, page: int, *, limits: OcrLimits = _DEFAULT_LIMITS) -> Path:
+def run_ocr(
+    root: Path,
+    source: Path,
+    page: int,
+    *,
+    limits: OcrLimits = _DEFAULT_LIMITS,
+    inventory: Inventory | None = None,
+) -> Path:
     """Rasterize one explicitly selected supporting PDF page and publish unverified OCR."""
     root = root.resolve(strict=True)
     if source.is_absolute() or ".." in source.parts:
         raise OcrError("Choose a relative PDF path from the supporting-document inventory")
-    inventory = build_inventory(root)
+    inventory = inventory if inventory is not None else build_inventory(root)
     record = next((s for s in inventory.sources if s.path == source.as_posix()), None)
     if record is None:
         raise OcrError("Choose a PDF from the supporting-document inventory; no symlinks")

@@ -9,13 +9,13 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
-The foundation, local evidence inventory, native-PDF text, opt-in local OCR experiment, opt-in synthetic Foundry connection test, and synthetic PDF-to-proposals experiment are implemented: a Python package, offline synthetic tests, lint/type checks, deterministic monthly/annual filename selection, read-only source metadata, page-level native text and literal date checks, single-page OCR, and a narrow native-field PDF feasibility demo. This is not yet an automated application-completion workflow. Real-document model interpretation, governed fact extraction, integrated OCR validation, flattened overlays, reviewer summaries, and packet assembly remain future increments.
+The foundation, local evidence inventory, native-PDF extraction, opt-in local OCR, bounded model proposals, blank-form discovery, visual mapping, and requirement-driven evidence retrieval are implemented. Retrieval routes questions to designated source families and bounded pages rather than extracting the entire supporting collection. This is not yet an automated application-completion workflow: approved fact release, integrated OCR grounding, general validated overlays, reviewer-summary generation, and packet assembly remain future increments.
 
 The initial deliverable is a locally executed Python PoC using [blank forms](bd_agreements/Blank/) and [supporting documents](bd_agreements/supporting_data/) already in this repository. It calls a remote model through an approved Foundry endpoint, validates the results, and generates outputs locally; the model does not directly access the local folders. [Completed packets](bd_agreements/Completed/) support validated evaluation and wording precedent, not current factual authority. Network-drive mapping, cloud application hosting, Azure Blob document storage, and production integrations are deferred until the working PoC has been reviewed.
 
-The offline foundation also includes strict requirement/proposal contracts, a manual-input review harness, and a fact-sheet **draft** validator. No fact-sheet approval, authorized release reader, or automatic application-answer generation is implemented.
+The offline foundation also includes strict requirement/proposal contracts, a manual-input review harness, and a fact-sheet **draft** validator. No fact-sheet approval, authorized release reader, or approved application filling is implemented; model-generated answers remain unapproved proposals.
 
-**Latest agreed direction:** answers will come from supporting-document evidence, with conversational reviewer corrections and exception-only human involvement. A human-maintained Excel workbook is no longer a required target input; Excel is optional inspection/export. Existing workbook commands remain earlier prototype tools, not the final user workflow. Automatic extraction and chat revisions are not implemented yet. See the [evidence/revision/archive workflow](docs/evidence-review-workflow.md).
+**Latest agreed direction:** answers will come from supporting-document evidence, with conversational reviewer corrections and exception-only human involvement. A lightweight catalog describes likely document contents and conservative version rules; it is not a human-maintained fact sheet or a whole-drive index. Excel is optional inspection/export. Existing workbook commands remain earlier prototype tools, not the final user workflow. Targeted native-text proposals now exist; approved fact release and chat revisions do not. See the [evidence/revision/archive workflow](docs/evidence-review-workflow.md).
 
 This increment adds explicit historical **reference versus evaluation** partitions and offline, manually supplied discrepancy checks. Historical packets can flag differences or inform wording, never establish current facts. Held-out packets are excluded from the reference reader; copies with identical hashes cannot cross partitions. No real archive was automatically assigned to a split.
 
@@ -36,6 +36,67 @@ python -m pip check
 On Windows, create the environment with `py -3.12 -m venv .venv` and activate it with `.venv\Scripts\Activate.ps1`, then use the same `python -m pip` commands. Windows execution has not yet been validated.
 
 Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for the offline commands or tests.
+
+## Requirement-driven evidence retrieval
+
+The [retrieval module](src/bd_packet_builder/retrieval.py) implements this bounded flow:
+
+1. Take a supplied, reviewed `ApplicationRequirements` JSON, not an unapproved discovery/map dump. Automatic discovery-to-retrieval handoff is not implemented.
+2. Ask the model to choose source-family IDs and an action per requirement: `fact`, `narrative`, `attach`, `read_attach`, or `unresolved`. This request contains requirements and catalog metadata only, not supporting-file contents or individual filenames.
+3. Validate exact requirement coverage and family IDs locally. Code selects the document/version and enforces configured supporting/output paths; the model cannot choose paths or versions.
+4. Inventory/hash only routed families, then read selected pages. Initial hints default to pages 1 and 2. If those do not contain the search terms, expand through the first four pages, stopping after a match. Hints are developer metadata, not per-application field mappings. Exact substring matches locate candidates; they do not prove answer support or completeness.
+5. Separate attachment candidates from answer evidence. Attachment-only requests inspect the first hint, but that does **not** approve document identity, currency, or adequacy. Their text is excluded from answer requests.
+6. Optionally request native-text answer proposals, enforcing each requirement's inspected source/page allowlist and rechecking quotations. All fill values remain null. Missing documents, ambiguous versions, unreadable pages, unmet periods, search limits and signing requirements remain visible exceptions.
+
+The default catalog describes registration, SIPC membership, FOCUS reports, audited financials, firm services and settlement instructions. These descriptions are developer routing metadata, **not business approval**. A technical caller can supply a `SourceCatalog` JSON with `families`, each containing `family_id`, one-segment `folder`, `purpose`, `selection` (`single`, `monthly`, `annual`), and optional `page_hints`. Monthly/annual rules reuse the existing FOCUS/audited selectors. A `single` family containing multiple candidate files is unresolved: no modification-time guess is made. The business should confirm source authority and operational access/version conventions, not maintain answer values or map every source page.
+
+### Fictional demonstration
+
+This [reusable example](examples/retrieval_demo.py) creates five fictional supporting PDFs, six requirements and a known local evaluation under a fresh ignored output root. No existing business documents are read. Prepare inputs without credentials or model calls:
+
+```bash
+python -m examples.retrieval_demo --root . --prepare-only
+```
+
+Or explicitly authorize up to two paid synthetic calls: routing, then native answer proposals:
+
+```bash
+python -m examples.retrieval_demo --root . \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --allow-paid
+```
+
+The expected values/checks are not supplied to the model. The example checks a leading-zero identifier, supported service wording, missing tax identifier, wrong financial period, unresolved signature, separate attachment candidate, bounded reading, unrelated-family exclusion, unapproved answers and unchanged-context reuse with an assertion that no further model client is created. Results are written to `retrieval-evaluation.json` beside the first internal report. These are controlled-case assertions, not a general grounding or hallucination-rate evaluation.
+
+### Caller-supplied requirements
+
+After a technical caller supplies reviewed requirements under `outputs/`, automatic routing/proposals use:
+
+```bash
+bd-packet retrieve --root . --requirements outputs/requirements.json \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --allow-paid
+```
+
+This can transmit confidential selected native page text. The flag is an explicit execution opt-in, not permission to bypass business content authorization. Real supporting-document upload requires prior approval. `--catalog outputs/catalog.json` optionally replaces the default metadata.
+
+For entirely offline local retrieval, also supply `--plan outputs/plan.json` and omit model configuration/`--allow-paid`. A developer plan matching a single supplied `crd` requirement has this shape:
+
+```json
+{"needs":[{"requirement_id":"crd","action":"fact","families":["registration"],"search_terms":["CRD"],"explanation":"Inspect registration evidence."}]}
+```
+
+Plans must cover **every** supplied requirement exactly. This manual plan is a development/offline interface, not a required business-authored mapping. Inputs must be bounded JSON files under the configured root's `outputs/`. A successful command publishes a unique `outputs/retrieval-.../retrieval.json`; exit 0 means the internal report was published, not that answers or a packet were approved.
+
+### Limits, OCR and reuse
+
+- Limits: 20 requirements, four routed families, 30 inventoried source files, eight distinct read pages, four candidate pages per source/need, and 20,000 native characters per page. The existing model wrapper separately rejects input above 64 KiB, bounds output and uses a 60-second HTTP timeout with retries disabled. This is not a hard total workflow deadline. Document hashing/PDF metadata still reads whole files within routed families; only text extraction is page-targeted.
+- Search does not examine every page, resolve every contradiction, or dynamically browse a drive. A bounded miss is a review exception, not proof that the source lacks the fact. Broader search, source priority for ambiguous families, network-drive adapters and cross-form approved fact reuse remain later work.
+- Requested financial periods cannot silently collapse multi-month/multi-year ranges to the ending period. Filename periods must be corroborated on inspected native pages; an explicitly requested ending/as-of day must also be observed. This does not establish complete semantic or reporting-period adequacy.
+- Sparse native text or a dominant page image triggers an explicit OCR-needed condition. `--allow-ocr` permits the existing **local** Tesseract experiment on those selected pages, including displayed landscape/90-degree rotation. Detection is heuristic, not universal scan classification. OCR retains rendered-image fingerprints and separate reports; it is not promoted to native citations or sent to answer generation. Verified OCR-backed answers remain unfinished.
+- `--cache outputs/retrieval-RUN_ID/retrieval.json` optionally reuses **unapproved native proposals** only when the requirements/application hash, catalog, route plan, source hashes, extracted page text, eligible requirements, prompt/schema and model configuration match. Substitute the actual prior report path. Sources/pages and quotations are rechecked; cached source/answer/input mutations cannot silently become approved facts. Invalid context is explicitly invalidated; malformed cache input is rejected, and failed citation checks are labeled rejected.
+- Cache reuse requires the same model configuration/opt-in. It suppresses the answer call, not source/page rechecking, OCR work or automatic routing; supplying the existing plan also avoids another routing call. It is not a trusted universal answer sheet, signed fact register or cross-application approval mechanism.
+- Internal reports/cache/OCR artifacts contain potentially confidential text and source metadata. Keep them out of submission packets, ordinary logs, source control and public artifacts. No approval, signatures, notification, PDF assembly or submission is introduced.
 
 ## Opt-in synthetic Foundry connection test
 

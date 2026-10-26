@@ -179,7 +179,9 @@ def _record(root: Path, relative: str) -> SourceRecord:
     )
 
 
-def build_inventory(root: Path) -> Inventory:
+def build_inventory(
+    root: Path, *, families: tuple[str, ...] | None = None, max_sources: int | None = None
+) -> Inventory:
     """Scan only the designated supporting-data tree; never follow source symlinks.
 
     Unsupported inputs are visible issues. Access failures abort the snapshot instead
@@ -187,6 +189,14 @@ def build_inventory(root: Path) -> Inventory:
     """
     root = root.resolve(strict=True)
     support = _support_root(root)
+    if families is not None and (
+        not families
+        or len(set(families)) != len(families)
+        or any(not name or Path(name).name != name or name in (".", "..") for name in families)
+    ):
+        raise InventoryError("Targeted families must be distinct single directory names")
+    if max_sources is not None and (type(max_sources) is not int or max_sources < 1):
+        raise InventoryError("Inventory source limit must be a positive integer")
     sources: list[SourceRecord] = []
     issues: list[InventoryIssue] = []
 
@@ -209,9 +219,21 @@ def build_inventory(root: Path) -> Inventory:
             elif path.suffix.lower() not in _EXTENSIONS:
                 issues.append(InventoryIssue(relative, "unsupported_format"))
             else:
+                if max_sources is not None and len(sources) >= max_sources:
+                    raise InventoryError("Targeted inventory exceeds its source limit")
                 sources.append(_record(root, relative))
 
-    visit(support)
+    if families is None:
+        visit(support)
+    else:
+        for family in families:
+            folder = support / family
+            if folder.is_symlink():
+                raise InventoryError("Targeted source family must not be a symlink")
+            if folder.exists():
+                if not folder.is_dir():
+                    raise InventoryError("Targeted source family must be a directory")
+                visit(folder)
     counts = Counter(source.sha256 for source in sources)
     records = tuple(
         replace(source, flags=(*source.flags, "duplicate_content"))
@@ -313,6 +335,7 @@ def publish_json_run(
         "foundry-smoke",
         "discovery",
         "visual-map",
+        "retrieval",
     ],
     payload: dict[str, object],
     inventory: Inventory,
@@ -331,6 +354,7 @@ def publish_json_run(
         "foundry-smoke",
         "discovery",
         "visual-map",
+        "retrieval",
     ):
         raise InventoryError("Unsupported local output kind")
     root = root.resolve(strict=True)
