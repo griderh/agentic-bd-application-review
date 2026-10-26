@@ -107,3 +107,11 @@ Inputs, reference/evaluation hashes and supporting versions are rechecked around
 - Production identity/storage/retention, signing-service choice and eventual Copilot connection.
 
 Measure historical-check usefulness separately: meaningful discrepancies caught, false alarms and incomparable cases with denominators. Add a curated reference subset before broad retrieval; freeze held-out evaluations and validate historical ground truth against independent period-appropriate evidence. No eligible evaluation cases means not applicable, not a pass.
+
+## Automatic visual mapping boundary
+
+The [visual mapping command](../README.md#automatic-visual-mapping-of-blank-pages) now proposes questions, controls, labels and linked write-in/narrative regions from selected blank-page images plus optional native text. It does not use supporting evidence or historical packets, and its local evaluation references never enter the model request. Maps remain separate from `ApplicationRequirements` and answer proposals: valid geometry is not authority to fill an answer.
+
+Digital, image-only, landscape and rotated blank pages can be rendered for this bounded experiment. Coordinates describe the displayed image, not the older unrotated PDF writer. Native-region checks are narrower than visual coverage and are not implemented for rotated pages. Image-only interpretation is not integrated supporting-document OCR or verified factual evidence. Cross-page dependencies, semantic completeness, usable writing space and eventual rendered packet placement still require separate checks.
+
+The evaluated real subset passed after a general boundary-prompt revision with unchanged references/tolerances. Initial failed results and the intervening schema rejection remain part of the observations; do not describe the limited subset or repeated synthetic representations as general accuracy or completion of the end-to-end workflow.

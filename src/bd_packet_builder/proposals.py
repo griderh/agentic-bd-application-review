@@ -112,7 +112,6 @@ def generate_proposals(
             "evidence": [asdict(p) for d in evidence.documents for p in d.pages],
         }
     )
-    options = {} if client_factory is None else {"client_factory": client_factory}
     response = request_structured(
         config,
         allow_paid=allow_paid,
@@ -120,7 +119,7 @@ def generate_proposals(
         input_json=payload,
         response_type=ModelProposals,
         max_output_tokens=MAX_OUTPUT_TOKENS,
-        **options,
+        client_factory=client_factory,
     )
     try:
         proposals = AnswerProposals.model_validate_json(response.value.model_dump_json())

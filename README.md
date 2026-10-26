@@ -172,6 +172,75 @@ python -m examples.proposal_demo --root . \
 
 This adds a documented eligibility category, a multi-select product list with a required Other description, and a short narrative to the original nine cases. One synthetic-only live call passed **12/12 requirement assertions**, including all three new response cases, exact citations and the existing exceptions/signing deferrals. Usage: 3,120 input + 2,544 output = **5,664 tokens**. The fixed 4,096 output-token ceiling, no-retry/explicit opt-in behavior and no-packet status are unchanged. The original nine-case demo remains the default. This does not measure real eligibility determination, general visual discovery, narrative quality or zero hallucinations; no additional real blank/evidence content was uploaded for this increment.
 
+## Automatic visual mapping of blank pages
+
+The [visual mapping workflow](src/bd_packet_builder/visual.py) proposes a map for unfamiliar blank forms without importing an issuer-specific coordinate template. It sends each selected rendered page image, with optional native text, to the existing model. Supporting documents, completed packets, applicant answers and local reference maps are never included. This is a mapping experiment, not an answering or packet-generation command.
+
+```bash
+bd-packet map-visual --root . \
+  --source bd_agreements/Blank/Broward_County/BrokerDealerQuestionnaire.pdf \
+  --pages 2 4 \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --allow-paid
+```
+
+Use only explicitly authorized blank forms. This opt-in permits paid model requests and transmission of the selected page images and embedded text. The same authorized Azure CLI identity, endpoint validation and no-key-fallback behavior apply. No Azure document storage, hosted agent, new service or dependency is added. `store=False` is not a guarantee about service-level retention.
+
+### Outputs and checks
+
+Each unique ignored `outputs/visual-map-.../` directory contains:
+
+- `visual-map.json`: source/prompt/schema/image fingerprints, page dimensions and rotation, model usage, proposed questions/options/regions, explicit review flags and optional reference scores.
+- `page-N-original.png` and `page-N-annotated.png`: source renders and visible proposed boundaries. Annotations are conspicuously unapproved; no fields are answered or marked.
+
+The proposal distinguishes question wording, control rectangles, label rectangles, narrative/text answer regions and option-linked write-in regions. Conditions remain separate from short option labels. It has no applicant-answer fields. IDs are local to a page and source version; repeated questions across pages are not automatically linked.
+
+Coordinates are integers 0-1000 relative to the **displayed page image, top-left origin**. Metadata records actual image dimensions, displayed PDF dimensions and source rotation. Evaluation converts these to displayed page points. This is deliberately not the unrotated bottom-left coordinate contract used by the earlier developer mapping/writer; no automatic conversion to a fillable layout or approval occurs.
+
+The application checks strict structure, positive in-bounds rectangles, unique IDs, option relationships, and native wording/label presence when available. For unrotated pages with embedded text, it also checks labels inside proposed label regions. Rotated native-region verification is flagged as unimplemented. For image-only pages, lack of native text is a review flag, not a reason to skip the page. Model-reported uncertainty, unreadable pages and answer regions shorter than a 12-point readable line are explicitly flagged. Native matches, valid geometry and model assertions do not prove semantic correctness, complete detection or safe writing space. No separate OCR text is added to scanned blanks by this workflow; image interpretation is supplied by the multimodal model.
+
+**Bounds:** at most five distinct pages and one request per page; 2x rendering, at most 4 million pixels and 2 MiB PNG per page, at most 20,000 native characters per page and 64 KiB text request, 4,096 output tokens per request, 60-second HTTP timeout and zero automatic retries. These are fixed experiment limits; the HTTP timeout is not a hard total-run deadline. Omit `--pages` only for documents of five pages or fewer. Oversized/encrypted inputs, invalid selections, incomplete/refused/malformed responses, changed sources/references and I/O failures produce explicit failure without publishing a successful run. Earlier unique runs remain intact. Dense pages can exceed the output limit; this workflow does not silently drop fields or automatically retry a larger request.
+
+### Independent evaluation
+
+`--reference outputs/reference.json` accepts a local, hash-bound `MappingReference`: page number, an independently prepared expected `VisualPage` and `exhaustive` (true by default). The reference must be prepared before the call and is never supplied to the model. Business users do not need to maintain references for every form; they are development/evaluation answer keys, not runtime templates.
+
+Questions are matched one-to-one by whitespace/case-normalized identifying wording, not predicted IDs. Kinds and option labels are assessed separately from geometry. Control rectangles require the correct control type and at most 6 points error on every edge; label regions allow 12 points; writable/write-in regions allow 8 points. Missing/extra questions and options fail exhaustive references. Subset references score only specified questions and explicitly count other questions as unscored. Reference instruction-box geometry and full condition meaning are not scored. A passing subset is not evidence of whole-form completeness or source grounding.
+
+Exit status is 0 only when an independent reference evaluation passes. No reference or a failed evaluation returns 1 **after saving the unapproved report**. A technical failure returns 1 without a successful report. In every case, maps remain unapproved and cannot trigger filling, signing or submission.
+
+### Fictional PDF evaluation
+
+Generate a new fictional four-page PDF and its withheld reference locally, without model calls:
+
+```bash
+python -m examples.visual_mapping_demo --root . --prepare-only
+```
+
+Or explicitly authorize four model calls and evaluate the generated forms:
+
+```bash
+python -m examples.visual_mapping_demo --root . \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --allow-paid
+```
+
+The [generator](examples/visual_mapping_demo.py) constructs the reference from known drawn geometry **before** any call. It uses three question designs (single-choice, two-column multiple-choice with two Other write-ins, and narrative) in four representations: digital portrait, digital landscape, image-only portrait, and image-only with 90-degree rotation. These are controlled feasibility cases, not a broad held-out document corpus. Offline tests use controlled responses for boundary/reliability checks; those tests do not establish model quality.
+
+### Live observations, October 26, 2026
+
+| Version / case | Question kinds | Controls | Label regions | Linked write-ins | Narrative regions | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| v1 real blank subset, pages 2/4 | 3/3 | 15/15 | 14/15 | 2/2 | 0/1 | Failed |
+| v2 same real subset/reference | 3/3 | 15/15 | 15/15 | 2/2 | 1/1 | Passed subset |
+| v2 four fictional representations | 12/12 | 28/28 | 28/28 | 8/8 | 4/4 | Passed controlled case |
+
+The v1 real result included qualifying bullets in a label box and excess space above narrative writing lines. V2 clarified these general boundary rules without changing the reference or tolerances. One intervening v2 invocation failed strict schema validation and published no map; a deliberate rerun produced the published result. Failure usage was unavailable, so successful-report totals do not represent all paid attempts.
+
+V2 usage: real subset 4,586 input + 4,848 output = **9,434 tokens** across two calls; synthetic 7,844 input + 5,583 output = **13,427 tokens** across four calls. The earlier v1 reports remain unchanged. The real evaluation covers Q1/Q2/Q11 only, not nine other proposed items, unselected pages, or all cross-page conditions. Continued answers without their prior page and overly thin single-line regions illustrate remaining review needs. Images and native text from only the authorized blank pages were uploaded; no supporting/confidential business evidence or completed packets were sent.
+
+The next work remains independent verification and broader forms, cross-page interpretation, scanned supporting-evidence reading, approved-answer gates and deterministic packet assembly. A passing geometry evaluation does not approve facts, eligibility or a generated packet.
+
 ## Quality checks
 
 With the venv activated:

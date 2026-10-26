@@ -1,4 +1,4 @@
-"""Local workflows and an explicitly opted-in synthetic model connection test."""
+"""Local PDF workflows and explicitly opted-in model experiments."""
 
 import argparse
 import json
@@ -28,6 +28,7 @@ from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
 from bd_packet_builder.poc import initialize_poc, run_poc
 from bd_packet_builder.review import ReviewError, run_review
+from bd_packet_builder.visual import map_visual
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -130,15 +131,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--checklist", type=Path, help="Independent local evaluation JSON under outputs/"
     )
     discovery.add_argument("--allow-paid", action="store_true")
+    visual = commands.add_parser(
+        "map-visual", help="Paid visual mapping of approved blank pages; no answers"
+    )
+    visual.add_argument("--root", type=Path, required=True)
+    visual.add_argument("--source", type=Path, required=True)
+    visual.add_argument("--endpoint", required=True)
+    visual.add_argument("--deployment", required=True)
+    visual.add_argument(
+        "--pages", type=int, nargs="+", help="1-5 explicit page numbers; default all up to 5"
+    )
+    visual.add_argument(
+        "--reference", type=Path, help="Withheld local reference JSON under outputs/"
+    )
+    visual.add_argument("--allow-paid", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.command in ("foundry-smoke", "discover"):
+        if args.command in ("foundry-smoke", "discover", "map-visual"):
             try:
                 config = FoundryConfig(endpoint=args.endpoint, deployment=args.deployment)
             except ValidationError:
                 raise FoundryError(
                     "Invalid Azure v1 endpoint or deployment configuration"
                 ) from None
+            if args.command == "map-visual":
+                result = map_visual(
+                    args.root,
+                    args.source,
+                    config,
+                    allow_paid=args.allow_paid,
+                    pages=tuple(args.pages) if args.pages else None,
+                    reference_path=args.reference,
+                )
+                data = json.loads((result / "visual-map.json").read_text(encoding="utf-8"))
+                print(
+                    "Unapproved visual map; no answers or packet. "
+                    f"Report: {result / 'visual-map.json'}"
+                )
+                if data["evaluation"] is None:
+                    print("No independent reference evaluation: accuracy not established.")
+                    return 1
+                print(f"Reference evaluation passed: {data['evaluation']['passed']}")
+                return 0 if data["evaluation"]["passed"] else 1
             if args.command == "discover":
                 result = discover_requirements(
                     args.root,
@@ -280,6 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "history-check",
                 "foundry-smoke",
                 "discover",
+                "map-visual",
             )
             else "PDF"
         )
@@ -300,6 +335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "history-check",
                 "foundry-smoke",
                 "discover",
+                "map-visual",
             )
             else "PDF"
         )

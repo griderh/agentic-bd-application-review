@@ -1,5 +1,6 @@
-"""Opt-in synthetic-only Azure model connection test, not a packet-answering workflow."""
+"""Bounded Azure structured model requests and an opt-in synthetic connection check."""
 
+import base64
 import hashlib
 import json
 import re
@@ -19,6 +20,7 @@ from openai import (
     APITimeoutError,
     OpenAI,
 )
+from openai.types.responses import ResponseInputParam
 from pydantic import Field, ValidationError, field_validator
 
 from bd_packet_builder.contracts import Contract, Nonblank
@@ -144,21 +146,42 @@ def request_structured[T: Contract](
     input_json: str,
     response_type: type[T],
     max_output_tokens: int,
-    client_factory: Callable[[FoundryConfig], OpenAI] = _client,
+    client_factory: Callable[[FoundryConfig], OpenAI] | None = None,
+    image_png: bytes | None = None,
 ) -> StructuredResult[T]:
     """One bounded synchronous request; callers own evidence authorization and publication."""
     if not allow_paid:
         raise FoundryError("Live model calls require --allow-paid")
     if not 1 <= max_output_tokens <= 4096 or len(input_json.encode()) > 64 * 1024:
         raise FoundryError("Model input or output-token configuration exceeds the local limit")
+    model_input: str | ResponseInputParam = input_json
+    input_bytes = input_json.encode()
+    if image_png is not None:
+        if not image_png.startswith(b"\x89PNG\r\n\x1a\n") or len(image_png) > 2 * 1024 * 1024:
+            raise FoundryError("Model page image must be a PNG within the 2 MiB limit")
+        model_input = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": input_json},
+                    {
+                        "type": "input_image",
+                        "detail": "high",
+                        "image_url": "data:image/png;base64,"
+                        + base64.b64encode(image_png).decode("ascii"),
+                    },
+                ],
+            }
+        ]
+        input_bytes += b"\0" + image_png
     client: OpenAI | None = None
     try:
         try:
-            client = client_factory(config)
+            client = (client_factory or _client)(config)
             response = client.responses.parse(
                 model=config.deployment,
                 instructions=instructions,
-                input=input_json,
+                input=model_input,
                 text_format=response_type,
                 max_output_tokens=max_output_tokens,
                 store=False,
@@ -187,7 +210,12 @@ def request_structured[T: Contract](
                 f"Foundry returned HTTP {error.status_code}; check inference permissions, "
                 "deployment/API compatibility or quota. Remote response omitted."
             ) from None
-        except (ValidationError, json.JSONDecodeError, APIResponseValidationError):
+        except ValidationError as error:
+            codes = ", ".join(sorted({item["type"] for item in error.errors(include_input=False)}))
+            raise FoundryError(
+                f"Foundry response failed strict schema validation ({codes})"
+            ) from None
+        except (json.JSONDecodeError, APIResponseValidationError):
             raise FoundryError("Foundry response failed strict schema validation") from None
     finally:
         if client is not None:
@@ -207,7 +235,7 @@ def request_structured[T: Contract](
             "output_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens,
         },
-        hashlib.sha256(input_json.encode()).hexdigest(),
+        hashlib.sha256(input_bytes).hexdigest(),
     )
 
 

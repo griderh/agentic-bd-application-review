@@ -342,3 +342,65 @@ def test_output_symlink_is_rejected_before_authentication(tmp_path: Path) -> Non
         )
     factory.assert_not_called()
     assert not list(outside.iterdir())
+
+
+def test_image_request_is_bounded_and_hash_covers_the_image() -> None:
+    from bd_packet_builder.foundry import request_structured
+
+    config = FoundryConfig(endpoint=ENDPOINT, deployment="synthetic-model")
+    client = Mock()
+    client.responses.parse.return_value = response()
+    results = []
+    for suffix in (b"first", b"second"):
+        results.append(
+            request_structured(
+                config,
+                allow_paid=True,
+                instructions="Synthetic",
+                input_json='{"test": true}',
+                response_type=SmokeAnswers,
+                max_output_tokens=1000,
+                image_png=b"\x89PNG\r\n\x1a\n" + suffix,
+                client_factory=lambda _: client,
+            )
+        )
+    assert results[0].input_sha256 != results[1].input_sha256
+    factory = Mock()
+    for invalid in (
+        b"https://arbitrary.example/image",
+        b"\x89PNG\r\n\x1a\n" + b"x" * (2 * 1024 * 1024),
+    ):
+        with pytest.raises(FoundryError, match="PNG"):
+            request_structured(
+                config,
+                allow_paid=True,
+                instructions="Synthetic",
+                input_json="{}",
+                response_type=SmokeAnswers,
+                max_output_tokens=1000,
+                image_png=invalid,
+                client_factory=factory,
+            )
+    factory.assert_not_called()
+
+
+def test_schema_failure_reports_only_codes_not_model_content() -> None:
+    from bd_packet_builder.foundry import request_structured
+
+    with pytest.raises(ValidationError) as invalid:
+        SmokeAnswers.model_validate({"legal_name": "CONFIDENTIAL_SENTINEL"})
+    client = Mock()
+    client.responses.parse.side_effect = invalid.value
+    with pytest.raises(FoundryError, match="strict schema validation") as failure:
+        request_structured(
+            FoundryConfig(endpoint=ENDPOINT, deployment="synthetic-model"),
+            allow_paid=True,
+            instructions="Synthetic",
+            input_json="{}",
+            response_type=SmokeAnswers,
+            max_output_tokens=1000,
+            client_factory=lambda _: client,
+        )
+    assert "CONFIDENTIAL_SENTINEL" not in str(failure.value)
+    assert "missing" in str(failure.value)
+    client.close.assert_called_once()

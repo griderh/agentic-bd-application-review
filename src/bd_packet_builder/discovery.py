@@ -229,7 +229,6 @@ def discover_requirements(
         if not text.strip():
             page_issues.append({"page": number, "issue": "no_native_text"})
             continue
-        options = {} if client_factory is None else {"client_factory": client_factory}
         response = request_structured(
             config,
             allow_paid=True,
@@ -246,7 +245,7 @@ def discover_requirements(
                 }
             ),
             max_output_tokens=4096,
-            **options,
+            client_factory=client_factory,
         )
         verify()
         requests.append(
