@@ -1,6 +1,7 @@
 pypdf==6.21.1
 pypdfium2==5.14.0
 pillow==13.0.0
+reportlab==5.0.1
 pydantic==2.14.1
 pydantic-core==2.50.1
 annotated-types==0.8.0

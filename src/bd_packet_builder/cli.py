@@ -13,6 +13,7 @@ from pypdf.errors import PdfReadError
 from pypdfium2 import PdfiumError
 
 from bd_packet_builder.discovery import discover_requirements
+from bd_packet_builder.draft import DraftError, run_draft
 from bd_packet_builder.evidence import (
     EvidenceError,
     ExtractionLimits,
@@ -172,8 +173,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     retrieval.add_argument(
         "--allow-ocr", action="store_true", help="Explicitly allow local Tesseract on sparse pages"
     )
+    draft = commands.add_parser("draft", help="Write an explicitly reviewed incomplete local draft")
+    draft.add_argument("--root", type=Path, required=True)
+    draft.add_argument(
+        "--request", type=Path, required=True, help="Draft request JSON under outputs/"
+    )
+    draft.add_argument(
+        "--review", type=Path, required=True, help="Snapshot-bound review JSON under outputs/"
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "draft":
+            result = run_draft(args.root, args.request, args.review)
+            print(f"Incomplete draft; NOT FOR SUBMISSION: {result / 'draft-packet.pdf'}")
+            return 0
         if args.command == "retrieve":
             config = None
             if args.endpoint or args.deployment:
@@ -348,6 +361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         FoundryError,
         LocalInputError,
         RetrievalError,
+        DraftError,
     ) as error:
         label = (
             args.command.capitalize()
@@ -365,6 +379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "discover",
                 "map-visual",
                 "retrieve",
+                "draft",
             )
             else "PDF"
         )
@@ -372,7 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except ValidationError:
         print(
-            "Invalid input: check strict requirements, catalog or routing JSON.",
+            "Invalid input: check strict requirements, catalog, routing or draft/review JSON.",
             file=sys.stderr,
         )
         return 1
@@ -393,6 +408,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "discover",
                 "map-visual",
                 "retrieve",
+                "draft",
             )
             else "PDF"
         )

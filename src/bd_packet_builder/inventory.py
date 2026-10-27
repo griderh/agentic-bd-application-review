@@ -336,6 +336,7 @@ def publish_json_run(
         "discovery",
         "visual-map",
         "retrieval",
+        "draft",
     ],
     payload: dict[str, object],
     inventory: Inventory,
@@ -355,6 +356,7 @@ def publish_json_run(
         "discovery",
         "visual-map",
         "retrieval",
+        "draft",
     ):
         raise InventoryError("Unsupported local output kind")
     root = root.resolve(strict=True)

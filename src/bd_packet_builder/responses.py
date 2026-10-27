@@ -75,7 +75,7 @@ class NarrativePlan:
     approval: Literal["placement_only_not_answer_approval"] = "placement_only_not_answer_approval"
 
 
-def _wrap(
+def wrap_text(
     text: str, width: float, size: float, measure: Callable[[str, float], float]
 ) -> tuple[str, ...] | None:
     lines: list[str] = []
@@ -123,11 +123,11 @@ def plan_narrative(
     complete = text.strip() + (f"\nSupporting evidence: {references}." if references else "")
     width = region.right - region.left
     capacity = math.floor((region.top - region.bottom) / region.leading)
-    inline = _wrap(complete, width, region.font_size, measure)
+    inline = wrap_text(complete, width, region.font_size, measure)
     if inline is not None and len(inline) <= capacity:
         return NarrativePlan("inline", inline, None, region.font_size)
     marker = f"See Supplemental Answers, {question_label}, packet page {supplement_page}."
-    redirect = _wrap(marker, width, region.font_size, measure)
+    redirect = wrap_text(marker, width, region.font_size, measure)
     if redirect is None or len(redirect) > capacity:
         raise ValueError("Supplemental reference cannot fit at the minimum readable font size")
     return NarrativePlan("supplement", redirect, f"{question_label}\n{complete}", region.font_size)

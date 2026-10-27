@@ -9,11 +9,11 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
-The foundation, local evidence inventory, native-PDF extraction, opt-in local OCR, bounded model proposals, blank-form discovery, visual mapping, and requirement-driven evidence retrieval are implemented. Retrieval routes questions to designated source families and bounded pages rather than extracting the entire supporting collection. This is not yet an automated application-completion workflow: approved fact release, integrated OCR grounding, general validated overlays, reviewer-summary generation, and packet assembly remain future increments.
+The foundation, local evidence inventory, native-PDF extraction, opt-in local OCR, bounded model proposals, blank-form discovery, visual mapping, requirement-driven evidence retrieval, and a controlled draft writer are implemented. Retrieval routes questions to designated source families and bounded pages rather than extracting the entire supporting collection. The new writer assembles explicitly reviewed subset drafts with overlays, supplemental answers, attachments and a separate internal report. This is not yet unattended application completion: automatic semantic approval, verified OCR answer release, general form/rotation coverage, signer-specific copies, complete reviewer workflows and production release remain unfinished.
 
 The initial deliverable is a locally executed Python PoC using [blank forms](bd_agreements/Blank/) and [supporting documents](bd_agreements/supporting_data/) already in this repository. It calls a remote model through an approved Foundry endpoint, validates the results, and generates outputs locally; the model does not directly access the local folders. [Completed packets](bd_agreements/Completed/) support validated evaluation and wording precedent, not current factual authority. Network-drive mapping, cloud application hosting, Azure Blob document storage, and production integrations are deferred until the working PoC has been reviewed.
 
-The offline foundation also includes strict requirement/proposal contracts, a manual-input review harness, and a fact-sheet **draft** validator. No fact-sheet approval, authorized release reader, or approved application filling is implemented; model-generated answers remain unapproved proposals.
+The offline foundation also includes strict requirement/proposal contracts, a manual-input review harness, and a fact-sheet **draft** validator. No fact-sheet approval or authorized production release reader is implemented. Model-generated answers remain unapproved proposals; the new draft writer requires a separate, exact-snapshot local review record.
 
 **Latest agreed direction:** answers will come from supporting-document evidence, with conversational reviewer corrections and exception-only human involvement. A lightweight catalog describes likely document contents and conservative version rules; it is not a human-maintained fact sheet or a whole-drive index. Excel is optional inspection/export. Existing workbook commands remain earlier prototype tools, not the final user workflow. Targeted native-text proposals now exist; approved fact release and chat revisions do not. See the [evidence/revision/archive workflow](docs/evidence-review-workflow.md).
 
@@ -36,6 +36,58 @@ python -m pip check
 On Windows, create the environment with `py -3.12 -m venv .venv` and activate it with `.venv\Scripts\Activate.ps1`, then use the same `python -m pip` commands. Windows execution has not yet been validated.
 
 Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for the offline commands or tests.
+
+## Controlled draft completion
+
+The [draft writer](src/bd_packet_builder/draft.py) now produces a real PDF **incomplete draft**, not just answer/location JSON. It reuses the existing requirements/proposals, native citation checks, hash-bound response mappings, text wrapping and packet pagination contracts. It does not modify the retrieval/review checkers to pretend their unapproved proposals are writable.
+
+### Try a real public blank with fictional evidence
+
+```bash
+python -m examples.draft_completion_demo --root .
+python -m examples.draft_completion_demo --root . --overflow
+```
+
+The [example](examples/draft_completion_demo.py) copies only the designated public blank into a unique ignored fictional root, generates fictional supporting evidence, and supplies an explicitly fictional review fixture. It never reads real supporting documents or Completed packets, calls a model, or claims a business reviewer approved the answers. The first variant writes a short narrative inline; the second writes a cross-reference to an actual multi-page supplemental-answer section. Both exercise firm name, leading-zero CRD, one radio selection, several checkbox selections, Other write-in, an unresolved DTC number, and untouched signature/date areas. These are developer-mapped subsets of one exact blank version, **not automatic whole-form completion or a model quality evaluation**.
+
+Each successful run publishes a unique `outputs/draft-.../` **inside the fictional root**, containing:
+
+- `draft-packet.pdf`: original form pages with flattened answer overlays, any full supplemental answers, then reviewed supporting PDFs in explicit order. A 24-point draft banner is added **above** each original form page rather than obscuring or scaling issuer content. Supplemental pages are labeled as drafts; original attachment pages are preserved, not stamped or rewritten with answers.
+- `draft.json`: exact input/review/application/output hashes, declared requirements and mappings, per-answer values/citations/review reasons/exceptions, actual final pagination, attachment records and render-check results.
+- `reviewer-summary.txt`: separate internal answer/value/evidence/exception report, including form/source/packet page locations. It is never appended to the packet.
+- `page-N-before.png` / `page-N-after.png`: rendered original/form output comparisons for every form page.
+- `supplement-page-N.png`: actual renders of each generated supplemental page; full answer text is checked within its body region before publication.
+
+Generated form and supplemental pages are labeled **INCOMPLETE DRAFT - NOT FOR SUBMISSION**; the example additionally labels form pages **FICTIONAL DATA**. Attachments retain their original pages. The entire application is not declared complete: unattempted fields outside the selected subset remain unresolved. The source blank and supporting PDFs remain unchanged.
+
+### Explicit reviewed handoff
+
+The general local command is:
+
+```bash
+bd-packet draft --root . --request outputs/draft-request.json \
+  --review outputs/draft-review.json
+```
+
+Use actual prepared input filenames. This is currently a technical/development interface, not a business-maintained JSON workflow. The typed `DraftRequest` contains the blank `source`, `mode` (`fictional` or `reviewed_evidence`), existing `ApplicationRequirements`, `ResponseLayout`, `AnswerProposals`, exact supporting paths/hashes, ordered attachment source IDs, and protected regions. Existing retrieval proposals and reviewed mappings can be supplied in those same contracts; **there is no automatic discovery/retrieval-to-reviewed-draft promotion**.
+
+`DraftReview.request_sha256` binds the review to the exact request-file bytes, including values, citations, mappings, source versions and attachment order. Each `draft_verified` decision must explicitly confirm evidence support, source approval and placement, and include a reason; attachments need their own reviewed source IDs. Omitted/withheld decisions leave answers blank. A model's confidence, catalog description or exact quote cannot create this review. For real evidence, a person must check support/conditions/periods and placements before recording the decision.
+
+**The review JSON is a trusted local development input, not authentication, a digital signature, or a production approval boundary.** Do not let the model write it or treat a generated fictional review fixture as business authorization. Restrict access operationally. No human-maintained fact sheet is introduced, and this temporary checkpoint is not the target permanent per-field business process.
+
+The writer rechecks native citations and exact identifier strings, requires requested/claimed periods to agree, and includes cited evidence in the packet before writing a value. It rejects request/review/source changes, wrong application hashes, unknown identities, overlapping/protected regions and writable text regions covering existing issuer text. Unsupported/malformed answers and unfit write-ins are withheld individually while supported work continues. Signing requirements cannot receive writable mappings or approved write decisions.
+
+### Writer limits and verification
+
+- This slice writes scalar text/identifiers, single/multiple selections with write-ins, and narratives. Money, ordinary dates, boolean-specific layouts, tables and arbitrary fonts are not released by this writer; they remain explicit exceptions. Existing proposal contracts support more kinds than this writer.
+- Blank forms must have native instruction/label text, zero rotation, standard point units, origin `(0,0)` and no differing crop box. Prefilled native fields are rejected. Scanned/rotated **blank mapping** is not wired into this writer; rotated supporting attachments are a separate case and are preserved.
+- Limits: 20 declared requirements, ten selected sources/attachments, 30 inventoried files in designated source families, 60 total packet pages, 2 MiB per JSON input, existing 64 MiB per PDF input, and 12 million pixels per rendered page. Helvetica is fixed at the reviewed readable size (minimum 10 points); unsupported characters or unbreakable/oversized text are flagged, never silently substituted, shrunk or truncated.
+- Long narratives retain their complete answer in one or more question-labeled supplemental pages, with final evidence references and a form-page backlink. The form marker points to the actual supplement start; attachment page references use actual form/supplement/attachment page counts.
+- Before atomic publication, native text is checked in the written regions and actual form renders are compared at scale 2. After removing the added banner, there must be zero changed pixels above luminance difference 16 outside actual written regions plus a fixed two-pixel edge allowance. Selected controls must visibly change. These checks protect placement/preservation, not semantic support or whether a reviewer chose the right mapping. Human visual inspection remains necessary.
+- The packet, internal summary, report and PNGs publish together only after checks and input freshness rechecks. Failures leave no successful/partial published run. Repeated successful invocations create new isolated run directories; they never overwrite earlier outputs. The report hashes identify repeat inputs, not a production idempotency/notification service.
+- Signatures, signature dates, unresolved fields, undeclared fields and unapproved attachments are never supplied by inference. No signer-specific duplication, archive comparison, chat revision, notification, signing or submission is implemented here. Sources, drafts, reports and PNGs remain potentially confidential and must stay in controlled local output locations.
+
+ReportLab was already pinned for fictional PDFs; its same verified `5.0.1` pin is now a runtime dependency because the application itself draws PDF overlays/supplements. No new PDF framework or version was introduced. Strict mypy checks application boundaries; as with PDFium, the untyped ReportLab dependency is explicitly configured.
 
 ## Requirement-driven evidence retrieval
 
@@ -130,7 +182,7 @@ python -m examples.proposal_demo --root . \
   --deployment gpt-6.1-sol --allow-paid
 ```
 
-The [demo](examples/proposal_demo.py) creates four deterministic, fictional PDFs using the existing ReportLab development dependency: a blank questionnaire, company identity, conflicting contact record, and July financial report. You do not supply or maintain any test documents. It creates them beneath a unique Git-ignored `outputs/proposal-demo-.../synthetic-root/`, **never reads your real document folders**, and does not create Excel workbooks.
+The [demo](examples/proposal_demo.py) creates four deterministic, fictional PDFs using the existing pinned ReportLab dependency: a blank questionnaire, company identity, conflicting contact record, and July financial report. You do not supply or maintain any test documents. It creates them beneath a unique Git-ignored `outputs/proposal-demo-.../synthetic-root/`, **never reads your real document folders**, and does not create Excel workbooks.
 
 The application:
 
@@ -219,7 +271,7 @@ These are **layout previews, not a completed application**. No applicant facts, 
 
 The [narrative planner](src/bd_packet_builder/responses.py) measures text using supplied font metrics, including evidence references, at a fixed size of at least 10 points and line spacing of at least font size + 2. It uses the full inline answer when it fits. Otherwise it returns a readable "See Supplemental Answers, Question ..., packet page ..." marker and preserves the complete answer plus evidence references for a supplement. If even the marker cannot fit, it fails explicitly; it never truncates or silently reduces font size. Inline-plus-supplement hybrid delivery is supported at this level (form marker plus complete supplemental answer), but automatic meaning-preserving short summaries are not generated.
 
-`PacketPagination` resolves 1-based page references from ordered form/supplement/evidence sections. It rejects missing/out-of-range/wrong-role references and does not accept reviewer-summary sections. Internal source/version/page citations remain unchanged. **The example uses hypothetical pagination** to demonstrate the rule; a real packet must supply the actual assembled order, paginate the full supplement, resolve references and verify final renders before publication. The helper alone does not verify PDF contents, source hashes or evidence support, and actual packet assembly remains unfinished.
+`PacketPagination` resolves 1-based page references from ordered form/supplement/evidence sections. It rejects missing/out-of-range/wrong-role references and does not accept reviewer-summary sections. Internal source/version/page citations remain unchanged. **This earlier example uses hypothetical pagination** to demonstrate the rule; the newer [controlled draft writer](#controlled-draft-completion) now supplies actual assembled ordering and supplemental/evidence references. The helper alone does not verify PDF contents, source hashes or evidence support.
 
 ### Synthetic model evaluation for structured answers
 
@@ -300,7 +352,7 @@ The v1 real result included qualifying bullets in a label box and excess space a
 
 V2 usage: real subset 4,586 input + 4,848 output = **9,434 tokens** across two calls; synthetic 7,844 input + 5,583 output = **13,427 tokens** across four calls. The earlier v1 reports remain unchanged. The real evaluation covers Q1/Q2/Q11 only, not nine other proposed items, unselected pages, or all cross-page conditions. Continued answers without their prior page and overly thin single-line regions illustrate remaining review needs. Images and native text from only the authorized blank pages were uploaded; no supporting/confidential business evidence or completed packets were sent.
 
-The next work remains independent verification and broader forms, cross-page interpretation, scanned supporting-evidence reading, approved-answer gates and deterministic packet assembly. A passing geometry evaluation does not approve facts, eligibility or a generated packet.
+Broader forms, cross-page interpretation, verified scanned supporting evidence and automatic semantic/source approval remain unfinished. The later [controlled draft writer](#controlled-draft-completion) implements bounded deterministic assembly using an explicit local review checkpoint, not automatic promotion of visual model output. A passing geometry evaluation does not approve facts, eligibility or a generated packet.
 
 ## Quality checks
 

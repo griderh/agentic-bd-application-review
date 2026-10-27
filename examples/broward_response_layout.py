@@ -164,7 +164,7 @@ def _mapping(pages: dict[int, str]) -> ResponseLayout:
                 write_in_region=(
                     NarrativeRegion(
                         page=2,
-                        left=x + 50,
+                        left=x + 60,
                         bottom=y - 5,
                         right=265.0 if x < 100 else 519.0,
                         top=y + 9,

@@ -46,12 +46,13 @@ class MappedResponse(Contract):
     requirement: Requirement
     options: Annotated[tuple[OptionPlacement, ...], Field(max_length=100)] = ()
     narrative_region: NarrativeRegion | None = None
+    text_region: NarrativeRegion | None = None
 
     @model_validator(mode="after")
     def relationships(self) -> Self:
         req = self.requirement
         if req.choices is not None:
-            if self.narrative_region is not None:
+            if self.narrative_region is not None or self.text_region is not None:
                 raise ValueError("Choice groups cannot use a narrative answer region")
             if {o.option_id for o in self.options} != {o.option_id for o in req.choices.options}:
                 raise ValueError("Every choice option requires exactly one placement")
@@ -65,12 +66,20 @@ class MappedResponse(Contract):
                     raise ValueError("Multi-select options must use checkboxes")
         elif self.options:
             raise ValueError("Only choice groups may have option placements")
-        elif req.kind != "narrative" or self.narrative_region is None:
-            raise ValueError("Mapped narrative requires a writable region")
+        elif req.kind == "narrative":
+            if self.narrative_region is None or self.text_region is not None:
+                raise ValueError("Mapped narrative requires only a narrative writable region")
+        elif req.kind in ("text", "identifier", "money", "date"):
+            if self.text_region is None or self.narrative_region is not None:
+                raise ValueError("Mapped scalar requires only a text writable region")
+        else:
+            raise ValueError("This response kind cannot have a writable mapping")
         boxes = [b for o in self.options for b in (o.box, o.label_box)]
         regions = [o.write_in_region for o in self.options if o.write_in_region is not None]
         if self.narrative_region is not None:
             regions.append(self.narrative_region)
+        if self.text_region is not None:
+            regions.append(self.text_region)
         all_regions: list[PageBox | NarrativeRegion] = [*boxes, *regions]
         if any(b.page != req.page for b in all_regions):
             raise ValueError("Response placements must remain on the requirement page")
@@ -119,6 +128,8 @@ def validate_layout(root: Path, source: Path, layout: ResponseLayout) -> None:
                     regions = [o.write_in_region for o in response.options if o.write_in_region]
                     if response.narrative_region:
                         regions.append(response.narrative_region)
+                    if response.text_region:
+                        regions.append(response.text_region)
                     all_regions: list[PageBox | NarrativeRegion] = [*boxes, *regions]
                     if any(b.right > width or b.top > height for b in all_regions):
                         raise LayoutError("Mapped response region is outside the page")

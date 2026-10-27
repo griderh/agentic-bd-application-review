@@ -36,7 +36,7 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["pypdfium2", "pypdfium2.*"]
+module = ["pypdfium2", "pypdfium2.*", "reportlab", "reportlab.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
