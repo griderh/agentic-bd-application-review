@@ -209,6 +209,27 @@ class Citation(Contract):
         return TextCitation(self.source_id, self.page, self.start, self.end, self.quote)
 
 
+class OcrCitation(Contract):
+    evidence_kind: Literal["ocr"]
+    source_id: Sha256
+    source_sha256: Sha256
+    page: Annotated[int, Field(ge=1)]
+    artifact_path: Annotated[
+        str, Field(min_length=1, max_length=256, pattern=r"^outputs/ocr-[0-9a-f]{32}/ocr\.json$")
+    ]
+    artifact_sha256: Sha256
+    render_sha256: Sha256
+    word_start: Annotated[int, Field(ge=0)]
+    word_end: Annotated[int, Field(ge=1)]
+    quote: Nonblank
+
+    @model_validator(mode="after")
+    def valid_word_span(self) -> Self:
+        if self.word_end <= self.word_start:
+            raise ValueError("OCR citation word range must be nonempty and ordered")
+        return self
+
+
 class AnswerProposal(Contract):
     schema_version: Literal[1] = 1
     requirement_id: Identifier
@@ -222,7 +243,7 @@ class AnswerProposal(Contract):
         "deferred_to_signing",
     ]
     value: AnswerValue | None = None
-    citations: Annotated[tuple[Citation, ...], Field(max_length=20)] = ()
+    citations: Annotated[tuple[Citation | OcrCitation, ...], Field(max_length=20)] = ()
     claimed_period: ReportingPeriod | None = None
     confidence: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] | None = None
     explanation: Nonblank | None = None
@@ -269,10 +290,11 @@ def check_native_citations(
 def check_proposal(
     root: Path, inventory: Inventory, requirement: Requirement, proposal: AnswerProposal
 ) -> ProposalCheck:
-    """Resolve native quotes, not semantic support, source approval, or form placement.
+    """Resolve native quotes; keep OCR citations pending visual review.
 
     Unknown IDs/pages and literal quote mismatches reject the proposal. Source
     mutation and I/O errors propagate as technical failures, not review exceptions.
+    OCR citations are never resolved here and cannot be auto-promoted.
     """
     identity = requirement.requirement_id
     if proposal.requirement_id != identity:
@@ -308,7 +330,9 @@ def check_proposal(
                     for key in selected & options.keys()
                 ):
                     issues.append("choice_write_in_missing")
-    resolved, citation_issues = check_native_citations(root, inventory, proposal.citations)
+    native_citations = tuple(c for c in proposal.citations if isinstance(c, Citation))
+    ocr_citations = tuple(c for c in proposal.citations if isinstance(c, OcrCitation))
+    resolved, citation_issues = check_native_citations(root, inventory, native_citations)
     issues.extend(citation_issues)
     if issues:
         return ProposalCheck(identity, "rejected", tuple(dict.fromkeys(issues)), resolved)
@@ -321,6 +345,8 @@ def check_proposal(
             "application_requirement_unverified",
         )
     )
+    if ocr_citations:
+        issues.append("ocr_citation_requires_local_review")
     if requirement.requested_period is not None:
         issues.append("reporting_period_unverified")
         if (

@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 from contextlib import closing
 from pathlib import Path
@@ -7,8 +8,10 @@ import pypdfium2 as pdfium
 import pytest
 from reportlab.pdfgen.canvas import Canvas
 
-from bd_packet_builder.draft import run_draft
+from bd_packet_builder.draft import MarkPlacement, TextPlacement, run_draft
 from bd_packet_builder.inventory import build_inventory
+from bd_packet_builder.layout import PageBox
+from bd_packet_builder.responses import NarrativeRegion
 
 
 def make_pdf(path: Path, lines: list[tuple[float, float, str]], *, radio: bool = False) -> None:
@@ -80,7 +83,7 @@ def prepare(root: Path, *, long: bool = False, single: bool = False) -> tuple[Pa
         ("sign", "Authorized signature:", "signature"),
         ("date", "Signature date:", "signature_date"),
     ]
-    reqs = [
+    reqs: list[dict[str, object]] = [
         dict(requirement_id=key, application_sha256=digest, page=1, instruction=label, kind=kind)
         for key, label, kind in definitions
     ]
@@ -187,6 +190,9 @@ def write_review(request: Path, review: Path, *, approve: bool = True) -> None:
                         evidence_support_confirmed=approve,
                         source_approved=approve,
                         placement_confirmed=approve,
+                        source_subject_confirmed=approve,
+                        ocr_visual_confirmed=approve,
+                        confirmed_source_subject="Fictional test source",
                         reason="Controlled fictional test only.",
                     )
                     for key in ("crd", "instruments", "services")
@@ -196,8 +202,200 @@ def write_review(request: Path, review: Path, *, approve: bool = True) -> None:
     )
 
 
+def add_ocr_citation(
+    root: Path,
+    request_path: Path,
+    data: dict,
+    requirement_id: str,
+    quote: str = "CRD: 001234",
+) -> Path:
+    inventory = build_inventory(root, families=("FINRA_Certification",), max_sources=1)
+    record = inventory.sources[0]
+    source_path = root / record.path
+    with (
+        pdfium.PdfDocument(str(source_path)) as document,
+        closing(document[0]) as page,
+        closing(page.render(scale=300 / 72)) as bitmap,  # pyright: ignore[reportArgumentType]
+        closing(bitmap.to_pil()) as image,
+    ):
+        rendered = io.BytesIO()
+        image.save(rendered, format="PNG")
+        width, height = image.size
+    words = [
+        dict(
+            text=word,
+            confidence=96.0,
+            left=20 + index * 80,
+            top=20,
+            width=70,
+            height=20,
+            block=1,
+            paragraph=1,
+            line=1,
+        )
+        for index, word in enumerate(("CRD:", "001234"))
+    ]
+    artifact = dict(
+        schema_version=1,
+        status="ocr_feasibility_unverified_not_answers",
+        source=record.__dict__,
+        page=1,
+        engine="tesseract",
+        engine_version="5.5.0",
+        language="eng",
+        dpi=300,
+        page_segmentation_mode=6,
+        image_width=width,
+        image_height=height,
+        coordinate_system="rendered_pixels_top_left_not_pdf_points",
+        render_sha256=hashlib.sha256(rendered.getvalue()).hexdigest(),
+        limits=dict(timeout_seconds=30, max_pixels=20_000_000, max_output_bytes=4_000_000),
+        words=words,
+        text="CRD: 001234",
+        flags=["ocr_unverified", "not_semantic_grounding"],
+    )
+    artifact_path = root / f"outputs/ocr-{'1' * 32}/ocr.json"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps(artifact))
+    citation = dict(
+        evidence_kind="ocr",
+        source_id=record.source_id,
+        source_sha256=record.sha256,
+        page=1,
+        artifact_path=f"outputs/ocr-{'1' * 32}/ocr.json",
+        artifact_sha256=hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+        render_sha256=artifact["render_sha256"],
+        word_start=0,
+        word_end=2,
+        quote=quote,
+    )
+    proposal = next(
+        p for p in data["proposals"]["proposals"] if p["requirement_id"] == requirement_id
+    )
+    proposal["citations"] = [citation]
+    request_path.write_text(json.dumps(data))
+    return artifact_path
+
+
 def execute(root: Path, request: Path, review: Path) -> Path:
     return run_draft(root, request.relative_to(root), review.relative_to(root))
+
+
+def test_reviewed_ocr_citation_can_support_exact_identifier(tmp_path: Path) -> None:
+    request, review, data = prepare(tmp_path)
+    artifact = add_ocr_citation(tmp_path, request, data, "crd")
+    write_review(request, review)
+    output = execute(tmp_path, request, review)
+    manifest = json.loads((output / "draft.json").read_text())
+    assert "crd" in manifest["written_requirements"]
+    answer = next(item for item in manifest["answers"] if item["requirement_id"] == "crd")
+    assert answer["ocr_evidence"][0]["quote"] == "CRD: 001234"
+    assert "ocr_citation_requires_local_review" in answer["citation_check"]["issues"]
+    assert (
+        answer["ocr_evidence"][0]["artifact_sha256"]
+        == hashlib.sha256(artifact.read_bytes()).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected_issue"),
+    [
+        ("artifact_sha256", "ocr_artifact_hash_mismatch"),
+        ("source_sha256", "ocr_source_version_mismatch"),
+        ("render_sha256", "ocr_render_mismatch"),
+        ("quote", "ocr_quote_mismatch"),
+    ],
+)
+def test_invalid_ocr_evidence_is_withheld_while_native_work_continues(
+    tmp_path: Path, tamper: str, expected_issue: str
+) -> None:
+    request, review, data = prepare(tmp_path)
+    artifact = add_ocr_citation(tmp_path, request, data, "crd")
+    request_data = json.loads(request.read_text())
+    citation = request_data["proposals"]["proposals"][0]["citations"][0]
+    if tamper == "artifact_sha256":
+        citation["artifact_sha256"] = "0" * 64
+    elif tamper == "source_sha256":
+        citation["source_sha256"] = "0" * 64
+    elif tamper == "render_sha256":
+        citation["render_sha256"] = "0" * 64
+    else:
+        citation["quote"] = "CRD: 999999"
+    request.write_text(json.dumps(request_data))
+    write_review(request, review)
+    output = execute(tmp_path, request, review)
+    manifest = json.loads((output / "draft.json").read_text())
+    assert "crd" not in manifest["written_requirements"]
+    assert "instruments" in manifest["written_requirements"]
+    answer = next(item for item in manifest["answers"] if item["requirement_id"] == "crd")
+    assert expected_issue in answer["issues"]
+    assert artifact.is_file()
+
+
+def test_ocr_artifact_mutation_during_render_prevents_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bd_packet_builder.draft as module
+
+    request, review, data = prepare(tmp_path)
+    artifact = add_ocr_citation(tmp_path, request, data, "crd")
+    write_review(request, review)
+    original = module._render_checks
+
+    def mutate(
+        original_data: bytes,
+        packet: bytes,
+        output: Path,
+        allowed: list[PageBox | NarrativeRegion],
+        marks: list[MarkPlacement],
+        texts: list[TextPlacement],
+    ) -> dict[str, object]:
+        result = original(original_data, packet, output, allowed, marks, texts)
+        artifact.write_bytes(artifact.read_bytes() + b" ")
+        return result
+
+    monkeypatch.setattr(module, "_render_checks", mutate)
+    with pytest.raises(ValueError, match="OCR evidence changed"):
+        execute(tmp_path, request, review)
+    assert not list((tmp_path / "outputs").glob("draft-*"))
+    assert not list((tmp_path / "outputs").glob(".staging-*"))
+
+
+def test_ocr_draft_requires_explicit_subject_and_visual_review(tmp_path: Path) -> None:
+    request, review, data = prepare(tmp_path)
+    add_ocr_citation(tmp_path, request, data, "crd")
+    write_review(request, review)
+    review_data = json.loads(review.read_text())
+    decision = next(item for item in review_data["decisions"] if item["requirement_id"] == "crd")
+    decision["source_subject_confirmed"] = False
+    review.write_text(json.dumps(review_data))
+    output = execute(tmp_path, request, review)
+    manifest = json.loads((output / "draft.json").read_text())
+    assert "crd" not in manifest["written_requirements"]
+    answer = next(item for item in manifest["answers"] if item["requirement_id"] == "crd")
+    assert "ocr_source_subject_not_confirmed" in answer["issues"]
+
+    write_review(request, review)
+    review_data = json.loads(review.read_text())
+    decision = next(item for item in review_data["decisions"] if item["requirement_id"] == "crd")
+    decision["confirmed_source_subject"] = None
+    review.write_text(json.dumps(review_data))
+    output = execute(tmp_path, request, review)
+    manifest = json.loads((output / "draft.json").read_text())
+    assert "crd" not in manifest["written_requirements"]
+    answer = next(item for item in manifest["answers"] if item["requirement_id"] == "crd")
+    assert "ocr_source_subject_not_confirmed" in answer["issues"]
+
+    write_review(request, review)
+    review_data = json.loads(review.read_text())
+    decision = next(item for item in review_data["decisions"] if item["requirement_id"] == "crd")
+    decision["ocr_visual_confirmed"] = False
+    review.write_text(json.dumps(review_data))
+    output = execute(tmp_path, request, review)
+    manifest = json.loads((output / "draft.json").read_text())
+    assert "crd" not in manifest["written_requirements"]
+    answer = next(item for item in manifest["answers"] if item["requirement_id"] == "crd")
+    assert "ocr_visual_review_not_confirmed" in answer["issues"]
 
 
 def test_draft_writes_reviewed_values_and_separates_report(tmp_path: Path) -> None:
@@ -223,6 +421,26 @@ def test_draft_writes_reviewed_values_and_separates_report(tmp_path: Path) -> No
     assert (tmp_path / "bd_agreements/Blank/form.pdf").read_bytes() == original
     assert (output / "page-1-after.png").exists()
     assert (output / "page-1-before.png").exists()
+
+
+def test_reviewer_notes_stay_in_internal_report_and_out_of_packet(tmp_path: Path) -> None:
+    request, review, _ = prepare(tmp_path)
+    review_data = json.loads(review.read_text())
+    review_data["reviewer_notes"] = ["Fictional test exception; inspect before attestation."]
+    review.write_text(json.dumps(review_data))
+    output = execute(tmp_path, request, review)
+    summary = (output / "reviewer-summary.txt").read_text()
+    assert "Fictional test exception; inspect before attestation." in summary
+    manifest = json.loads((output / "draft.json").read_text())
+    assert manifest["review"]["reviewer_notes"] == [
+        "Fictional test exception; inspect before attestation."
+    ]
+    with (
+        pdfium.PdfDocument(str(output / "draft-packet.pdf")) as document,
+        closing(document[0]) as page,
+        closing(page.get_textpage()) as text,
+    ):
+        assert "Fictional test exception" not in text.get_text_bounded()
 
 
 def test_long_narrative_has_real_supplement_and_final_attachment_reference(tmp_path: Path) -> None:
@@ -282,7 +500,15 @@ def test_render_failure_leaves_no_partial_run(
 
     request, review, _ = prepare(tmp_path)
 
-    def fail(*args: object, **kwargs: object) -> None:
+    def fail(
+        _original_data: bytes,
+        _packet: bytes,
+        _output: Path,
+        _allowed: list[PageBox | NarrativeRegion],
+        _marks: list[MarkPlacement],
+        _texts: list[TextPlacement],
+    ) -> None:
+        _ = (_original_data, _packet, _output, _allowed, _marks, _texts)
         raise OSError("synthetic render failure")
 
     monkeypatch.setattr(module, "_render_checks", fail)
@@ -360,8 +586,15 @@ def test_changes_during_rendering_prevent_atomic_publication(
     request, review, data = prepare(tmp_path)
     original = module._render_checks
 
-    def mutate(*args: object, **kwargs: object) -> dict:
-        result = original(*args, **kwargs)
+    def mutate(
+        original_data: bytes,
+        packet: bytes,
+        output: Path,
+        allowed: list[PageBox | NarrativeRegion],
+        marks: list[MarkPlacement],
+        texts: list[TextPlacement],
+    ) -> dict[str, object]:
+        result = original(original_data, packet, output, allowed, marks, texts)
         path = {
             "request": request,
             "review": review,

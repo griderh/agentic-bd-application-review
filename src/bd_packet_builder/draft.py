@@ -13,7 +13,7 @@ from typing import Annotated, Literal, Self
 
 import pypdfium2 as pdfium
 from PIL import Image, ImageChops, ImageDraw
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import RectangleObject
 from reportlab.pdfbase.pdfmetrics import stringWidth
@@ -28,6 +28,7 @@ from bd_packet_builder.contracts import (
     MultiSelectValue,
     NarrativeValue,
     Nonblank,
+    OcrCitation,
     Sha256,
     SingleSelectValue,
     TextValue,
@@ -41,7 +42,7 @@ from bd_packet_builder.inventory import (
     read_source_bytes,
 )
 from bd_packet_builder.layout import MappedResponse, PageBox, ResponseLayout, validate_layout
-from bd_packet_builder.local_inputs import read_local_input
+from bd_packet_builder.local_inputs import LocalInputError, read_local_input
 from bd_packet_builder.responses import (
     NarrativeRegion,
     PacketPagination,
@@ -114,6 +115,9 @@ class DraftDecision(Contract):
     evidence_support_confirmed: bool
     source_approved: bool
     placement_confirmed: bool
+    source_subject_confirmed: bool = False
+    ocr_visual_confirmed: bool = False
+    confirmed_source_subject: Nonblank | None = None
     reason: Nonblank
 
     @model_validator(mode="after")
@@ -130,6 +134,7 @@ class DraftReview(Contract):
     reviewer: Nonblank
     decisions: Annotated[tuple[DraftDecision, ...], Field(max_length=20)]
     attachment_source_ids: Annotated[tuple[Sha256, ...], Field(max_length=10)] = ()
+    reviewer_notes: Annotated[tuple[Nonblank, ...], Field(max_length=20)] = ()
 
     @model_validator(mode="after")
     def unique(self) -> Self:
@@ -152,6 +157,18 @@ class MarkPlacement:
     control: Literal["radio", "checkbox"]
 
 
+class OcrWordEvidence(Contract):
+    text: Nonblank
+    confidence: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)]
+    left: Annotated[int, Field(ge=0)]
+    top: Annotated[int, Field(ge=0)]
+    width: Annotated[int, Field(ge=1)]
+    height: Annotated[int, Field(ge=1)]
+    block: Annotated[int, Field(ge=1)]
+    paragraph: Annotated[int, Field(ge=1)]
+    line: Annotated[int, Field(ge=1)]
+
+
 def _measure(text: str, size: float) -> float:
     return float(stringWidth(text, "Helvetica", size))
 
@@ -170,6 +187,138 @@ def _overlap(a: PageBox | NarrativeRegion, b: PageBox | NarrativeRegion) -> bool
         a.page == b.page
         and min(a.right, b.right) > max(a.left, b.left)
         and (min(a.top, b.top) > max(a.bottom, b.bottom))
+    )
+
+
+def _ocr_text(words: list[OcrWordEvidence]) -> str:
+    lines: list[list[str]] = []
+    previous: tuple[int, int, int] | None = None
+    for word in words:
+        key = (word.block, word.paragraph, word.line)
+        if key != previous:
+            lines.append([])
+        lines[-1].append(word.text)
+        previous = key
+    return "\n".join(" ".join(line) for line in lines)
+
+
+def _verify_ocr_citation(
+    root: Path,
+    inventory: Inventory,
+    citation: OcrCitation,
+    render_hashes: dict[tuple[str, int], str],
+) -> tuple[str | None, bytes | None, dict[str, object] | None]:
+    try:
+        artifact_path = Path(citation.artifact_path)
+        artifact = read_local_input(root, artifact_path, Path("outputs"), 2 * 1024 * 1024)
+    except (LocalInputError, FileNotFoundError, IsADirectoryError):
+        return "ocr_artifact_unavailable", None, None
+    if hashlib.sha256(artifact).hexdigest() != citation.artifact_sha256:
+        return "ocr_artifact_hash_mismatch", None, None
+    try:
+        data: object = json.loads(artifact)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "ocr_artifact_malformed", None, None
+    if not isinstance(data, dict) or data.get("status") != "ocr_feasibility_unverified_not_answers":
+        return "ocr_artifact_status_invalid", None, None
+    source = next((s for s in inventory.sources if s.source_id == citation.source_id), None)
+    artifact_source = data.get("source")
+    if (
+        source is None
+        or not isinstance(artifact_source, dict)
+        or source.sha256 != citation.source_sha256
+        or artifact_source.get("source_id") != citation.source_id
+        or artifact_source.get("sha256") != citation.source_sha256
+        or artifact_source.get("path") != source.path
+        or data.get("page") != citation.page
+        or source.page_count is None
+        or citation.page > source.page_count
+    ):
+        return "ocr_source_version_mismatch", None, None
+    if (
+        type(data.get("dpi")) is not int
+        or data["dpi"] != 300
+        or data.get("engine") != "tesseract"
+        or not isinstance(data.get("engine_version"), str)
+        or re.fullmatch(r"5\.\d+\.\d+", data["engine_version"]) is None
+        or data.get("language") != "eng"
+        or type(data.get("page_segmentation_mode")) is not int
+        or data["page_segmentation_mode"] != 6
+        or data.get("coordinate_system") != "rendered_pixels_top_left_not_pdf_points"
+        or type(data.get("image_width")) is not int
+        or type(data.get("image_height")) is not int
+        or min(data["image_width"], data["image_height"]) < 1
+        or data["image_width"] * data["image_height"] > 20_000_000
+    ):
+        return "ocr_render_or_configuration_mismatch", None, None
+    if data.get("render_sha256") != citation.render_sha256:
+        return "ocr_render_mismatch", None, None
+    flags = data.get("flags")
+    if (
+        not isinstance(flags, list)
+        or not all(isinstance(flag, str) for flag in flags)
+        or not {"ocr_unverified", "not_semantic_grounding"} <= set(flags)
+    ):
+        return "ocr_artifact_status_invalid", None, None
+    raw_words = data.get("words")
+    if not isinstance(raw_words, list) or not 1 <= len(raw_words) <= 50_000:
+        return "ocr_words_invalid", None, None
+    try:
+        words = [OcrWordEvidence.model_validate(word) for word in raw_words]
+    except ValidationError:
+        return "ocr_words_invalid", None, None
+    if any(
+        word.left + word.width > data["image_width"]
+        or word.top + word.height > data["image_height"]
+        for word in words
+    ):
+        return "ocr_words_invalid", None, None
+    if data.get("text") != _ocr_text(words):
+        return "ocr_text_mismatch", None, None
+    selected = words[citation.word_start : citation.word_end]
+    if citation.word_end > len(words) or not selected or _ocr_text(selected) != citation.quote:
+        return "ocr_quote_mismatch", None, None
+    key = citation.source_id, citation.page
+    rendered = render_hashes.get(key)
+    if rendered is None:
+        try:
+            source_data = read_source_bytes(root, inventory, citation.source_id)
+            with (
+                pdfium.PdfDocument(source_data) as document,
+                closing(document[citation.page - 1]) as page,
+            ):
+                bitmap = page.render(scale=300 / 72)  # pyright: ignore[reportArgumentType]
+                with closing(bitmap), closing(bitmap.to_pil()) as image:
+                    if image.size != (data["image_width"], data["image_height"]):
+                        return "ocr_render_mismatch", None, None
+                    stream = BytesIO()
+                    image.save(stream, format="PNG")
+                    rendered = hashlib.sha256(stream.getvalue()).hexdigest()
+        except pdfium.PdfiumError:
+            return "ocr_render_unavailable", None, None
+        render_hashes[key] = rendered
+    if rendered != citation.render_sha256:
+        return "ocr_render_mismatch", None, None
+    selected_words = words[citation.word_start : citation.word_end]
+    left = min(word.left for word in selected_words)
+    top = min(word.top for word in selected_words)
+    right = max(word.left + word.width for word in selected_words)
+    bottom = max(word.top + word.height for word in selected_words)
+    return (
+        None,
+        artifact,
+        {
+            "artifact_path": citation.artifact_path,
+            "artifact_sha256": citation.artifact_sha256,
+            "render_sha256": citation.render_sha256,
+            "word_start": citation.word_start,
+            "word_end": citation.word_end,
+            "quote": citation.quote,
+            "pixel_bounds_top_left": [left, top, right, bottom],
+            "engine": data.get("engine"),
+            "engine_version": data.get("engine_version"),
+            "dpi": data["dpi"],
+        },
     )
 
 
@@ -459,6 +608,8 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
     supplements: list[tuple[str, tuple[str, ...]]] = []
     supplement_starts: dict[str, int] = {}
     supplement_page_count = 0
+    ocr_render_hashes: dict[tuple[str, int], str] = {}
+    ocr_artifact_snapshots: dict[Path, bytes] = {}
     for proposal in request.proposals.proposals:
         identity = proposal.requirement_id
         req = requirements[identity]
@@ -474,6 +625,22 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             "citation_check": asdict(check),
             "review_reason": decision.reason if decision else None,
         }
+        ocr_citations = tuple(c for c in proposal.citations if isinstance(c, OcrCitation))
+        ocr_evidence: list[dict[str, object]] = []
+        ocr_valid = True
+        for citation in ocr_citations:
+            ocr_issue, snapshot, details = _verify_ocr_citation(
+                root, inventory, citation, ocr_render_hashes
+            )
+            if ocr_issue:
+                issues.append(ocr_issue)
+                ocr_valid = False
+            if snapshot is not None:
+                ocr_artifact_snapshots[Path(citation.artifact_path)] = snapshot
+            if details is not None:
+                ocr_evidence.append(details)
+        if ocr_citations:
+            result["ocr_evidence"] = ocr_evidence
         results.append(result)
         if req.kind in ("signature", "signature_date"):
             issues.append("human_signing_required")
@@ -484,6 +651,22 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
         if decision is None or decision.decision != "draft_verified":
             issues.append("withheld" if decision else "not_reviewed")
             continue
+        if ocr_citations:
+            if not decision.source_subject_confirmed or not decision.confirmed_source_subject:
+                issues.append("ocr_source_subject_not_confirmed")
+            if not decision.ocr_visual_confirmed:
+                issues.append("ocr_visual_review_not_confirmed")
+            if not ocr_valid:
+                issues.append("ocr_evidence_not_verified")
+            if any(
+                issue in issues
+                for issue in (
+                    "ocr_source_subject_not_confirmed",
+                    "ocr_visual_review_not_confirmed",
+                    "ocr_evidence_not_verified",
+                )
+            ):
+                continue
         if mapped is None:
             issues.append("placement_not_available")
             continue
@@ -685,10 +868,13 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             != original
         ):
             raise DraftError("Blank application changed; no output published")
+        for path, snapshot in ocr_artifact_snapshots.items():
+            if read_local_input(root, path, Path("outputs"), 2 * 1024 * 1024) != snapshot:
+                raise DraftError("OCR evidence changed; no output published")
 
     payload: dict[str, object] = {
         "schema_version": 1,
-        "writer_version": "reviewed-draft-overlay-v1",
+        "writer_version": "reviewed-draft-overlay-v2",
         "created_at": datetime.now(UTC).isoformat(),
         "status": "incomplete_draft_not_for_submission",
         "mode": request.mode,
@@ -714,7 +900,7 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             "review_JSON_is_trusted_input_not_authentication",
             "declared_subset_only_not_full_application_coverage",
             "native_unrotated_blank_mapping_only",
-            "no_OCR_answer_release_no_signer_copies_no_submission",
+            "OCR_requires_source_subject_visual_support_and_placement_review",
             "no_historical_comparison_or_business_approval",
         ],
     }
@@ -760,7 +946,11 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             "Coverage: declared subset only; all other form fields remain unresolved.",
             "Signatures and signature dates must be completed only by humans at signing.",
         ]
+        if review.reviewer_notes:
+            summary.extend(["", "Reviewer notes:"])
+            summary.extend(f"- {note}" for note in review.reviewer_notes)
         for item, proposal in zip(results, request.proposals.proposals, strict=True):
+            summary_decision = decisions.get(proposal.requirement_id)
             packet_pages = placements.get(proposal.requirement_id, {}).get(
                 "evidence_packet_pages", []
             )
@@ -782,6 +972,26 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
                     f"Evidence: {source.path if source else 'UNRESOLVED SOURCE'}; "
                     f"sha256={source.sha256 if source else citation.source_id}; "
                     f"source page {citation.page}"
+                )
+                if isinstance(citation, OcrCitation):
+                    summary.append(
+                        f"OCR quote: {citation.quote}; artifact {citation.artifact_path}; "
+                        f"word range [{citation.word_start}, {citation.word_end}); "
+                        "see draft.json for exact pixel bounds and render hash."
+                    )
+            if any(isinstance(c, OcrCitation) for c in proposal.citations):
+                confirmed_subject = (
+                    summary_decision.confirmed_source_subject
+                    if summary_decision
+                    else "(not confirmed)"
+                )
+                visual_confirmation = (
+                    summary_decision.ocr_visual_confirmed if summary_decision else False
+                )
+                summary.append(
+                    "OCR review: "
+                    f"source subject confirmed as {confirmed_subject}; "
+                    f"visual confirmation={visual_confirmation}."
                 )
         summary.extend(
             [
