@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "bd-packet-builder"
 version = "0.1.0"
 description = "Local broker-dealer packet builder proof of concept"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 dynamic = ["dependencies"]
 
 [project.scripts]

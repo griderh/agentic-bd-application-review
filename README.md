@@ -23,7 +23,7 @@ Treat business samples and generated outputs as potentially confidential. Do not
 
 ## Local setup
 
-Use Python 3.12 (validated locally with 3.12.13). From the repository root on macOS or Linux:
+The supported Python range is 3.12-3.13; both versions pass the offline suite. Use Python 3.12 for the existing local setup. The hosted Foundry code runtime uses Python 3.13. From the repository root on macOS or Linux:
 
 ```bash
 python3.12 -m venv .venv
