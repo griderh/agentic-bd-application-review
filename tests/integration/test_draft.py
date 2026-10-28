@@ -443,6 +443,123 @@ def test_reviewer_notes_stay_in_internal_report_and_out_of_packet(tmp_path: Path
         assert "Fictional test exception" not in text.get_text_bounded()
 
 
+def test_fuller_draft_accepts_more_requirements_and_preserves_additional_issuer_form(
+    tmp_path: Path,
+) -> None:
+    request_path, review_path, data = prepare(tmp_path)
+    original = json.loads(request_path.read_text())
+    digest = original["layout"]["application_sha256"]
+    for number in range(18):
+        requirement_id = f"additional-{number:02d}"
+        original["requirements"]["requirements"].append(
+            {
+                "requirement_id": requirement_id,
+                "application_sha256": digest,
+                "page": 1,
+                "instruction": f"Additional requirement {number}",
+                "kind": "text",
+            }
+        )
+        original["proposals"]["proposals"].append(
+            {
+                "requirement_id": requirement_id,
+                "outcome": "missing_evidence",
+                "explanation": "No approved source in this synthetic case.",
+            }
+        )
+
+    additional_path = Path("bd_agreements/Blank/authorization.pdf")
+    make_pdf(
+        tmp_path / additional_path,
+        [
+            (40, 740, "Institution:"),
+            (40, 710, "Institution:"),
+            (40, 200, "Signature:"),
+            (340, 200, "Date:"),
+        ],
+    )
+    additional_bytes = (tmp_path / additional_path).read_bytes()
+    original["additional_forms"] = [
+        {
+            "source": {
+                "path": additional_path.as_posix(),
+                "sha256": hashlib.sha256(additional_bytes).hexdigest(),
+            },
+            "fields": [
+                {
+                    "requirement_id": "crd",
+                    "region": {
+                        "page": 1,
+                        "left": 120.0,
+                        "bottom": 730.0,
+                        "right": 300.0,
+                        "top": 748.0,
+                    },
+                },
+                {
+                    "requirement_id": "crd",
+                    "region": {
+                        "page": 1,
+                        "left": 120.0,
+                        "bottom": 700.0,
+                        "right": 300.0,
+                        "top": 718.0,
+                    },
+                },
+            ],
+        }
+    ]
+    proof_path = tmp_path / "bd_agreements/supporting_data/FINRA_Certification/proof.pdf"
+    proof_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas = Canvas(str(proof_path), pagesize=(612, 792), invariant=True)
+    canvas.setFont("Helvetica", 10)
+    for _ in range(61):
+        canvas.drawString(40, 740, "CRD: 001234")
+        canvas.drawString(40, 720, "Treasury and other: Fictional Notes.")
+        canvas.drawString(
+            40,
+            700,
+            "Our fictional firm provides public-sector fixed-income services.",
+        )
+        canvas.showPage()
+    canvas.save()
+    source = build_inventory(tmp_path).sources[0]
+    original["sources"] = [{"path": source.path, "sha256": source.sha256}]
+    original["attachments"] = [source.source_id]
+    for proposal in original["proposals"]["proposals"]:
+        for citation in proposal.get("citations", []):
+            citation["source_id"] = source.source_id
+    request_path.write_text(json.dumps(original))
+    write_review(request_path, review_path)
+    review_data = json.loads(review_path.read_text())
+    review_data["decisions"].extend(
+        {
+            "requirement_id": f"additional-{number:02d}",
+            "decision": "withhold",
+            "evidence_support_confirmed": False,
+            "source_approved": False,
+            "placement_confirmed": False,
+            "reason": "Synthetic unresolved field.",
+        }
+        for number in range(18)
+    )
+    review_path.write_text(json.dumps(review_data))
+
+    output = execute(tmp_path, request_path, review_path)
+    manifest = json.loads((output / "draft.json").read_text())
+    assert len(manifest["requirements"]["requirements"]) == 24
+    assert manifest["additional_forms"][0]["written_requirements"] == ["crd"]
+    assert sum(field["written"] for field in manifest["additional_forms"][0]["fields"]) == 2
+    assert manifest["pagination"]["sections"][1]["role"] == "form"
+    with pdfium.PdfDocument(str(output / "draft-packet.pdf")) as document:
+        assert len(document) == 63
+        with closing(document[1]) as page, closing(page.get_textpage()) as text:
+            page_text = text.get_text_bounded()
+            assert page_text.count("001234") == 2
+            assert "Signature:" in page_text and "Date:" in page_text
+    assert (tmp_path / additional_path).read_bytes() == additional_bytes
+
+
 def test_long_narrative_has_real_supplement_and_final_attachment_reference(tmp_path: Path) -> None:
     request, review, _ = prepare(tmp_path, long=True)
     output = execute(tmp_path, request, review)

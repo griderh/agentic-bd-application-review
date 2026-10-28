@@ -53,7 +53,7 @@ from bd_packet_builder.responses import (
 from bd_packet_builder.retrieval import default_catalog
 from bd_packet_builder.review import AnswerProposals
 
-MAX_PACKET_PAGES = 60
+MAX_PACKET_PAGES = 100
 BANNER_HEIGHT = 24
 RENDER_SCALE = 2
 MAX_RENDER_PIXELS = 12_000_000
@@ -69,6 +69,33 @@ class DraftSource(Contract):
     sha256: Sha256
 
 
+class DraftFormField(Contract):
+    requirement_id: Identifier
+    region: NarrativeRegion
+
+
+class DraftAdditionalForm(Contract):
+    source: DraftSource
+    fields: Annotated[tuple[DraftFormField, ...], Field(max_length=20)]
+    protected_regions: Annotated[tuple[PageBox, ...], Field(max_length=20)] = ()
+
+    @model_validator(mode="after")
+    def unique_placements(self) -> Self:
+        placements = {
+            (
+                field.region.page,
+                field.region.left,
+                field.region.bottom,
+                field.region.right,
+                field.region.top,
+            )
+            for field in self.fields
+        }
+        if len(placements) != len(self.fields):
+            raise ValueError("Additional form placements must be unique")
+        return self
+
+
 class DraftRequest(Contract):
     schema_version: Literal[1] = 1
     mode: Literal["fictional", "reviewed_evidence"]
@@ -79,12 +106,13 @@ class DraftRequest(Contract):
     sources: Annotated[tuple[DraftSource, ...], Field(max_length=10)]
     attachments: Annotated[tuple[Sha256, ...], Field(max_length=10)]
     protected_regions: Annotated[tuple[PageBox, ...], Field(max_length=100)]
+    additional_forms: Annotated[tuple[DraftAdditionalForm, ...], Field(max_length=10)] = ()
 
     @model_validator(mode="after")
     def identities(self) -> Self:
         requirements = {r.requirement_id: r for r in self.requirements.requirements}
-        if len(requirements) > 20:
-            raise ValueError("Draft trial supports at most 20 requirements")
+        if len(requirements) > 100:
+            raise ValueError("Draft trial supports at most 100 requirements")
         if {p.requirement_id for p in self.proposals.proposals} != requirements.keys():
             raise ValueError("Draft proposals must cover exactly the declared requirements")
         if any(
@@ -101,6 +129,17 @@ class DraftRequest(Contract):
             raise ValueError("Draft source paths must be unique")
         if len(set(self.attachments)) != len(self.attachments):
             raise ValueError("Draft attachment identities must be unique")
+        blank_sources = [form.source.path for form in self.additional_forms]
+        if (
+            len(set(blank_sources)) != len(blank_sources)
+            or self.source in blank_sources
+            or any(
+                field.requirement_id not in requirements
+                for additional_form in self.additional_forms
+                for field in additional_form.fields
+            )
+        ):
+            raise ValueError("Additional forms must be distinct and reference known requirements")
         if (
             any(r.kind in ("signature", "signature_date") for r in requirements.values())
             and not self.protected_regions
@@ -132,7 +171,7 @@ class DraftDecision(Contract):
 class DraftReview(Contract):
     request_sha256: Sha256
     reviewer: Nonblank
-    decisions: Annotated[tuple[DraftDecision, ...], Field(max_length=20)]
+    decisions: Annotated[tuple[DraftDecision, ...], Field(max_length=100)]
     attachment_source_ids: Annotated[tuple[Sha256, ...], Field(max_length=10)] = ()
     reviewer_notes: Annotated[tuple[Nonblank, ...], Field(max_length=20)] = ()
 
@@ -453,12 +492,17 @@ def _render_checks(
     allowed: list[PageBox | NarrativeRegion],
     marks: list[MarkPlacement],
     texts: list[TextPlacement],
+    packet_page_offset: int = 0,
+    filename_prefix: str = "",
 ) -> dict[str, object]:
     total_outside = 0
     with pdfium.PdfDocument(packet) as document:
         for placement in texts:
             b = placement.region
-            with closing(document[b.page - 1]) as page, closing(page.get_textpage()) as text:
+            with (
+                closing(document[packet_page_offset + b.page - 1]) as page,
+                closing(page.get_textpage()) as text,
+            ):
                 actual = " ".join(
                     text.get_text_bounded(
                         left=b.left, bottom=b.bottom, right=b.right, top=b.top, errors="strict"
@@ -469,10 +513,10 @@ def _render_checks(
     for number in range(1, len(PdfReader(BytesIO(original)).pages) + 1):
         with (
             _render_image(original, number - 1) as before,
-            _render_image(packet, number - 1) as after,
+            _render_image(packet, packet_page_offset + number - 1) as after,
         ):
-            before.save(output / f"page-{number}-before.png")
-            after.save(output / f"page-{number}-after.png")
+            before.save(output / f"{filename_prefix}page-{number}-before.png")
+            after.save(output / f"{filename_prefix}page-{number}-after.png")
             with after.crop((0, BANNER_HEIGHT * RENDER_SCALE, before.width, after.height)) as body:
                 with ImageChops.difference(before, body) as diff, diff.convert("L") as gray:
                     changed = gray.point([255 if value > 16 else 0 for value in range(256)])
@@ -551,6 +595,61 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
     )
     validate_layout(root, Path(request.source), request.layout)
     reader = _validate_pdf(original, blank=True)
+    additional_forms_data: list[tuple[DraftAdditionalForm, bytes, PdfReader]] = []
+    additional_form_snapshots: dict[Path, bytes] = {}
+    for form in request.additional_forms:
+        form_path = Path(form.source.path)
+        form_bytes = read_local_input(
+            root, form_path, Path("bd_agreements/Blank"), 64 * 1024 * 1024
+        )
+        if hashlib.sha256(form_bytes).hexdigest() != form.source.sha256:
+            raise DraftError("Additional issuer form changed after request preparation")
+        form_reader = _validate_pdf(form_bytes, blank=True)
+        field_regions: list[PageBox | NarrativeRegion] = []
+        with pdfium.PdfDocument(form_bytes) as document:
+            for field in form.fields:
+                region = field.region
+                if region.page > len(form_reader.pages):
+                    raise DraftError("Additional-form field is outside the form")
+                page_width = float(form_reader.pages[region.page - 1].mediabox.width)
+                page_height = float(form_reader.pages[region.page - 1].mediabox.height)
+                if region.right > page_width or region.top > page_height:
+                    raise DraftError("Additional-form field is outside the form")
+                with (
+                    closing(document[region.page - 1]) as page,
+                    closing(page.get_textpage()) as text,
+                ):
+                    native = text.get_text_bounded(
+                        left=region.left,
+                        bottom=region.bottom,
+                        right=region.right,
+                        top=region.top,
+                        errors="strict",
+                    )
+                    if native.replace("_", "").strip():
+                        raise DraftError("Additional-form field overlaps existing issuer text")
+                field_regions.append(region)
+            for protected in form.protected_regions:
+                if (
+                    protected.page > len(form_reader.pages)
+                    or protected.right > float(form_reader.pages[protected.page - 1].mediabox.width)
+                    or protected.top > float(form_reader.pages[protected.page - 1].mediabox.height)
+                ):
+                    raise DraftError("Additional-form protected region is outside the form")
+        if any(
+            _overlap(region, protected)
+            for region in field_regions
+            for protected in form.protected_regions
+        ):
+            raise DraftError("Additional-form field overlaps protected content")
+        if any(
+            _overlap(first, second)
+            for index, first in enumerate(field_regions)
+            for second in field_regions[index + 1 :]
+        ):
+            raise DraftError("Additional-form fields overlap")
+        additional_forms_data.append((form, form_bytes, form_reader))
+        additional_form_snapshots[form_path] = form_bytes
     all_regions = [b for m in request.layout.responses for b in _writable(m)]
     with pdfium.PdfDocument(original) as document:
         for response in request.layout.responses:
@@ -595,7 +694,7 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
     attachment_readers = [
         (source, _validate_pdf(data, blank=False)) for source, data in attachments
     ]
-    form_count = len(reader.pages)
+    form_count = len(reader.pages) + sum(len(form.pages) for _, _, form in additional_forms_data)
     if form_count + sum(len(r.pages) for _, r in attachment_readers) > MAX_PACKET_PAGES:
         raise DraftError("Draft packet exceeds its total page budget")
     decisions = {d.requirement_id: d for d in review.decisions}
@@ -766,10 +865,19 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
         PacketSection(
             section_id="form",
             source_sha256=request.layout.application_sha256,
-            page_count=form_count,
+            page_count=len(reader.pages),
             role="form",
         )
     ]
+    section_data.extend(
+        PacketSection(
+            section_id=f"additional-form-{form.source.sha256[:16]}",
+            source_sha256=form.source.sha256,
+            page_count=len(form_reader.pages),
+            role="form",
+        )
+        for form, _, form_reader in additional_forms_data
+    )
     if supplement_page_count:
         section_data.append(
             PacketSection(
@@ -789,6 +897,40 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
         for source, attachment_reader in attachment_readers
     )
     pagination = PacketPagination(sections=tuple(section_data))
+    accepted_by_id = {proposal.requirement_id: proposal for proposal in accepted}
+    additional_form_texts: list[list[TextPlacement]] = []
+    additional_form_manifest: list[dict[str, object]] = []
+    for form, _, _ in additional_forms_data:
+        form_texts: list[TextPlacement] = []
+        written_requirements: list[str] = []
+        for field in form.fields:
+            approved_proposal = accepted_by_id.get(field.requirement_id)
+            if approved_proposal is None or approved_proposal.value is None:
+                continue
+            if not isinstance(approved_proposal.value, (TextValue, IdentifierValue)):
+                raise DraftError(
+                    "Additional issuer form fields require an approved text or identifier answer"
+                )
+            additional_text = approved_proposal.value.value
+            form_texts.append(TextPlacement(field.region, _lines(additional_text, field.region)))
+            if field.requirement_id not in written_requirements:
+                written_requirements.append(field.requirement_id)
+        additional_form_texts.append(form_texts)
+        additional_form_manifest.append(
+            {
+                "path": form.source.path,
+                "sha256": form.source.sha256,
+                "written_requirements": written_requirements,
+                "fields": [
+                    {
+                        "requirement_id": field.requirement_id,
+                        "page": field.region.page,
+                        "written": field.requirement_id in written_requirements,
+                    }
+                    for field in form.fields
+                ],
+            }
+        )
     supplement_evidence: dict[str, str] = {}
     for proposal in accepted:
         identity = proposal.requirement_id
@@ -800,8 +942,8 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
         evidence_text = "Supporting evidence: " + "; ".join(f"packet page {p}" for p in refs) + "."
         supplement_evidence[identity] = evidence_text
         if isinstance(proposal.value, NarrativeValue):
-            region = mappings[identity].narrative_region
-            if region is None:
+            answer_narrative_region = mappings[identity].narrative_region
+            if answer_narrative_region is None:
                 raise DraftError("Narrative mapping disappeared")
             if identity in supplement_starts:
                 start = pagination.resolve(
@@ -809,11 +951,20 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
                     role="supplemental_answers",
                 )
                 marker = f"See Supplemental Answers, {identity}, packet page {start}."
-                texts.append(TextPlacement(region, _lines(marker, region)))
+                texts.append(
+                    TextPlacement(
+                        answer_narrative_region,
+                        _lines(marker, answer_narrative_region),
+                    )
+                )
             else:
                 texts.append(
                     TextPlacement(
-                        region, _lines(proposal.value.value + "\n" + evidence_text, region)
+                        answer_narrative_region,
+                        _lines(
+                            proposal.value.value + "\n" + evidence_text,
+                            answer_narrative_region,
+                        ),
                     )
                 )
 
@@ -842,8 +993,20 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             update={"source_sha256": hashlib.sha256(supplemental_bytes).hexdigest()}
         )
         pagination = PacketPagination(sections=tuple(section_data))
-    form = _form_pdf(original, texts, marks, request.mode == "fictional")
-    with closing(PdfWriter(clone_from=PdfReader(BytesIO(form)))) as writer:
+    main_form_pdf = _form_pdf(original, texts, marks, request.mode == "fictional")
+    additional_form_pdfs = [
+        _form_pdf(form_bytes, form_texts, [], request.mode == "fictional")
+        for (_, form_bytes, _), form_texts in zip(
+            additional_forms_data, additional_form_texts, strict=True
+        )
+    ]
+    with closing(PdfWriter(clone_from=PdfReader(BytesIO(main_form_pdf)))) as writer:
+        for (additional_form, _, _), additional_pdf in zip(
+            additional_forms_data, additional_form_pdfs, strict=True
+        ):
+            start = len(writer.pages)
+            writer.append(PdfReader(BytesIO(additional_pdf)), import_outline=False)
+            writer.add_outline_item(f"Issuer form {additional_form.source.sha256[:12]}", start)
         if supplemental_bytes:
             writer.append(PdfReader(BytesIO(supplemental_bytes)), import_outline=False)
         for source, attachment_reader in attachment_readers:
@@ -868,6 +1031,12 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             != original
         ):
             raise DraftError("Blank application changed; no output published")
+        for path, snapshot in additional_form_snapshots.items():
+            if (
+                read_local_input(root, path, Path("bd_agreements/Blank"), 64 * 1024 * 1024)
+                != snapshot
+            ):
+                raise DraftError("Additional issuer form changed; no output published")
         for path, snapshot in ocr_artifact_snapshots.items():
             if read_local_input(root, path, Path("outputs"), 2 * 1024 * 1024) != snapshot:
                 raise DraftError("OCR evidence changed; no output published")
@@ -886,6 +1055,7 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
         "requirements": request.requirements.model_dump(mode="json"),
         "layout": request.layout.model_dump(mode="json"),
         "review": review.model_dump(mode="json"),
+        "additional_forms": additional_form_manifest,
         "packet_sha256": hashlib.sha256(packet).hexdigest(),
         "written_requirements": [p.requirement_id for p in accepted],
         "answers": results,
@@ -915,6 +1085,25 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             marks,
             texts,
         )
+        additional_render_checks: list[dict[str, object]] = []
+        page_offset = len(reader.pages)
+        for index, ((_form_request, form_bytes, form_reader), form_texts) in enumerate(
+            zip(additional_forms_data, additional_form_texts, strict=True), start=1
+        ):
+            additional_render_checks.append(
+                _render_checks(
+                    form_bytes,
+                    packet,
+                    output,
+                    [placement.region for placement in form_texts],
+                    [],
+                    form_texts,
+                    packet_page_offset=page_offset,
+                    filename_prefix=f"additional-form-{index}-",
+                )
+            )
+            page_offset += len(form_reader.pages)
+        render["additional_forms"] = additional_render_checks
         with pdfium.PdfDocument(packet) as document:
             for identity, lines in supplements:
                 for offset in range(0, len(lines), SUPPLEMENT_LINES):
@@ -946,6 +1135,11 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
             "Coverage: declared subset only; all other form fields remain unresolved.",
             "Signatures and signature dates must be completed only by humans at signing.",
         ]
+        for form in additional_form_manifest:
+            summary.append(
+                "Additional issuer form appended: "
+                f"{form['path']}; approved mirrored fields: {form['written_requirements']}."
+            )
         if review.reviewer_notes:
             summary.extend(["", "Reviewer notes:"])
             summary.extend(f"- {note}" for note in review.reviewer_notes)
