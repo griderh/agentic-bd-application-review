@@ -290,7 +290,7 @@ class RetrievedPage:
     render_sha256: str | None = None
 
 
-def _read_page(
+def read_page(
     root: Path, inventory: Inventory, source: SourceRecord, page_number: int, allow_ocr: bool
 ) -> RetrievedPage:
     data = read_source_bytes(root, inventory, source.source_id)
@@ -465,7 +465,7 @@ def retrieve_evidence(
                     if len(pages) >= 8:
                         issues.append("page_budget_exhausted")
                         break
-                    pages[key] = _read_page(root, inventory, selected, number, allow_ocr)
+                    pages[key] = read_page(root, inventory, selected, number, allow_ocr)
                 page = pages[key]
                 inspected[need.requirement_id].add(key)
                 issues.extend(page.issues)
