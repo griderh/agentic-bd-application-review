@@ -162,6 +162,19 @@ Plans must cover **every** supplied requirement exactly. This manual plan is a d
 - Cache reuse requires the same model configuration/opt-in. It suppresses the answer call, not source/page rechecking, OCR work or automatic routing; supplying the existing plan also avoids another routing call. It is not a trusted universal answer sheet, signed fact register or cross-application approval mechanism.
 - Internal reports/cache/OCR artifacts contain potentially confidential text and source metadata. Keep them out of submission packets, ordinary logs, source control and public artifacts. No approval, signatures, notification, PDF assembly or submission is introduced.
 
+## Opt-in live agent run (synthetic data only)
+
+`bd-packet agent-run` lets the Foundry model drive the repository's tools end to end on one blank form: interpret the form, retrieve evidence, submit answers, assemble the packet and publish results. It is paid and sends page images and evidence text to the model, so use fictional data. Place the blank under `<root>/bd_agreements/Blank/` and evidence under a designated family such as `<root>/bd_agreements/supporting_data/FINRA_Certification/`.
+
+```bash
+bd-packet agent-run --root /path/to/synthetic-root \
+  --blank "bd_agreements/Blank/Form.pdf" \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --as-of 2026-09-30 --allow-paid
+```
+
+The run is capped at 40 agent turns plus one mapping call per page. Output is an incomplete draft under `<root>/outputs/agent-runs/<run-id>/`, never for submission.
+
 ## Opt-in synthetic Foundry connection test
 
 The local application sends versioned instructions from [the connection module](src/bd_packet_builder/foundry.py), not from the Foundry playground. This experiment does **not** create a hosted agent or change the workbook workflow. It sends only a fixed fictional company, a leading-zero identifier, conflicting fictional phone numbers, and an adversarial document instruction. It never reads application, support, archive or Excel files.

@@ -1,12 +1,21 @@
+import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from agent_framework import (
+    BaseChatClient,
+    ChatResponse,
+    Content,
+    FunctionInvocationLayer,
+    Message,
+)
 from pypdf import PdfReader
 from reportlab.pdfgen.canvas import Canvas
 
@@ -14,13 +23,9 @@ from bd_packet_builder.agent import (
     AGENT_INSTRUCTIONS,
     AGENT_VERSION,
     AgentLimits,
-    ModelTurn,
     PacketAgentTools,
     PageMapError,
-    ToolCall,
-    ToolSpec,
-    TranscriptEntry,
-    run_agent,
+    run_packet_agent,
 )
 from bd_packet_builder.evidence_tools import EvidenceLimits
 from bd_packet_builder.inventory import build_inventory
@@ -98,6 +103,25 @@ def evidence_pdf(root: Path, text: str = EVIDENCE_TEXT) -> None:
     canvas.save()
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class ModelTurn:
+    text: str | None
+    tool_calls: tuple[ToolCall, ...]
+
+
+@dataclass(frozen=True)
+class TranscriptEntry:
+    role: str
+    content: str
+
+
 class FakeMapper:
     def __init__(self, pages: Mapping[int, VisualPage] | None = None, error: bool = False) -> None:
         self.pages = {1: visual_page()} if pages is None else pages
@@ -164,8 +188,7 @@ class Setup:
         self, steps: list[Callable[[list[TranscriptEntry]], ModelTurn]], **kwargs: object
     ) -> RunManifest:
         self.model = Scripted(steps)
-        tools = self.tools(**{k: v for k, v in kwargs.items() if k != "limits"})
-        return run_agent(self.model, tools, limits=kwargs.get("limits", AgentLimits()))  # type: ignore[arg-type]
+        return asyncio.run(run_packet_agent(self.model, self.tools(**kwargs)))
 
     def artifact(self, name: str) -> bytes:
         return self.store.read_artifact(self.manifest.run_id, name)
@@ -176,25 +199,44 @@ def setup(tmp_path: Path) -> Setup:
     return Setup(tmp_path, blank_pdf())
 
 
-class Scripted:
-    """A scripted stand-in for the Foundry model: it only issues the calls it is told to."""
+class Scripted(FunctionInvocationLayer, BaseChatClient):  # type: ignore[misc]
+    """A scripted stand-in for the Foundry model inside the real Agent Framework tool loop."""
 
     def __init__(self, steps: list[Callable[[list[TranscriptEntry]], ModelTurn]]) -> None:
+        super().__init__()
         self.steps = list(steps)
         self.transcripts: list[list[TranscriptEntry]] = []
+        self.tool_names: list[str] = []
+        self.stored: object = "unset"
 
-    def next_turn(
-        self,
-        *,
-        instructions: str,
-        tools: tuple[ToolSpec, ...],
-        transcript: tuple[TranscriptEntry, ...],
-    ) -> ModelTurn:
-        assert instructions == AGENT_INSTRUCTIONS and tools
-        self.transcripts.append(list(transcript))
-        if not self.steps:
-            return ModelTurn(text="I am done.", tool_calls=())
-        return self.steps.pop(0)(list(transcript))
+    def _inner_get_response(  # type: ignore[override]
+        self, *, messages: Any, stream: bool, options: Any, **kwargs: Any
+    ) -> Any:
+        async def respond() -> ChatResponse:
+            assert options.get("instructions") == AGENT_INSTRUCTIONS
+            self.stored = options.get("store")
+            self.tool_names = [t.name for t in options.get("tools", [])]
+            transcript = [
+                TranscriptEntry("tool", str(c.result))
+                for m in messages
+                for c in m.contents
+                if c.type == "function_result"
+            ]
+            self.transcripts.append(transcript)
+            turn = (
+                self.steps.pop(0)(transcript)
+                if self.steps
+                else ModelTurn(text="I am done.", tool_calls=())
+            )
+            contents: list[Content | str] = [
+                Content.from_function_call(t.call_id, t.name, arguments=t.arguments)
+                for t in turn.tool_calls
+            ]
+            if turn.text:
+                contents.append(turn.text)
+            return ChatResponse(messages=[Message("assistant", contents)])
+
+        return respond()
 
 
 def call(name: str, arguments: object = None, call_id: str = "c1") -> Callable[..., ModelTurn]:
@@ -204,7 +246,10 @@ def call(name: str, arguments: object = None, call_id: str = "c1") -> Callable[.
 
 def result_of(transcript: list[TranscriptEntry]) -> dict:
     tool_entries = [e for e in transcript if e.role == "tool"]
-    return json.loads(tool_entries[-1].content)
+    try:
+        return json.loads(tool_entries[-1].content)
+    except json.JSONDecodeError:  # rejected by the framework before reaching our tools
+        return {"ok": False, "error": {"code": "framework_rejected"}}
 
 
 def with_result(build: Callable[[dict], tuple[str, object]]) -> Callable[..., ModelTurn]:
@@ -330,7 +375,8 @@ def test_out_of_order_calls_are_rejected_without_changing_the_run(setup: Setup, 
         seen.append(result_of(transcript))
         return ModelTurn(text=None, tool_calls=())
 
-    final = setup.run([call(tool, {"proposals": []}), record])
+    arguments = {"proposals": []} if tool == "submit_answers" else {}
+    final = setup.run([call(tool, arguments), record])
     assert seen[0]["ok"] is False and seen[0]["error"]["code"] == "step_out_of_order"
     assert seen[0]["error"]["current_status"] == "created"
     assert final.status == "failed" and final.failure is not None
@@ -350,10 +396,17 @@ def test_evidence_tools_require_interpreted_form(setup: Setup) -> None:
 
 
 @pytest.mark.parametrize(
-    "arguments",
-    ["{not json", "[]", '{"unexpected": 1}', '{"source_id": 5, "page": "x", "quote": []}'],
+    ("arguments", "code"),
+    [
+        ("{not json", "framework_rejected"),
+        ("[]", "framework_rejected"),
+        ('{"unexpected": 1}', "framework_rejected"),
+        ('{"source_id": 5, "page": "x", "quote": []}', "framework_rejected"),
+    ],
 )
-def test_malformed_arguments_are_rejected_and_do_not_advance(setup: Setup, arguments: str) -> None:
+def test_malformed_arguments_are_rejected_and_do_not_advance(
+    setup: Setup, arguments: str, code: str
+) -> None:
     seen: list[dict] = []
 
     def record(transcript: list[TranscriptEntry]) -> ModelTurn:
@@ -362,7 +415,7 @@ def test_malformed_arguments_are_rejected_and_do_not_advance(setup: Setup, argum
 
     steps = [call("interpret_form"), call("locate_quote", arguments), record]
     final = setup.run(steps)
-    assert seen[0]["ok"] is False and seen[0]["error"]["code"] == "invalid_arguments"
+    assert seen[0]["ok"] is False and seen[0]["error"]["code"] == code
     assert final.status == "failed"
     assert final.steps[-1].to_status == "form_interpreted"
 
@@ -374,8 +427,9 @@ def test_unknown_tool_is_rejected(setup: Setup) -> None:
         seen.append(result_of(transcript))
         return ModelTurn(text=None, tool_calls=())
 
-    setup.run([call("run_shell", {"command": "ls"}), record])
-    assert seen[0]["error"]["code"] == "unknown_tool"
+    final = setup.run([call("run_shell", {"command": "ls"}), record])
+    assert seen[0]["ok"] is False
+    assert final.steps == () and not final.artifacts
 
 
 def test_model_cannot_answer_signing_or_unknown_requirements(setup: Setup) -> None:
@@ -461,14 +515,14 @@ def test_document_text_is_returned_as_untrusted_data(tmp_path: Path) -> None:
     assert not any(a.name == "packet.pdf" for a in final.artifacts)
 
 
-def test_turn_limit_fails_the_run_explicitly(setup: Setup) -> None:
-    final = setup.run([call("get_run_status")] * 10, limits=AgentLimits(max_turns=3))
+def test_call_limit_fails_the_run_explicitly(setup: Setup) -> None:
+    final = setup.run([call("get_run_status")] * 10, limits=AgentLimits(max_tool_calls=3))
     assert final.status == "failed" and final.failure is not None
-    assert final.failure.code == "agent_turn_limit_exceeded"
+    assert final.failure.code == "agent_call_limit_exceeded"
 
 
 def test_repeated_tool_errors_fail_the_run(setup: Setup) -> None:
-    final = setup.run([call("run_shell")] * 10, limits=AgentLimits(max_tool_errors=2))
+    final = setup.run([call("assemble_packet")] * 10, limits=AgentLimits(max_tool_errors=2))
     assert final.status == "failed" and final.failure is not None
     assert final.failure.code == "agent_tool_error_limit_exceeded"
 
@@ -513,7 +567,7 @@ def test_unreadable_form_is_preserved_unchanged_and_marked_incomplete(tmp_path: 
 
 
 def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -> None:
-    specs = {s.name: s for s in setup.tools().specs()}
+    specs = {s.name: s for s in setup.tools().function_tools()}
     assert set(specs) == {
         "get_run_status",
         "interpret_form",
@@ -529,8 +583,10 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
     }
     for spec in specs.values():
         assert spec.description
-        assert spec.parameters.get("additionalProperties") is False or "$defs" in spec.parameters
-    properties = json.dumps({n: s.parameters for n, s in specs.items() if n != "submit_answers"})
+        assert (
+            spec.parameters().get("additionalProperties") is False or "$defs" in spec.parameters()
+        )
+    properties = json.dumps({n: s.parameters() for n, s in specs.items() if n != "submit_answers"})
     for forbidden in ("path", "url", "email", "command", "recipient"):
         assert f'"{forbidden}"' not in properties
 
@@ -540,3 +596,83 @@ def test_instructions_are_versioned_and_state_the_hard_rules() -> None:
     text = AGENT_INSTRUCTIONS.lower()
     for phrase in ("untrusted", "never sign", "never invent", "tools"):
         assert phrase in text
+
+
+def test_model_calls_never_ask_the_service_to_store_the_conversation(setup: Setup) -> None:
+    setup.run([call("get_run_status")])
+    assert setup.model.stored is False
+
+
+def test_trace_records_tool_names_and_outcomes_without_arguments(setup: Setup) -> None:
+    tools = setup.tools()
+    setup.model = Scripted([call("assemble_packet"), call("get_run_status", {})])
+    asyncio.run(run_packet_agent(setup.model, tools))
+    assert [e.split(" ")[0] for e in tools.trace[:2]] == ["assemble_packet", "get_run_status"]
+    assert tools.trace[0].startswith("assemble_packet error:step_out_of_order")
+    assert tools.trace[1] == "get_run_status ok"
+
+
+def test_parallel_tool_calls_from_the_model_never_run_concurrently(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    import time
+
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+    original = PacketAgentTools._dispatch
+
+    def watched(self: PacketAgentTools, name: str, arguments: str) -> str:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        try:
+            return original(self, name, arguments)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(PacketAgentTools, "_dispatch", watched)
+    parallel = lambda _t: ModelTurn(  # noqa: E731
+        text=None,
+        tool_calls=tuple(ToolCall(f"c{i}", "get_run_status", "{}") for i in range(4)),
+    )
+    setup.run([parallel])
+    assert peak == 1
+
+
+def test_invalid_arguments_tell_the_model_which_fields_failed_without_echoing_values(
+    setup: Setup,
+) -> None:
+    secret = "do-not-echo-this-value"
+    seen: dict[str, Any] = {}
+
+    def bad_submit(_t: list[TranscriptEntry]) -> ModelTurn:
+        bad = {
+            "proposals": [
+                {
+                    "requirement_id": "p1.name",
+                    "outcome": "proposed",
+                    "value": {"kind": "text", "value": secret},
+                    "citations": [
+                        {"source_id": "0" * 64, "page": 1, "start": 0, "end": 0, "quote": secret}
+                    ],
+                }
+            ]
+        }
+        return call("submit_answers", bad)(_t)
+
+    def record(t: list[TranscriptEntry]) -> ModelTurn:
+        seen["result"] = result_of(t)
+        return ModelTurn(text="done", tool_calls=())
+
+    script = full_script()[:6] + [bad_submit, record]
+    setup.run(script)
+    error = seen["result"]["error"]
+    assert error["code"] == "invalid_arguments"
+    paths = [p["path"] for p in error["problems"]]
+    assert any("citations.0" in p and p.endswith(".end") for p in paths)
+    assert secret not in json.dumps(error)

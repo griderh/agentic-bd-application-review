@@ -24,6 +24,7 @@ from bd_packet_builder.fact_sheet import FactSheetError, run_fact_sheet_check
 from bd_packet_builder.foundry import FoundryConfig, FoundryError, run_foundry_smoke
 from bd_packet_builder.history import HistoryError, run_history_check
 from bd_packet_builder.inventory import InventoryError, build_inventory, publish_inventory
+from bd_packet_builder.live import run_agent_command
 from bd_packet_builder.local_inputs import LocalInputError
 from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
@@ -181,8 +182,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     draft.add_argument(
         "--review", type=Path, required=True, help="Snapshot-bound review JSON under outputs/"
     )
+    agent = commands.add_parser(
+        "agent-run",
+        help="Paid live run of the Foundry-model agent on one blank; synthetic data only for now",
+    )
+    agent.add_argument("--root", type=Path, required=True)
+    agent.add_argument("--blank", type=Path, required=True, help="Root-relative blank PDF")
+    agent.add_argument("--endpoint", required=True)
+    agent.add_argument("--deployment", required=True)
+    agent.add_argument("--requester-id", default="developer-workstation")
+    agent.add_argument("--evidence-set-id", default="local-evidence-set")
+    agent.add_argument("--as-of", help="Reporting date YYYY-MM-DD")
+    agent.add_argument("--allow-paid", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "agent-run":
+            as_of = date.fromisoformat(args.as_of) if args.as_of else None
+            try:
+                agent_config = FoundryConfig(endpoint=args.endpoint, deployment=args.deployment)
+            except ValidationError:
+                raise FoundryError("Invalid Foundry endpoint or deployment") from None
+            trace: list[str] = []
+            manifest = run_agent_command(
+                args.root,
+                args.blank,
+                agent_config,
+                requester_id=args.requester_id,
+                evidence_set_id=args.evidence_set_id,
+                as_of=as_of,
+                allow_paid=args.allow_paid,
+                trace_sink=trace,
+            )
+            for entry in trace:
+                print(f"  tool: {entry}")
+            print(
+                f"Run {manifest.run_id}: status={manifest.status} outcome={manifest.outcome} "
+                f"exceptions={len(manifest.exceptions())}. Not for submission; "
+                f"artifacts under {args.root / 'outputs' / 'agent-runs' / manifest.run_id}"
+            )
+            return 0 if manifest.status != "failed" else 1
         if args.command == "draft":
             result = run_draft(args.root, args.request, args.review)
             print(f"Incomplete draft; NOT FOR SUBMISSION: {result / 'draft-packet.pdf'}")
@@ -380,6 +418,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "map-visual",
                 "retrieve",
                 "draft",
+                "agent-run",
             )
             else "PDF"
         )
@@ -409,6 +448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "map-visual",
                 "retrieve",
                 "draft",
+                "agent-run",
             )
             else "PDF"
         )

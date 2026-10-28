@@ -5,19 +5,29 @@ order comes from the run store, evidence comes only from the run's verified snap
 requirements are never answerable by the model, and the validation gate (not model
 confidence) decides what is written. Tool results are JSON envelopes; recoverable problems
 are returned to the model, technical problems end the run as an explicit failure.
-The model transport is a Protocol so the same loop runs against a scripted test model, a
-Foundry deployment, or a hosted runtime. The transcript holds document text in memory only
-and is never persisted or logged.
+The model loop is Microsoft Agent Framework's tool-calling Agent over any chat client
+(a Foundry deployment in production, a scripted client in tests). The framework only
+transports tool calls; every tool delegates to ``PacketAgentTools.call``, which is the single
+place where order, arguments and budgets are enforced. Document text is never persisted
+or logged by this module.
 """
 
 import hashlib
 import json
 import tempfile
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
+from agent_framework import (
+    Agent,
+    AgentFrameworkException,
+    FunctionInvocationConfiguration,
+    FunctionTool,
+    SupportsChatGetResponse,
+)
 from pydantic import Field, ValidationError
 
 from bd_packet_builder.contracts import (
@@ -116,47 +126,11 @@ class PageMapper(Protocol):
     def map_pages(self, blank: bytes) -> Mapping[int, VisualPage]: ...
 
 
-@dataclass(frozen=True)
-class ToolSpec:
-    name: str
-    description: str
-    parameters: dict[str, object]
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    call_id: str
-    name: str
-    arguments: str
-
-
-@dataclass(frozen=True)
-class ModelTurn:
-    text: str | None
-    tool_calls: tuple[ToolCall, ...]
-
-
-@dataclass(frozen=True)
-class TranscriptEntry:
-    role: Literal["user", "assistant", "tool"]
-    content: str
-    tool_calls: tuple[ToolCall, ...] = ()
-    call_id: str | None = None
-
-
-class AgentModel(Protocol):
-    def next_turn(
-        self,
-        *,
-        instructions: str,
-        tools: tuple[ToolSpec, ...],
-        transcript: tuple[TranscriptEntry, ...],
-    ) -> ModelTurn: ...
-
-
 class AgentLimits(Contract):
     max_turns: Annotated[int, Field(ge=1, le=1_000)] = 80
+    max_tool_calls: Annotated[int, Field(ge=1, le=10_000)] = 150
     max_tool_errors: Annotated[int, Field(ge=1, le=1_000)] = 15
+    max_seconds: Annotated[int, Field(ge=1, le=86_400)] = 1_800
 
 
 class _NoArgs(Contract):
@@ -298,7 +272,9 @@ class PacketAgentTools:
         *,
         evidence_limits: EvidenceLimits | None = None,
         allow_ocr: bool = True,
+        limits: AgentLimits | None = None,
     ) -> None:
+        self.limits = limits or AgentLimits()
         self._store = store
         self._run_id = run_id
         self._root = evidence_root.resolve(strict=True)
@@ -307,6 +283,12 @@ class PacketAgentTools:
         self._allow_ocr = allow_ocr
         self._evidence: EvidenceTools | None = None
         self._inventory: Inventory | None = None
+        self.calls = 0
+        self.trace: list[str] = []
+        # The framework may run parallel model tool calls on threads; PDF libraries and the
+        # step-order state are not safe for that, so calls are serialized.
+        self._lock = threading.Lock()
+        self.consecutive_errors = 0
         self._handlers: dict[str, Callable[[RunManifest, Contract], object]] = {
             "get_run_status": self._status,
             "interpret_form": self._interpret_form,
@@ -321,10 +303,20 @@ class PacketAgentTools:
             "publish_results": self._publish_results,
         }
 
-    def specs(self) -> tuple[ToolSpec, ...]:
-        return tuple(
-            ToolSpec(name, tool.description, tool.arguments.model_json_schema())
-            for name, tool in _TOOLS.items()
+    def function_tools(self) -> tuple[FunctionTool, ...]:
+        """Framework tools whose bodies only forward to ``call``; schemas come from contracts."""
+        return tuple(self._function_tool(name, tool) for name, tool in _TOOLS.items())
+
+    def _function_tool(self, name: str, tool: _Tool) -> FunctionTool:
+        def forward(**arguments: object) -> str:
+            return self.call(name, json.dumps(arguments))
+
+        return FunctionTool(
+            name=name,
+            description=tool.description,
+            func=forward,
+            input_model=tool.arguments.model_json_schema(),
+            approval_mode="never_require",
         )
 
     def manifest(self) -> RunManifest:
@@ -332,6 +324,25 @@ class PacketAgentTools:
 
     def call(self, name: str, arguments: str) -> str:
         """Return a JSON envelope; recoverable problems are data, technical ones end the run."""
+        with self._lock:
+            return self._call_serialized(name, arguments)
+
+    def _call_serialized(self, name: str, arguments: str) -> str:
+        if self.manifest().status not in _TERMINAL:
+            if self.calls >= self.limits.max_tool_calls:
+                return self._fail("agent_call_limit_exceeded", "The agent exceeded its call limit.")
+            if self.consecutive_errors >= self.limits.max_tool_errors:
+                return self._fail(
+                    "agent_tool_error_limit_exceeded", "The agent made too many invalid calls."
+                )
+        self.calls += 1
+        result = self._dispatch(name, arguments)
+        failed = '"ok":false' in result[:12]
+        self.consecutive_errors = self.consecutive_errors + 1 if failed else 0
+        self.trace.append(f"{name} {_outcome(result)}" if failed else f"{name} ok")
+        return result
+
+    def _dispatch(self, name: str, arguments: str) -> str:
         tool = _TOOLS.get(name)
         if tool is None:
             return _error("unknown_tool", "No such tool is available.")
@@ -349,8 +360,12 @@ class PacketAgentTools:
             )
         try:
             parsed = tool.arguments.model_validate_json(arguments.strip() or "{}")
-        except ValidationError:
-            return _error("invalid_arguments", "Arguments do not match the tool's schema.")
+        except ValidationError as invalid:
+            return _error(
+                "invalid_arguments",
+                "Arguments do not match the tool's schema; fix the listed fields and retry.",
+                problems=_problems(invalid),
+            )
         try:
             result = self._handlers[name](manifest, parsed)
         except _Rejected as rejection:
@@ -691,37 +706,62 @@ def _unreadable_summary(manifest: RunManifest) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run_agent(
-    model: AgentModel, tools: PacketAgentTools, *, limits: AgentLimits | None = None
-) -> RunManifest:
-    """Drive the model until the run ends; stopping early or looping is an explicit failure."""
-    limits = limits or AgentLimits()
-    transcript: list[TranscriptEntry] = [
-        TranscriptEntry(
-            "user", "Complete this run's application packet. Begin with get_run_status."
+def build_agent(client: SupportsChatGetResponse[Any], tools: PacketAgentTools) -> Agent[Any]:
+    return Agent(
+        client,
+        AGENT_INSTRUCTIONS,
+        name="packet-builder",
+        tools=list(tools.function_tools()),
+        default_options={"store": False},
+    )
+
+
+def configure_client(client: Any, limits: AgentLimits) -> None:
+    """Apply loop budgets to a chat client built with the framework's function-invocation layer."""
+    client.function_invocation_configuration = FunctionInvocationConfiguration(
+        max_iterations=limits.max_turns,
+        max_function_calls=limits.max_tool_calls + 5,  # our own limit fires first with a reason
+        max_duration_seconds=limits.max_seconds,
+        max_consecutive_errors_per_request=limits.max_tool_errors,
+        terminate_on_unknown_calls=False,
+        include_detailed_errors=False,
+    )
+
+
+async def run_packet_agent(client: Any, tools: PacketAgentTools) -> RunManifest:
+    """Let the model drive the tools; stopping early, looping or model failure fails the run."""
+    configure_client(client, tools.limits)
+    agent = build_agent(client, tools)
+    try:
+        await agent.run("Complete this run's application packet. Begin with get_run_status.")
+    except AgentFrameworkException as error:
+        return _fail_open(
+            tools, "model_call_failed", f"The model run failed: {type(error).__name__}"
         )
+    return _fail_open(
+        tools,
+        "agent_stopped_early",
+        "The agent stopped before publishing or exceeded its turn or time budget.",
+    )
+
+
+def _problems(invalid: ValidationError) -> list[dict[str, str]]:
+    """Field paths and error types only, never submitted values; OCR-branch noise is secondary."""
+    found = [
+        {"path": ".".join(str(part) for part in e["loc"]), "type": e["type"]}
+        for e in invalid.errors()
     ]
-    specs = tools.specs()
-    errors = 0
-    for _ in range(limits.max_turns):
-        if tools.manifest().status in _TERMINAL:
-            break
-        turn = model.next_turn(
-            instructions=AGENT_INSTRUCTIONS, tools=specs, transcript=tuple(transcript)
-        )
-        transcript.append(TranscriptEntry("assistant", turn.text or "", turn.tool_calls))
-        if not turn.tool_calls:
-            return _fail_open(tools, "agent_stopped_early", "The agent stopped before publishing.")
-        for tool_call in turn.tool_calls:
-            result = tools.call(tool_call.name, tool_call.arguments)
-            transcript.append(TranscriptEntry("tool", result, call_id=tool_call.call_id))
-            if '"ok":false' in result[:12]:
-                errors += 1
-        if errors >= limits.max_tool_errors and tools.manifest().status not in _TERMINAL:
-            return _fail_open(
-                tools, "agent_tool_error_limit_exceeded", "The agent made too many invalid calls."
-            )
-    return _fail_open(tools, "agent_turn_limit_exceeded", "The agent exceeded its turn limit.")
+    primary = [p for p in found if "OcrCitation" not in p["path"]]
+    return (primary or found)[:10]
+
+
+def _outcome(error_envelope: str) -> str:
+    """Content-free summary of an error envelope: its code and our own short message."""
+    try:
+        error = json.loads(error_envelope)["error"]
+        return f"error:{error['code']} {str(error['message'])[:200]}"
+    except (ValueError, KeyError, TypeError):
+        return "error:unreadable"
 
 
 def _fail_open(tools: PacketAgentTools, code: str, message: str) -> RunManifest:
