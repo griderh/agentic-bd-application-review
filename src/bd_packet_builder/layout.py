@@ -90,9 +90,10 @@ class ResponseLayout(Contract):
     schema_version: Literal[1] = 1
     application_sha256: Sha256
     responses: Annotated[tuple[MappedResponse, ...], Field(min_length=1, max_length=500)]
-    scope: Literal["developer_mapped_subset_not_automatic_discovery"] = (
-        "developer_mapped_subset_not_automatic_discovery"
-    )
+    scope: Literal[
+        "developer_mapped_subset_not_automatic_discovery",
+        "automatic_visual_mapping_unapproved",
+    ] = "developer_mapped_subset_not_automatic_discovery"
 
     @model_validator(mode="after")
     def consistent(self) -> Self:

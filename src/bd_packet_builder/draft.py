@@ -400,7 +400,7 @@ def _validate_pdf(data: bytes, *, blank: bool) -> PdfReader:
     return reader
 
 
-def _inventory(root: Path, request: DraftRequest) -> Inventory:
+def selected_inventory(root: Path, request: DraftRequest) -> Inventory:
     allowed = {f.folder for f in default_catalog().families}
     families = set()
     for selection in request.sources:
@@ -576,6 +576,19 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
     reviewed = read_local_input(root, review_path, Path("outputs"), 2 * 1024 * 1024)
     request = DraftRequest.model_validate_json(raw)
     review = DraftReview.model_validate_json(reviewed)
+    return publish_draft(root, request_path, raw, request, review, reviewed, review_path)
+
+
+def publish_draft(
+    root: Path,
+    request_path: Path,
+    raw: bytes,
+    request: DraftRequest,
+    review: DraftReview,
+    reviewed: bytes,
+    review_path: Path | None,
+) -> Path:
+    """Write the draft for already-parsed inputs; ``review_path`` is None for gate-made reviews."""
     request_hash = hashlib.sha256(raw).hexdigest()
     if review.request_sha256 != request_hash:
         raise DraftError("Draft review does not match this exact request snapshot")
@@ -680,7 +693,7 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
         raise DraftError("Writable regions overlap; placement needs review")
     if any(_overlap(a, b) for a in all_regions for b in request.protected_regions):
         raise DraftError("Writable region overlaps protected signing or other content")
-    inventory = _inventory(root, request)
+    inventory = selected_inventory(root, request)
     sources = {s.source_id: s for s in inventory.sources}
     if not set(request.attachments) <= sources.keys():
         raise DraftError("Attachment is not a version-bound selected source")
@@ -1021,7 +1034,10 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
         raise DraftError("Final packet pagination does not match assembled output")
 
     def verify() -> None:
-        for path, snapshot in ((request_path, raw), (review_path, reviewed)):
+        inputs = [(request_path, raw)]
+        if review_path is not None:
+            inputs.append((review_path, reviewed))
+        for path, snapshot in inputs:
             if read_local_input(root, path, Path("outputs"), 2 * 1024 * 1024) != snapshot:
                 raise DraftError("Draft input or review changed; no output published")
         if (

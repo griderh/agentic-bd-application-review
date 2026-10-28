@@ -8,7 +8,8 @@ import pypdfium2 as pdfium
 import pytest
 from reportlab.pdfgen.canvas import Canvas
 
-from bd_packet_builder.draft import MarkPlacement, TextPlacement, run_draft
+from bd_packet_builder.draft import DraftRequest, MarkPlacement, TextPlacement, run_draft
+from bd_packet_builder.gate import GATE_REVIEWER, run_application_draft, validate_answers
 from bd_packet_builder.inventory import build_inventory
 from bd_packet_builder.layout import PageBox
 from bd_packet_builder.responses import NarrativeRegion
@@ -897,3 +898,153 @@ def test_single_selection_marks_only_the_selected_radio(tmp_path: Path) -> None:
                 ImageChops.difference(first, second) as difference,
             ):
                 assert (difference.getbbox() is not None) == selected
+
+
+def gate_review(root: Path, request: Path) -> dict[str, tuple[str, str]]:
+    parsed = DraftRequest.model_validate_json(request.read_bytes())
+    digest = hashlib.sha256(request.read_bytes()).hexdigest()
+    review = validate_answers(root, parsed, digest)
+    assert review.request_sha256 == digest
+    assert review.reviewer == GATE_REVIEWER
+    return {d.requirement_id: (d.decision, d.reason) for d in review.decisions}
+
+
+def run_gate(root: Path, request: Path) -> dict:
+    output = run_application_draft(root, request.relative_to(root))
+    return json.loads((output / "draft.json").read_text())
+
+
+def test_gate_replaces_human_review_and_writes_the_same_supported_answers(tmp_path: Path) -> None:
+    request, _, _ = prepare(tmp_path)
+    manifest = run_gate(tmp_path, request)
+    assert manifest["written_requirements"] == ["crd", "instruments", "services"]
+    assert manifest["reviewer"] == GATE_REVIEWER
+    assert manifest["status"] == "incomplete_draft_not_for_submission"
+
+
+def test_gate_decides_every_proposal_and_never_verifies_unanswered_or_signing(
+    tmp_path: Path,
+) -> None:
+    request, _, _ = prepare(tmp_path)
+    decisions = gate_review(tmp_path, request)
+    assert set(decisions) == {"crd", "instruments", "services", "missing", "sign", "date"}
+    assert [k for k, (d, _) in decisions.items() if d == "draft_verified"] == [
+        "crd",
+        "instruments",
+        "services",
+    ]
+    assert "missing_evidence" in decisions["missing"][1]
+    assert "deferred_to_signing" in decisions["sign"][1] or "signing" in decisions["sign"][1]
+
+
+def test_gate_withholds_a_proposed_signature_or_signature_date(tmp_path: Path) -> None:
+    request, _, data = prepare(tmp_path)
+    proposals = data["proposals"]["proposals"]
+    template = proposals[0]
+    for index in (4, 5):
+        proposals[index] = {
+            **template,
+            "requirement_id": proposals[index]["requirement_id"],
+            "value": dict(kind="text", value="001234"),
+        }
+    request.write_text(json.dumps(data))
+    decisions = gate_review(tmp_path, request)
+    assert decisions["sign"][0] == decisions["date"][0] == "withhold"
+    assert "human_signing_required" in decisions["sign"][1]
+    manifest = run_gate(tmp_path, request)
+    assert "sign" not in manifest["written_requirements"]
+
+
+@pytest.mark.parametrize("problem", ["quote", "identifier", "choice", "period", "ocr", "attached"])
+def test_gate_withholds_only_the_answer_that_fails_code_checks(
+    tmp_path: Path, problem: str
+) -> None:
+    request, _, data = prepare(tmp_path)
+    proposals = data["proposals"]["proposals"]
+    expected = {
+        "quote": ("crd", "citation_quote_mismatch"),
+        "identifier": ("crd", "identifier_not_in_cited_evidence"),
+        "choice": ("instruments", "unknown_choice_option"),
+        "period": ("crd", "requested_period_not_confirmed"),
+        "ocr": ("crd", "ocr_evidence_requires_machine_verification"),
+        "attached": ("crd", "supporting_evidence_not_attached"),
+    }[problem]
+    if problem == "quote":
+        proposals[0]["citations"][0]["quote"] = "CRD: 999999"
+    elif problem == "identifier":
+        proposals[0]["value"]["value"] = "999999"
+    elif problem == "choice":
+        proposals[1]["value"]["selected"] = ["unknown"]
+        proposals[1]["value"]["write_ins"] = []
+    elif problem == "period":
+        data["requirements"]["requirements"][0]["requested_period"] = dict(
+            start="2025-01-01", end="2025-12-31"
+        )
+        proposals[0]["claimed_period"] = dict(start="2024-01-01", end="2024-12-31")
+    elif problem == "ocr":
+        proposals[0]["citations"] = [
+            dict(
+                evidence_kind="ocr",
+                source_id=proposals[0]["citations"][0]["source_id"],
+                source_sha256="1" * 64,
+                page=1,
+                artifact_path="outputs/ocr-" + "2" * 32 + "/ocr.json",
+                artifact_sha256="3" * 64,
+                render_sha256="4" * 64,
+                word_start=0,
+                word_end=2,
+                quote="CRD: 001234",
+            )
+        ]
+    else:
+        data["attachments"] = []
+    request.write_text(json.dumps(data))
+    decisions = gate_review(tmp_path, request)
+    bad, code = expected
+    assert decisions[bad][0] == "withhold" and code in decisions[bad][1]
+    if problem == "attached":
+        assert all(decisions[k][0] == "withhold" for k in ("crd", "instruments", "services"))
+    else:
+        others = {"crd", "instruments", "services"} - {bad}
+        assert all(decisions[k][0] == "draft_verified" for k in others)
+    manifest = run_gate(tmp_path, request)
+    assert bad not in manifest["written_requirements"]
+
+
+@pytest.mark.parametrize(
+    ("value", "verified"), [("001234", True), ("  001234 ", True), ("999999", False)]
+)
+def test_gate_requires_free_text_values_to_appear_in_the_cited_quote(
+    tmp_path: Path, value: str, verified: bool
+) -> None:
+    request, _, data = prepare(tmp_path)
+    data["requirements"]["requirements"][0]["kind"] = "text"
+    data["proposals"]["proposals"][0]["value"] = dict(kind="text", value=value)
+    request.write_text(json.dumps(data))
+    decision, reason = gate_review(tmp_path, request)["crd"]
+    assert (decision == "draft_verified") == verified
+    if not verified:
+        assert "text_value_not_in_cited_evidence" in reason
+
+
+def test_gate_ignores_model_confidence(tmp_path: Path) -> None:
+    request, _, data = prepare(tmp_path)
+    baseline = gate_review(tmp_path, request)
+    for proposal in data["proposals"]["proposals"][:3]:
+        proposal["confidence"] = 0.0
+    request.write_text(json.dumps(data))
+    assert gate_review(tmp_path, request) == baseline
+
+
+def test_gate_only_attaches_evidence_that_supports_written_answers(tmp_path: Path) -> None:
+    request, _, data = prepare(tmp_path)
+    for proposal in data["proposals"]["proposals"][:3]:
+        citation = proposal["citations"][0]
+        citation["quote"] = "X" * len(citation["quote"])
+    request.write_text(json.dumps(data))
+    parsed = DraftRequest.model_validate_json(request.read_bytes())
+    review = validate_answers(tmp_path, parsed, hashlib.sha256(request.read_bytes()).hexdigest())
+    assert review.attachment_source_ids == ()
+    manifest = run_gate(tmp_path, request)
+    assert manifest["written_requirements"] == []
+    assert manifest["pagination"]["sections"][-1]["role"] == "form"

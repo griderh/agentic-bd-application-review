@@ -301,9 +301,51 @@ This backlog turns the M3 implementation order into code slices. Work the slices
 
 Slice 1 has no model call, SDK, or Azure dependency. It is first because every later tool reads and writes through it.
 
+**Slice 1 status (October 28, 2026): implemented.** [run.py](../src/bd_packet_builder/run.py) provides the run contracts, a `RunStore` protocol, and `FileRunStore`. Decisions made while building it:
+
+- An identical retry of the latest completed step, including `publish`, returns the recorded manifest unchanged. A retry with different artifacts, exceptions, or outcome is a `RunConflictError`.
+- Artifacts are stored content-addressed (`artifacts/<sha256>`) and named only in the manifest, so an interrupted write cannot block a retry or replace a recorded artifact. Exporting human-readable packet files belongs to publication (slices 7-8).
+- A `complete` outcome is rejected while any review exception is recorded; a technical or budget failure sets `failed` with no outcome, never `incomplete`.
+- Step-count and elapsed-time budgets are enforced; model token budgets are recorded and enforced with the agent in slice 5.
+- The per-run lock uses POSIX `flock`, which suits macOS development and the Linux hosted runtime. Windows remains unvalidated.
+- Evidence bytes are not read by the store; slice 4 tools must call `EvidenceSnapshot.verify` on every read.
+
+Validation: 45 new tests in [test_run.py](../tests/integration/test_run.py); the full offline suite (663 passed, 4 opt-in skipped), Ruff and strict mypy pass on Python 3.12 and 3.13. No CLI command was added; the store is an internal boundary for later tools.
+
 **Slice 2 - Automatic form-to-layout conversion (closes G2).** Convert validated `VisualPage` output into `ApplicationRequirements` and a `ResponseLayout` with a new scope value marking automatic, unapproved mapping. Convert normalized display coordinates to unrotated PDF points using recorded page size and rotation; rotated pages and items without a writable region become explicit exceptions, not guesses. Detect signature and signature-date items as protected regions. Tests use synthetic PDFs and canned visual maps, including columns, write-ins, image-only pages, rotation, and unreadable pages.
 
+**Slice 2 status (October 28, 2026): implemented.** [form_layout.py](../src/bd_packet_builder/form_layout.py) provides `build_form_layout(blank_bytes, {page: VisualPage})`, which returns a `FormInterpretation`: optional `ApplicationRequirements`, an optional `ResponseLayout` (scope `automatic_visual_mapping_unapproved`), signing `protected_regions`, and review exceptions. It never contains answers. Decisions made while building it:
+
+- Each item's question wording, option conditions, and option labels are anchored to the page's native PDF text. Matching ignores case, whitespace, and punctuation at the edges of words, and the stored wording is the exact native substring, so `validate_layout` and the writer accept it. Wording that cannot be anchored (paraphrased, image-only page) stays as a requirement with the model's wording, is not placed, and gets a `placement_not_native_anchored` exception (or a page-level exception).
+- Items the existing writer would reject are screened out, so a bad item never aborts the draft. The cases are:
+  - rotated, cropped, or non-standard pages (`page_geometry_unsupported`)
+  - image-only pages (`image_only_placement_unverified`; OCR anchoring is deferred)
+  - answer areas shorter than 12 points (`answer_region_too_small`)
+  - answer areas that cover printed issuer text (`answer_region_overlaps_issuer_text`)
+  - overlapping answer areas, or answer areas over signing areas (`placement_conflict`; all conflicting items are excluded, and the signing area keeps its protection)
+- Kind handling:
+  - A Yes/No `boolean` with two or more controls becomes `single_select`.
+  - A standalone attestation checkbox is kept but not placed (`boolean_placement_unsupported`).
+  - `money` is not converted, because no unit may be invented (`financial_units_unresolved`).
+  - Attachments become requirements with no placement.
+  - Signature and signature-date items become requirements plus protected regions, or `signing_location_unmapped` when no location is visible. No signer role is inferred.
+- Pages without a visual map (`page_not_interpreted`) and unreadable pages (`unreadable_page`) are explicit page-level exceptions. An unreadable, encrypted, or out-of-range PDF is a technical `FormLayoutError`.
+- Exception messages name requirement IDs and page numbers only, never issuer wording.
+
+Validation: 21 new tests in [test_form_layout.py](../tests/integration/test_form_layout.py), including a converted layout passing the existing `validate_layout`. The full offline suite (684 passed, 4 opt-in skipped), Ruff, and strict mypy pass on Python 3.12 and 3.13. Slice 3 still has to adapt `validate_layout` and the draft writer to read the blank from run-store bytes instead of `bd_agreements/Blank`. The writer-to-converter round trip is also verified there.
+
 **Slice 3 - Application validation gate (closes G3).** Add an application-produced validation record that the writer accepts in place of `DraftReview` for application runs. An answer is writable only when code confirms: the cited source is in the run's evidence snapshot, the page and exact quote (native or reviewed OCR policy) resolve, values pass type/unit/period checks, the placement passed layout validation, and the requirement is not a signature or signature date. Every other proposal is withheld with a reviewer exception. Model confidence never satisfies a check. Tests cover fabricated source IDs, unrelated quotes, period mismatch, signature targets, and the unchanged manual-review path.
+
+**Slice 3 status (October 28, 2026): implemented, with two deferred items.** [gate.py](../src/bd_packet_builder/gate.py) provides `validate_answers(root, request, request_sha256)`, which returns the same `DraftReview` record the writer already consumes (reviewer `application_validation_gate_v1`, version `answer-gate-v1`), and `run_application_draft(root, request_path)`, which runs the gate and then the existing writer with no human pre-write step. `run_draft` was split so both paths share `publish_draft`; the manual-review path is unchanged. Decisions made while building it:
+
+- A decision is `draft_verified` only if every check passes: not a signature/date item; outcome is `proposed`; native quotes resolve in the version-bound sources (`check_proposal`); the answer kind, units, and choice structure match; a placement exists; the requested period matches when one is required; every cited source is in the request's attachments; an identifier appears verbatim in a cited quote; a free-text value appears (case and whitespace normalized) in a cited quote. Anything else is `withhold` with the failing codes in `reason`. Model confidence is ignored.
+- Attachment selection is derived: only sources cited by a verified answer are attached.
+- The "confirmed" flags in a gate-made decision mean "code checks passed", not human approval. The reviewer name and `reason` prefix mark which path produced a record.
+- A passed gate does not prove that a narrative is supported by its quote or that a business answer is right. Narrative support is evaluated separately (slice 6), and the draft stays "incomplete, not for submission" until a human reviews it.
+- Deferred 1: answers cited to OCR evidence are withheld (`ocr_evidence_requires_machine_verification`) until slice 4 adds automatic OCR with machine verification.
+- Deferred 2: the gate and writer still read the blank, evidence and outputs through the `root` directory layout, not run-store bytes. Slice 5 or 7 adapts them when storage is chosen; the code checks themselves do not depend on it.
+
+Validation: 14 new tests in [test_draft.py](../tests/integration/test_draft.py) (gate), plus the existing 38 draft tests unchanged. The full offline suite (698 passed, 4 opt-in skipped), Ruff, and strict mypy pass on Python 3.12 and 3.13.
 
 **Slice 4 - Evidence tools (closes G4).** Typed tools over the run's evidence snapshot: list catalog families, search pages for a requirement, read a page (native text, automatic OCR fallback for textless pages), and select attachments. Reuse `plan_retrieval`, `retrieve_evidence`, `select_evidence`, and `run_ocr`. Bound pages, characters, and calls per run. Tests cover missing families, stale/mismatched periods, textless pages, and prompt-injection text inside documents.
 
