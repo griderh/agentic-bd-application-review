@@ -311,6 +311,18 @@ def test_failed_calls_still_count_against_the_budget(tmp_path: Path) -> None:
         tool.list_sources()
 
 
+def test_cached_quote_lookups_spend_calls_not_additional_page_slots(tmp_path: Path) -> None:
+    seed(tmp_path)
+    evidence = tools(tmp_path, limits=EvidenceLimits(max_pages_read=1, max_calls=20))
+    sid = source_id(evidence.list_sources(), "FINRA_Certification")
+    evidence.read_page(sid, 1)
+    for _ in range(5):
+        assert evidence.locate_quote(sid, 1, "CRD: 001234.").quote == "CRD: 001234."
+    assert evidence.read_page(sid, 1).mode == "native"
+    with pytest.raises(ToolLimitError, match="page"):
+        evidence.read_page(sid, 2)
+
+
 def test_tools_refuse_evidence_outside_the_run_snapshot(tmp_path: Path) -> None:
     seed(tmp_path)
     inventory = build_inventory(tmp_path)

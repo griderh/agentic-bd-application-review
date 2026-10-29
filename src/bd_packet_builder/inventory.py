@@ -17,6 +17,7 @@ from uuid import uuid4
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_raw
 
+from bd_packet_builder.local_inputs import LocalInputError, read_local_input
 from bd_packet_builder.sources import Cadence, filename_period, select_document
 
 _SUPPORT = Path("bd_agreements/supporting_data")
@@ -302,7 +303,18 @@ def read_source_bytes(root: Path, inventory: Inventory, source_id: str) -> bytes
     source = next((s for s in inventory.sources if s.source_id == source_id), None)
     if source is None:
         raise InventoryError("Reference has an unknown source identity")
-    data = _snapshot(root.resolve(strict=True), source.path)
+    if source.family == "historical_reference":
+        try:
+            data = read_local_input(
+                root.resolve(strict=True),
+                Path(source.path),
+                Path("bd_agreements/Completed"),
+                _MAX_BYTES,
+            )
+        except LocalInputError as error:
+            raise InventoryError(str(error)) from None
+    else:
+        data = _snapshot(root.resolve(strict=True), source.path)
     if hashlib.sha256(data).hexdigest() != source.sha256:
         raise InventoryError("Referenced source changed after inventory")
     return data

@@ -2,12 +2,15 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
+import pypdfium2 as pdfium
 import pytest
 from agent_framework import (
     BaseChatClient,
@@ -17,6 +20,7 @@ from agent_framework import (
     Message,
 )
 from pypdf import PdfReader
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 
 from bd_packet_builder.agent import (
@@ -38,6 +42,7 @@ from bd_packet_builder.run import (
     RunManifest,
     RunRequest,
 )
+from bd_packet_builder.scan import ScanTranscript
 from bd_packet_builder.visual import VisualPage
 
 SUPPORT = "bd_agreements/supporting_data"
@@ -94,13 +99,24 @@ def blank_pdf() -> bytes:
     return buffer.getvalue()
 
 
-def evidence_pdf(root: Path, text: str = EVIDENCE_TEXT) -> None:
+def evidence_pdf(root: Path, text: str = EVIDENCE_TEXT, *, scanned: bool = False) -> None:
     path = root / SUPPORT / "FINRA_Certification" / "registration.pdf"
     path.parent.mkdir(parents=True, exist_ok=True)
     canvas = Canvas(str(path), invariant=True)
     canvas.drawString(30, 700, text)
     canvas.showPage()
     canvas.save()
+    if scanned:
+        original = path.read_bytes()
+        with (
+            pdfium.PdfDocument(original) as document,
+            closing(document[0]) as page,
+            closing(page.render(scale=2)) as bitmap,
+            closing(bitmap.to_pil()) as image,
+        ):
+            canvas = Canvas(str(path), invariant=True)
+            canvas.drawImage(ImageReader(image), 0, 0, width=595.28, height=841.89)
+            canvas.save()
 
 
 @dataclass(frozen=True)
@@ -142,10 +158,11 @@ class Setup:
         blank: bytes,
         mapper: FakeMapper | None = None,
         evidence_text: str = EVIDENCE_TEXT,
+        scanned: bool = False,
     ) -> None:
         self.evidence_root = tmp_path / "evidence"
         self.evidence_root.mkdir()
-        evidence_pdf(self.evidence_root, evidence_text)
+        evidence_pdf(self.evidence_root, evidence_text, scanned=scanned)
         inventory = build_inventory(self.evidence_root)
         snapshot = EvidenceSnapshot(
             evidence_set_id="evidence-set-1",
@@ -340,6 +357,89 @@ def test_scripted_model_completes_a_run_with_deterministic_gates(setup: Setup) -
     )
     assert NAME in packet_text
     assert hashlib.sha256(setup.blank).hexdigest() == final.blank_sha256
+
+
+def test_scanned_quote_survives_agent_gates_staging_and_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = Setup(tmp_path, blank_pdf(), scanned=True)
+    monkeypatch.setattr("bd_packet_builder.ocr.shutil.which", lambda _: "/local/tesseract")
+    text = f"Firm legal name: {NAME}"
+    header = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+        "left\ttop\twidth\theight\tconf\ttext\n"
+    )
+    tsv = header + "".join(
+        f"5\t1\t1\t1\t1\t{i + 1}\t{20 + i * 100}\t20\t90\t30\t96\t{word}\n"
+        for i, word in enumerate(text.split())
+    )
+    monkeypatch.setattr(
+        "bd_packet_builder.ocr._execute",
+        lambda command, *_: "tesseract 5.5.0\n" if "--version" in command else tsv,
+    )
+    reader = Mock()
+    reader.transcribe.return_value = ScanTranscript(
+        readable=True,
+        subject=NAME,
+        text=text,
+        reporting_period=None,
+    )
+    state: dict[str, Any] = {}
+
+    def read(listing: dict) -> tuple[str, object]:
+        state["id"] = source_id(listing)
+        return "read_page", {"source_id": state["id"], "page": 1}
+
+    def verify(reading: dict) -> tuple[str, object]:
+        assert reading["result"]["mode"] == "ocr" and not reading["result"]["citable"]
+        return "verify_scan_quote", {
+            "source_id": state["id"],
+            "page": 1,
+            "quote": text,
+            "expected_subject": NAME,
+        }
+
+    def select(verified: dict) -> tuple[str, object]:
+        state["citation"] = verified["result"]["citation"]
+        return "select_attachment", {"source_id": state["id"]}
+
+    def submit(_: dict) -> tuple[str, object]:
+        return "submit_answers", {
+            "proposals": [
+                {
+                    "requirement_id": "p1.name",
+                    "outcome": "proposed",
+                    "value": {"kind": "text", "value": NAME},
+                    "confidence": 0.9,
+                    "citations": [state["citation"]],
+                }
+            ]
+        }
+
+    final = setup.run(
+        [
+            call("interpret_form"),
+            call("list_sources", {"family": "FINRA_Certification"}),
+            with_result(read),
+            with_result(verify),
+            with_result(select),
+            call("finish_evidence"),
+            with_result(submit),
+            call("assemble_packet"),
+            call("publish_results"),
+        ],
+        scan_reader=reader,
+        scan_endpoint="synthetic",
+        scan_deployment="test",
+    )
+    assert final.status == "published" and final.outcome == "incomplete"
+    draft = json.loads(setup.artifact("draft.json"))
+    assert draft["written_requirements"] == ["p1.name"]
+    assert len(json.loads(setup.artifact("scan_checks.json"))["checks"]) == 1
+    assert any(a.name.startswith("ocr-") for a in final.artifacts)
+    assert "not human visual approval" in setup.artifact("reviewer-summary.txt").decode()
+    reader.transcribe.assert_called_once()
 
 
 def test_fabricated_value_is_withheld_not_written(setup: Setup) -> None:
@@ -596,6 +696,7 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "search_pages",
         "read_page",
         "locate_quote",
+        "verify_scan_quote",
         "select_attachment",
         "finish_evidence",
         "submit_answers",

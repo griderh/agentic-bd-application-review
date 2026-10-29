@@ -12,6 +12,7 @@ from bd_packet_builder.blob_storage import (
     InputBundle,
     PacketBlobStorage,
 )
+from bd_packet_builder.history import ArchiveEntry, ArchiveManifest
 from bd_packet_builder.run import (
     ComponentVersion,
     EvidenceSnapshot,
@@ -90,6 +91,59 @@ def test_stages_original_bytes_and_verifies_hashes(tmp_path: Path) -> None:
     assert staged == bundle
     assert (tmp_path / bundle.blank.path).read_bytes() == b"%PDF-blank"
     assert (tmp_path / bundle.evidence[0].path).read_bytes() == b"%PDF-evidence"
+
+
+def test_history_bundle_stages_only_approved_references_not_holdouts(tmp_path: Path) -> None:
+    blobs = MemoryBlobs()
+    bundle = seed(blobs)
+    prior = b"%PDF-prior-private"
+    reference = ArchiveEntry(
+        path="bd_agreements/Completed/Broward/prior.pdf",
+        sha256=hashlib.sha256(prior).hexdigest(),
+        partition="reference",
+        issuer="Broward",
+    )
+    heldout = ArchiveEntry(
+        path="bd_agreements/Completed/Holdout/never-read.pdf",
+        sha256="0" * 64,
+        partition="evaluation",
+        issuer="Holdout",
+    )
+    payload = bundle.model_dump(mode="json")
+    payload.update(
+        issuer="Broward",
+        historical_archive=ArchiveManifest(entries=(reference, heldout)).model_dump(mode="json"),
+        historical_inputs=[entry(reference.path, prior)],
+    )
+    configured = InputBundle.model_validate_json(json.dumps(payload))
+    blobs.data["packet-inputs", "bundles/blank-1/set-1/manifest.json"] = (
+        configured.model_dump_json().encode()
+    )
+    blobs.data["packet-inputs", "bundles/blank-1/set-1/" + reference.path] = prior
+    PacketBlobStorage(blobs).stage("blank-1", "set-1", tmp_path)
+    assert (tmp_path / reference.path).read_bytes() == prior
+    assert not (tmp_path / heldout.path).exists()
+    assert (tmp_path / reference.path).stat().st_mode & 0o777 == 0o600
+
+
+def test_history_bundle_rejects_an_evaluation_file_as_reference_input() -> None:
+    blobs = MemoryBlobs()
+    bundle = seed(blobs)
+    data = b"private-heldout"
+    heldout = ArchiveEntry(
+        path="bd_agreements/Completed/Holdout/answer.pdf",
+        sha256=hashlib.sha256(data).hexdigest(),
+        partition="evaluation",
+        issuer="Holdout",
+    )
+    payload = bundle.model_dump(mode="json")
+    payload.update(
+        issuer="Broward",
+        historical_archive=ArchiveManifest(entries=(heldout,)).model_dump(mode="json"),
+        historical_inputs=[entry(heldout.path, data)],
+    )
+    with pytest.raises(ValueError, match="reference partition"):
+        InputBundle.model_validate_json(json.dumps(payload))
 
 
 def test_changed_evidence_is_an_explicit_failure(tmp_path: Path) -> None:

@@ -184,7 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     agent = commands.add_parser(
         "agent-run",
-        help="Paid live run of the Foundry-model agent on one blank; synthetic data only for now",
+        help="Paid live agent run on one blank using explicitly approved evidence",
     )
     agent.add_argument("--root", type=Path, required=True)
     agent.add_argument("--blank", type=Path, required=True, help="Root-relative blank PDF")
@@ -193,6 +193,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent.add_argument("--requester-id", default="developer-workstation")
     agent.add_argument("--evidence-set-id", default="local-evidence-set")
     agent.add_argument("--as-of", help="Reporting date YYYY-MM-DD")
+    agent.add_argument("--issuer", help="Target issuer for historical-context checks")
+    agent.add_argument(
+        "--historical-manifest", type=Path, help="Approved partition JSON under outputs/"
+    )
     agent.add_argument(
         "--runs-dir", type=Path, help="Folder for run output; default <root>/outputs/agent-runs"
     )
@@ -216,6 +220,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 allow_paid=args.allow_paid,
                 trace_sink=trace,
                 runs_dir=args.runs_dir,
+                historical_manifest=args.historical_manifest,
+                issuer=args.issuer,
             )
             for entry in trace:
                 print(f"  tool: {entry}")

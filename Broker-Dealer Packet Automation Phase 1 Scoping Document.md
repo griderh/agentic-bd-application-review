@@ -35,7 +35,7 @@ Phase 1 covers the full path from a blank issuer packet to a reviewed-ready PDF,
 | Support documents | Selecting the appropriate available version of each required document and appending it; explicitly flagging unavailable requirements and any period or document mismatch | Regenerating web printouts such as the SIPC member list (Phase 3) |
 | Output | One merged, review-ready PDF packet plus a separate internal reviewer summary | Sending the packet to the issuer |
 | Review | Notifying the signatories; identifying signature and mandatory date fields for electronic signing | Approval workflow tooling and automated signing-service integration. Electronic signing is a separate human step; service selection remains open |
-| Data | Designated network folders, read-only, including necessary confidential support documents such as settlement instructions. Prior packets for wording reference | Power BI extraction. Access to financial reporting beyond FOCUS and audited financials |
+| Data | Designated network folders, read-only, including necessary confidential support documents such as settlement instructions. Approved prior packets as historical business evidence under the policy in Section 6 | Power BI extraction. Access to financial reporting beyond FOCUS and audited financials |
 | Document types | Broker-dealer approvals, RFIs, RFQs about the firm | NDAs, contracts, or other legal documents |
 
 **Boundary rule:** The agent attempts every question, including attestations and disclosures, but never invents an answer. Missing evidence, conflicting sources, or explicit requirements that the available documents do not meet are flagged in the reviewer summary without terminating the whole run. The agent fills supported fields and leaves unsupported answers blank. Where available documentation only partially meets an explicit request, the summary identifies the exact request, the evidence used, and the gap; the packet must not imply that an unmet requirement has been satisfied.
@@ -72,10 +72,10 @@ Both issuer packets mix firm-written answers, attestations, and pass-through att
 | Representative roster | Names, titles, CRD numbers, phones, emails, years in fixed income | Current approved records and bios | Medium. Rosters change by issuer |
 | Regulatory disclosures | 10-year FINRA disclosure yes/no for firm and each representative | Latest compliance-approved records | High. Reviewer must confirm |
 | Time-varying numbers | Firm-wide Treasury and Agency volume, excess net capital, line of credit | Applicable approved FOCUS report and financial/business documentation; never manually recopied into a required fact-sheet input | High. Wrong period is the main failure |
-| Short narrative | Market sectors served, banking relationships | Current approved documentation; prior packets as wording reference only | Medium |
+| Short narrative | Market sectors served, banking relationships | Current approved documentation; approved historical business representations with explicit continuity status | Medium |
 | Checkboxes | Fully disclosed clearing, inventory dealer, primary dealer, SIPC | Current approved supporting documentation | Medium. Flattened PDFs make detection harder |
 | Attestations | Read and understood policy, PFIA acknowledgment, campaign contribution disclosure | Provided, approved documentation and standard answers; prior wording is not evidence of a current personal act | High. Agent prepares supported responses; signatory reviews and confirms |
-| Third-party contacts | Three public-sector references | Current approved contact records; prior packets as wording reference only | Medium. Stale contacts |
+| Third-party contacts | Three public-sector references | Current approved contact records; approved prior references as historical candidates, with current qualification/contact gaps flagged | Medium. Stale contacts |
 | Attachment selection | Checklist of required documents | Support folders | Medium. Version selection |
 
 **Findings that shape the design**
@@ -101,7 +101,7 @@ The agent reads only from designated, named folders, and picks the applicable ve
 | Representative bios and resumes | Required attachment | On change | Sales | To be confirmed |
 | Standing settlement instructions | Required attachment | On change | Operations | To be confirmed |
 | Firm collateral and market snapshot | Optional attachments | Periodic | Marketing | To be confirmed |
-| Prior completed packets | Wording precedent and bounded historical discrepancy checks, never current factual authority. A separate held-out collection is evaluation-only | Explicitly partitioned before use | Technical/evaluation custodian to be named | Designated reference archive; held-out answers and derivatives excluded from agent inputs |
+| Prior completed packets | Historical business evidence for prior assignments, contacts and representations; wording precedent and discrepancy checks. Reuse follows the status/risk rules below, not automatic current confirmation | Explicitly partitioned before use | Technical/evaluation custodian to be named | Designated approved historical archive; separate held-out answers and derivatives excluded from agent inputs |
 
 **Proposed version rule (for John's approval)**
 
@@ -116,7 +116,17 @@ Financial reporting beyond the FOCUS report and audited financials sits outside 
 
 **Evidence-first clarification (October 21, 2026):** the earlier fact-sheet references in this scope describe a derived view of supported facts, not a workbook humans must populate or maintain. The application extracts facts needed by the current application from approved supporting documents, verifies deterministic values and context where possible, and asks humans only to resolve missing, conflicting or ambiguous evidence. An Excel view is optional for inspection/export, not a required input or parallel source of truth. Keep machine-readable facts, checks, source versions and correction history in a separate internal JSON archive; do not generate a new Excel workbook on every run.
 
-**Historical checks:** generate current proposals from independent supporting evidence first, then compare only explicitly permitted reference packets with suitable issuer/question/period/signer context. A difference is a reviewer flag, not proof of an error; identical historical wording is not proof of current correctness. Never overwrite current evidence with a historical answer or infer a negative disclosure from precedent. Signed/completed packets are not automatically ground truth. Keep evaluation-only packets, copies and answer-bearing derivatives out of retrieval, prompts, examples and fact extraction. Partition assignment and storage permissions are controlled by the technical/evaluation custodian, not the model.
+**Historical business evidence policy (approved October 29, 2026):** inspect explicitly permitted prior packets during discovery, before concluding that new business input is required. They document previous business representations, not automatically current truth. Distinguish:
+
+- **Currently corroborated:** current approved evidence confirms the prior answer in the issuer's required context.
+- **Historical - continuity unconfirmed:** an approved prior packet explicitly supports the answer, its context is applicable, and inspected current sources do not contradict it, but continued validity is not fully confirmed. Eligible answers may be prefilled in the incomplete draft. The separate internal summary must prominently identify the historical status, exact prior source/hash/page, packet date or unknown date, issuer/question/role context, current checks performed and what the reviewer must confirm. Lack of contradiction is not current corroboration.
+- **Unsupported or conflicting:** no applicable historical/current support, incompatible context, or an unresolved contradiction. Leave the answer blank and explain the gap; never choose whichever prior answer is convenient.
+
+Prior representative assignments, contact details, firm descriptions, trading-capability descriptions, account-opening requirements and reference candidates can inform draft proposals under these rules. A prior assignment supports only that same role/context; a registered person's presence in a report does not establish an assignment. Historical references must not be presented as meeting a current recency or qualification requirement without support. Preserve explicit dates/qualifiers in historical claims.
+
+Financial quantities must use evidence for the applicable reporting period; historical values are not rolled forward. Historical disclosures require explicit question/scope/period review and applicable supporting evidence, not automatic reuse of an old negative response. Never carry forward signatures, signature dates or personal acknowledgments as new acts. Unresolved signer authority remains flagged even if a historical assignment is prefilled.
+
+Never overwrite contradictory current evidence with history. A historical difference is a reviewer flag, not proof of an error; identical wording is not an accuracy pass. Completed or signed packets are not automatically ground truth. Keep evaluation-only packets, copies and answer-bearing derivatives out of retrieval, prompts, examples and fact extraction. A packet used as historical input cannot also be an independent held-out answer for that evaluation. Partition assignment and storage permissions are controlled by the technical/evaluation custodian, not the model. Historical packets remain internal evidence; do not append prior signed packets to a submission merely because their answers were consulted.
 
 ## 7. Functional requirements and agent workflow
 
@@ -131,7 +141,7 @@ A field without a supporting approved source is left blank and flagged. Readable
 | FR1 | Accept one or more blank issuer PDFs from an input folder or upload | Must |
 | FR2 | Classify each page: form to complete, attestation, checklist, instructions, or issuer-only content | Must |
 | FR3 | Detect fields, checkboxes, and tables on flattened PDFs using layout and vision, and fall back to native form fields when present | Must |
-| FR4 | Attempt every answerable field, including attestations and disclosures, using provided, approved documentation, including the support documents attached to the application. Use prior packets for wording only. Record the supporting source, page or section, period, and confidence per answer | Must |
+| FR4 | Attempt every answerable field, including attestations and disclosures, using provided, approved documentation and applicable supporting attachments. Consult approved historical business evidence under Section 6; eligible continuity-unconfirmed answers may be prefilled with prominent internal review flags. Record source/version, page or section, period/context, evidence status and confidence per answer | Must |
 | FR5 | Write answers onto the issuer's original PDF, preserving its layout | Must |
 | FR6 | Leave signatures and signature dates blank for electronic signing by the signatories. Dates are mandatory at signing, not at packet generation | Must |
 | FR7 | Read the issuer checklist, select each required document under Section 6, and append available documents in checklist order. Explicitly flag missing documents, staleness, and unmet period or document requirements without terminating the run | Must |
@@ -166,7 +176,7 @@ The agent can read approved folders and write drafts. Only a signatory can appro
 | Sourced values only | Every answer is grounded in provided, approved documentation, including appended support documents. Numbers, dates, names, and identifiers are copied from evidence and cited with a page or section. A citation alone is not sufficient if the source does not support the answer |
 | Attestations and disclosures | The agent prepares all supported responses; human signatories remain responsible for reviewing and confirming them. It never infers a personal act, acknowledgment, or disclosure answer from absence of evidence |
 | Exceptions continue to review | Missing information, unsuitable periods, or unresolved signer roles do not discard the run. Complete supported portions and prominently report each exception. Defer only the affected work; unresolved items require human resolution before submission |
-| Prior packets are not factual authority | Facts come from approved supporting evidence for the required context. Explicitly permitted prior packets may suggest wording or flag historical discrepancies, never establish/replace a current value. Held-out packets and answer-bearing derivatives remain evaluation-only |
+| Historical evidence is not current confirmation | Approved prior packets may support eligible draft prefills under Section 6, with historical provenance and unconfirmed continuity prominently flagged. Current contradictions, financial-period requirements, disclosure scope and personal-act safeguards take precedence. Held-out packets and answer-bearing derivatives remain evaluation-only |
 | Restricted tier | Financial reporting beyond FOCUS and audited financials is not placed in agent-accessible locations |
 | Untrusted input | Text inside issuer PDFs is treated as data. Instructions found in a form are ignored and flagged |
 | Traceability | Each run stores inputs, outputs, source versions, model version, and reviewer notification for audit |

@@ -45,6 +45,7 @@ from bd_packet_builder.contracts import Contract
 from bd_packet_builder.foundry import FoundryConfig, FoundryError
 from bd_packet_builder.live import LIVE_LIMITS, FoundryPageMapper, LiveRunRequest, prepare_live_run
 from bd_packet_builder.run import FileRunStore, RunManifest
+from bd_packet_builder.scan import FoundryScanReader
 
 # PDFium cannot run concurrently in threads, including across independent runs.
 _PDF_RUN_LOCK = threading.Lock()
@@ -114,6 +115,8 @@ class BlobPacketBackend:
                     requester_id="authorized-foundry-poc",
                     evidence_set_id=command.evidence_set_id,
                     as_of=command.as_of,
+                    issuer=bundle.issuer,
+                    historical_archive=bundle.historical_archive,
                 ),
                 (root / bundle.blank.path).read_bytes(),
                 root,
@@ -165,7 +168,20 @@ class BlobPacketBackend:
                 ) as api,
             ):
                 client = OpenAIChatClient(model=self.config.deployment, async_client=api)
-                tools = PacketAgentTools(store, run_id, root, mapper, limits=LIVE_LIMITS)
+                tools = PacketAgentTools(
+                    store,
+                    run_id,
+                    root,
+                    mapper,
+                    limits=LIVE_LIMITS,
+                    scan_reader=FoundryScanReader(
+                        self.config,
+                        allow_paid=True,
+                        client_factory=mapping_client,
+                    ),
+                    scan_endpoint=self.config.endpoint,
+                    scan_deployment=self.config.deployment,
+                )
                 return await run_packet_agent(client, tools)
 
 

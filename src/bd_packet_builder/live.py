@@ -21,13 +21,14 @@ from bd_packet_builder.agent import (
     PageMapError,
     run_packet_agent,
 )
-from bd_packet_builder.contracts import Contract, Identifier
+from bd_packet_builder.contracts import Contract, Identifier, Nonblank
 from bd_packet_builder.foundry import (
     FoundryConfig,
     FoundryError,
     request_structured,
     write_private_json,
 )
+from bd_packet_builder.history import ArchiveManifest, HistoryError, with_historical_sources
 from bd_packet_builder.inventory import build_inventory
 from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.run import (
@@ -41,11 +42,12 @@ from bd_packet_builder.run import (
     RunRequest,
     RunStore,
 )
+from bd_packet_builder.scan import SCAN_VERSION, FoundryScanReader
 from bd_packet_builder.visual import INSTRUCTIONS, PROMPT_VERSION, RenderedPage, VisualPage, _render
 
 _PAGE_OUTPUT_TOKENS = 16_384
-# Reserve five page-mapping calls within the authorized 40-call total.
-LIVE_LIMITS = AgentLimits(max_turns=35)
+# Reserve five mapping and five independent scanned-page calls within the 40-call total.
+LIVE_LIMITS = AgentLimits(max_turns=30)
 
 
 class LiveRunRequest(Contract):
@@ -53,6 +55,8 @@ class LiveRunRequest(Contract):
     requester_id: Identifier
     evidence_set_id: Identifier
     as_of: date | None = None
+    issuer: Nonblank | None = None
+    historical_archive: ArchiveManifest | None = None
 
 
 class FoundryPageMapper:
@@ -173,7 +177,9 @@ def prepare_live_run(
     evidence_root: Path,
     config: FoundryConfig,
 ) -> RunManifest:
-    inventory = build_inventory(evidence_root)
+    inventory = with_historical_sources(
+        evidence_root, build_inventory(evidence_root), request.historical_archive
+    )
     snapshot = EvidenceSnapshot(
         evidence_set_id=request.evidence_set_id,
         items=tuple(
@@ -187,6 +193,8 @@ def prepare_live_run(
             requester_id=request.requester_id,
             blank_name=request.blank_name,
             as_of=request.as_of,
+            issuer=request.issuer,
+            historical_archive=request.historical_archive,
         ),
         blank,
         snapshot,
@@ -194,6 +202,7 @@ def prepare_live_run(
             ComponentVersion(name="code", version=package_version("bd-packet-builder")),
             ComponentVersion(name="agent", version=AGENT_VERSION),
             ComponentVersion(name="mapping-prompt", version=PROMPT_VERSION),
+            ComponentVersion(name="scan-prompt", version=SCAN_VERSION),
             ComponentVersion(name="model", version=config.deployment),
         ),
         limits=RunLimits(),
@@ -223,7 +232,16 @@ async def run_live(
 ) -> RunManifest:
     mapper = FoundryPageMapper(config, allow_paid=allow_paid)
     client = build_live_client(config)
-    tools = PacketAgentTools(store, run_id, evidence_root, mapper, limits=LIVE_LIMITS)
+    tools = PacketAgentTools(
+        store,
+        run_id,
+        evidence_root,
+        mapper,
+        limits=LIVE_LIMITS,
+        scan_reader=FoundryScanReader(config, allow_paid=allow_paid),
+        scan_endpoint=config.endpoint,
+        scan_deployment=config.deployment,
+    )
     try:
         return await run_packet_agent(client, tools)
     finally:
@@ -242,11 +260,23 @@ def run_agent_command(
     allow_paid: bool,
     trace_sink: list[str] | None = None,
     runs_dir: Path | None = None,
+    historical_manifest: Path | None = None,
+    issuer: str | None = None,
 ) -> RunManifest:
     """Workstation driver for slice 6: same agent code as the hosted runtime, local storage."""
     if not allow_paid:
         raise FoundryError("A live agent run requires --allow-paid")
     root = root.resolve(strict=True)
+    historical_archive = None
+    if historical_manifest is not None:
+        if issuer is None:
+            raise HistoryError("Historical discovery requires an explicit target issuer")
+        try:
+            historical_archive = ArchiveManifest.model_validate_json(
+                read_local_input(root, historical_manifest, Path("outputs"), 2 * 1024 * 1024)
+            )
+        except ValidationError:
+            raise HistoryError("Historical partition manifest failed schema validation") from None
     runs = runs_dir or root / "outputs" / "agent-runs"
     runs.mkdir(parents=True, exist_ok=True)
     data = read_local_input(root, blank, Path("bd_agreements/Blank"), 64 * 1024 * 1024)
@@ -256,6 +286,8 @@ def run_agent_command(
         requester_id=requester_id,
         evidence_set_id=evidence_set_id,
         as_of=as_of,
+        historical_archive=historical_archive,
+        issuer=issuer,
     )
     manifest = prepare_live_run(store, request, data, root, config)
     try:

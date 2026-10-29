@@ -24,6 +24,7 @@ from bd_packet_builder.contracts import (
     ApplicationRequirements,
     BooleanValue,
     Contract,
+    EvidenceStatus,
     Identifier,
     IdentifierValue,
     MultiSelectValue,
@@ -35,6 +36,7 @@ from bd_packet_builder.contracts import (
     TextValue,
     check_proposal,
 )
+from bd_packet_builder.history import ArchiveManifest, historical_issues, with_historical_sources
 from bd_packet_builder.inventory import (
     Inventory,
     SourceRecord,
@@ -44,6 +46,7 @@ from bd_packet_builder.inventory import (
 )
 from bd_packet_builder.layout import MappedResponse, PageBox, ResponseLayout, validate_layout
 from bd_packet_builder.local_inputs import LocalInputError, read_local_input
+from bd_packet_builder.ocr import OcrWordEvidence, ocr_text
 from bd_packet_builder.responses import (
     NarrativeRegion,
     PacketPagination,
@@ -53,6 +56,7 @@ from bd_packet_builder.responses import (
 )
 from bd_packet_builder.retrieval import default_catalog
 from bd_packet_builder.review import AnswerProposals
+from bd_packet_builder.scan import ScanCheck
 
 MAX_PACKET_PAGES = 100
 BANNER_HEIGHT = 24
@@ -108,10 +112,15 @@ class DraftRequest(Contract):
     attachments: Annotated[tuple[Sha256, ...], Field(max_length=10)]
     protected_regions: Annotated[tuple[PageBox, ...], Field(max_length=100)]
     additional_forms: Annotated[tuple[DraftAdditionalForm, ...], Field(max_length=10)] = ()
+    issuer: Nonblank | None = None
+    historical_archive: ArchiveManifest | None = None
+    navigation_context: dict[Identifier, Nonblank] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def identities(self) -> Self:
         requirements = {r.requirement_id: r for r in self.requirements.requirements}
+        if not self.navigation_context.keys() <= requirements.keys():
+            raise ValueError("Navigation context must refer to declared requirements")
         if len(requirements) > 100:
             raise ValueError("Draft trial supports at most 100 requirements")
         if {p.requirement_id for p in self.proposals.proposals} != requirements.keys():
@@ -158,6 +167,7 @@ class DraftDecision(Contract):
     source_subject_confirmed: bool = False
     ocr_visual_confirmed: bool = False
     confirmed_source_subject: Nonblank | None = None
+    evidence_status: EvidenceStatus = "current_evidence"
     reason: Nonblank
 
     @model_validator(mode="after")
@@ -175,6 +185,7 @@ class DraftReview(Contract):
     decisions: Annotated[tuple[DraftDecision, ...], Field(max_length=100)]
     attachment_source_ids: Annotated[tuple[Sha256, ...], Field(max_length=10)] = ()
     reviewer_notes: Annotated[tuple[Nonblank, ...], Field(max_length=20)] = ()
+    scan_checks: Annotated[tuple[ScanCheck, ...], Field(max_length=100)] = ()
 
     @model_validator(mode="after")
     def unique(self) -> Self:
@@ -195,18 +206,6 @@ class TextPlacement:
 class MarkPlacement:
     box: PageBox
     control: Literal["radio", "checkbox"]
-
-
-class OcrWordEvidence(Contract):
-    text: Nonblank
-    confidence: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)]
-    left: Annotated[int, Field(ge=0)]
-    top: Annotated[int, Field(ge=0)]
-    width: Annotated[int, Field(ge=1)]
-    height: Annotated[int, Field(ge=1)]
-    block: Annotated[int, Field(ge=1)]
-    paragraph: Annotated[int, Field(ge=1)]
-    line: Annotated[int, Field(ge=1)]
 
 
 def _measure(text: str, size: float) -> float:
@@ -230,19 +229,7 @@ def _overlap(a: PageBox | NarrativeRegion, b: PageBox | NarrativeRegion) -> bool
     )
 
 
-def _ocr_text(words: list[OcrWordEvidence]) -> str:
-    lines: list[list[str]] = []
-    previous: tuple[int, int, int] | None = None
-    for word in words:
-        key = (word.block, word.paragraph, word.line)
-        if key != previous:
-            lines.append([])
-        lines[-1].append(word.text)
-        previous = key
-    return "\n".join(" ".join(line) for line in lines)
-
-
-def _verify_ocr_citation(
+def verify_ocr_citation(
     root: Path,
     inventory: Inventory,
     citation: OcrCitation,
@@ -313,10 +300,10 @@ def _verify_ocr_citation(
         for word in words
     ):
         return "ocr_words_invalid", None, None
-    if data.get("text") != _ocr_text(words):
+    if data.get("text") != ocr_text(words):
         return "ocr_text_mismatch", None, None
     selected = words[citation.word_start : citation.word_end]
-    if citation.word_end > len(words) or not selected or _ocr_text(selected) != citation.quote:
+    if citation.word_end > len(words) or not selected or ocr_text(selected) != citation.quote:
         return "ocr_quote_mismatch", None, None
     key = citation.source_id, citation.page
     rendered = render_hashes.get(key)
@@ -406,6 +393,15 @@ def selected_inventory(root: Path, request: DraftRequest) -> Inventory:
     families = set()
     for selection in request.sources:
         path = Path(selection.path)
+        if path.is_relative_to("bd_agreements/Completed"):
+            if request.historical_archive is None or not any(
+                e.path == selection.path
+                and e.sha256 == selection.sha256
+                and e.partition == "reference"
+                for e in request.historical_archive.entries
+            ):
+                raise DraftError("Historical source is not approved by the partition manifest")
+            continue
         base = Path("bd_agreements/supporting_data")
         if path.is_absolute() or ".." in path.parts or not path.is_relative_to(base):
             raise DraftError("Draft sources must be within designated supporting folders")
@@ -418,6 +414,7 @@ def selected_inventory(root: Path, request: DraftRequest) -> Inventory:
         if families
         else Inventory(datetime.now(UTC), (), ())
     )
+    inventory = with_historical_sources(root, inventory, request.historical_archive)
     selected: list[SourceRecord] = []
     for expected in request.sources:
         source = next((s for s in inventory.sources if s.path == expected.path), None)
@@ -698,6 +695,8 @@ def publish_draft(
     sources = {s.source_id: s for s in inventory.sources}
     if not set(request.attachments) <= sources.keys():
         raise DraftError("Attachment is not a version-bound selected source")
+    if any(sources[i].family == "historical_reference" for i in request.attachments):
+        raise DraftError("Historical packets must never be submission attachments")
     attachment_ids = [
         identity for identity in request.attachments if identity in review.attachment_source_ids
     ]
@@ -729,6 +728,15 @@ def publish_draft(
         decision = decisions.get(identity)
         mapped = mappings.get(identity)
         check = check_proposal(root, inventory, req, proposal)
+        history_issues, evidence_status = historical_issues(
+            root,
+            inventory,
+            request.historical_archive,
+            request.issuer,
+            req,
+            proposal,
+            navigation_context=request.navigation_context.get(identity, ""),
+        )
         issues: list[str] = []
         result: dict[str, object] = {
             "requirement_id": identity,
@@ -737,12 +745,13 @@ def publish_draft(
             "proposal": proposal.model_dump(mode="json"),
             "citation_check": asdict(check),
             "review_reason": decision.reason if decision else None,
+            "evidence_status": evidence_status,
         }
         ocr_citations = tuple(c for c in proposal.citations if isinstance(c, OcrCitation))
         ocr_evidence: list[dict[str, object]] = []
         ocr_valid = True
         for citation in ocr_citations:
-            ocr_issue, snapshot, details = _verify_ocr_citation(
+            ocr_issue, snapshot, details = verify_ocr_citation(
                 root, inventory, citation, ocr_render_hashes
             )
             if ocr_issue:
@@ -764,10 +773,32 @@ def publish_draft(
         if decision is None or decision.decision != "draft_verified":
             issues.append("withheld" if decision else "not_reviewed")
             continue
+        if history_issues:
+            issues.extend(history_issues)
+            continue
         if ocr_citations:
-            if not decision.source_subject_confirmed or not decision.confirmed_source_subject:
+            machine_checked = all(
+                any(
+                    check.citation == citation
+                    and check.supports(req, proposal)
+                    and Path(citation.artifact_path) in ocr_artifact_snapshots
+                    and check.agrees_with_artifact(
+                        ocr_artifact_snapshots[Path(citation.artifact_path)]
+                    )
+                    for check in review.scan_checks
+                )
+                for citation in ocr_citations
+            )
+            result["ocr_review_method"] = (
+                "machine_cross_checked_draft_not_human_approval"
+                if machine_checked
+                else "human_visual_review"
+            )
+            if not machine_checked and (
+                not decision.source_subject_confirmed or not decision.confirmed_source_subject
+            ):
                 issues.append("ocr_source_subject_not_confirmed")
-            if not decision.ocr_visual_confirmed:
+            if not machine_checked and not decision.ocr_visual_confirmed:
                 issues.append("ocr_visual_review_not_confirmed")
             if not ocr_valid:
                 issues.append("ocr_evidence_not_verified")
@@ -789,7 +820,13 @@ def publish_draft(
         if req.requested_period is not None and proposal.claimed_period != req.requested_period:
             issues.append("requested_period_not_confirmed")
             continue
-        if any(c.source_id not in attachment_ids for c in proposal.citations):
+        if any(
+            c.source_id not in attachment_ids
+            and (
+                c.source_id not in sources or sources[c.source_id].family != "historical_reference"
+            )
+            for c in proposal.citations
+        ):
             issues.append("supporting_evidence_not_attached")
             continue
         candidate_texts: list[TextPlacement] = []
@@ -957,11 +994,17 @@ def publish_draft(
     for proposal in accepted:
         identity = proposal.requirement_id
         evidence_refs = tuple(
-            PacketReference(section_id=c.source_id, page=c.page) for c in proposal.citations
+            PacketReference(section_id=c.source_id, page=c.page)
+            for c in proposal.citations
+            if sources[c.source_id].family != "historical_reference"
         )
         refs = tuple(dict.fromkeys(pagination.resolve(r, role="evidence") for r in evidence_refs))
         placements[identity]["evidence_packet_pages"] = list(refs)
-        evidence_text = "Supporting evidence: " + "; ".join(f"packet page {p}" for p in refs) + "."
+        evidence_text = (
+            "Supporting evidence: " + "; ".join(f"packet page {p}" for p in refs) + "."
+            if refs
+            else "Historical draft basis; internal reviewer confirmation required."
+        )
         supplement_evidence[identity] = evidence_text
         if isinstance(proposal.value, NarrativeValue):
             answer_narrative_region = mappings[identity].narrative_region
@@ -1068,7 +1111,7 @@ def publish_draft(
 
     payload: dict[str, object] = {
         "schema_version": 1,
-        "writer_version": "reviewed-draft-overlay-v2",
+        "writer_version": "reviewed-draft-overlay-v5",
         "created_at": datetime.now(UTC).isoformat(),
         "status": "incomplete_draft_not_for_submission",
         "mode": request.mode,
@@ -1087,6 +1130,11 @@ def publish_draft(
         "placements": placements,
         "pagination": pagination.model_dump(mode="json"),
         "sources": [asdict(s) for s in inventory.sources],
+        "historical_archive": (
+            request.historical_archive.model_dump(mode="json")
+            if request.historical_archive
+            else None
+        ),
         "signature_policy": "signatures_and_signature_dates_left_blank",
         "unapproved_attachments_omitted": [
             s for s in request.attachments if s not in attachment_ids
@@ -1095,7 +1143,7 @@ def publish_draft(
             "review_JSON_is_trusted_input_not_authentication",
             "declared_subset_only_not_full_application_coverage",
             "native_unrotated_blank_mapping_only",
-            "OCR_requires_source_subject_visual_support_and_placement_review",
+            "OCR_requires_human_review_or_scalar_machine_cross_check_not_semantic_approval",
             "no_historical_comparison_or_business_approval",
         ],
     }
@@ -1185,6 +1233,46 @@ def publish_draft(
                     f"Evidence packet pages: {packet_pages}",
                 ]
             )
+            if proposal.historical_basis is not None:
+                basis = proposal.historical_basis
+                status = (
+                    "HISTORICAL - CONTINUITY UNCONFIRMED"
+                    if item["evidence_status"] == "historical_continuity_unconfirmed"
+                    else str(item["evidence_status"]).upper()
+                )
+                summary.extend(
+                    [
+                        f"HISTORICAL BASIS: {status}; not human approval.",
+                        f"Context: {basis.context}; category={basis.category}; "
+                        f"role={basis.role or 'none'}",
+                        f"Prior question/context: {basis.prior_question.quote}",
+                        f"REVIEWER MUST CONFIRM: {basis.reviewer_confirmation}",
+                        "Historical originals are internal only and are NOT appended "
+                        "to the packet.",
+                    ]
+                )
+                for entry in (
+                    request.historical_archive.entries if request.historical_archive else ()
+                ):
+                    if any(
+                        sources.get(c.source_id) and sources[c.source_id].path == entry.path
+                        for c in proposal.citations
+                    ):
+                        summary.append(
+                            f"Prior issuer: {entry.issuer}; packet date: "
+                            f"{str(entry.completed_on) if entry.completed_on else 'unknown'}; "
+                            f"source: {entry.path}; sha256={entry.sha256}"
+                        )
+                if not basis.current_checks:
+                    summary.append("Current corroboration: no cited current-source checks.")
+                for current_check in basis.current_checks:
+                    checked = sources.get(current_check.citation.source_id)
+                    summary.append(
+                        f"Current check (model assessment, not proof): {current_check.finding}; "
+                        f"{checked.path if checked else 'UNRESOLVED SOURCE'}; "
+                        f"sha256={checked.sha256 if checked else 'unknown'}; "
+                        f"page {current_check.citation.page}; {current_check.explanation}"
+                    )
             for citation in proposal.citations:
                 source = sources.get(citation.source_id)
                 summary.append(
@@ -1212,6 +1300,15 @@ def publish_draft(
                     f"source subject confirmed as {confirmed_subject}; "
                     f"visual confirmation={visual_confirmation}."
                 )
+                if (
+                    item.get("ocr_review_method")
+                    == "machine_cross_checked_draft_not_human_approval"
+                ):
+                    summary.append(
+                        "Machine cross-check: OCR and independent image transcription agree; "
+                        "not human visual approval or proof of semantic support. "
+                        "See answer_review.json for subject, period, prompt/model and transcript."
+                    )
         summary.extend(
             [
                 "",

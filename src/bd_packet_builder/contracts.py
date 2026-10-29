@@ -21,6 +21,9 @@ from bd_packet_builder.inventory import Inventory
 Nonblank = Annotated[str, StringConstraints(min_length=1, max_length=20_000, pattern=r"\S")]
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+EvidenceStatus = Literal[
+    "current_evidence", "currently_corroborated", "historical_continuity_unconfirmed", "unsupported"
+]
 Unit = Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r"\S")]
 RequirementKind = Literal[
     "text",
@@ -230,6 +233,30 @@ class OcrCitation(Contract):
         return self
 
 
+class CurrentEvidenceCheck(Contract):
+    citation: Citation
+    finding: Literal["corroborates", "contradicts", "not_corroborated"]
+    explanation: Nonblank
+
+
+class HistoricalBasis(Contract):
+    """Untrusted interpretation of historical context, never current authorization."""
+
+    category: Literal[
+        "representative_assignment",
+        "contact",
+        "firm_description",
+        "trading_capability",
+        "account_requirement",
+        "reference",
+    ]
+    context: Literal["firm_wide", "issuer_specific"]
+    prior_question: Citation | OcrCitation
+    role: Nonblank | None = None
+    current_checks: Annotated[tuple[CurrentEvidenceCheck, ...], Field(max_length=20)]
+    reviewer_confirmation: Nonblank
+
+
 class AnswerProposal(Contract):
     schema_version: Literal[1] = 1
     requirement_id: Identifier
@@ -247,6 +274,7 @@ class AnswerProposal(Contract):
     claimed_period: ReportingPeriod | None = None
     confidence: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] | None = None
     explanation: Nonblank | None = None
+    historical_basis: HistoricalBasis | None = None
 
     @model_validator(mode="after")
     def complete_outcome(self) -> Self:

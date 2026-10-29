@@ -2,9 +2,9 @@
 
 Every result is data for the model, not instructions: document text is labeled untrusted, tools
 accept only source IDs from the verified inventory, and no tool accepts a path, URL, recipient or
-command. Native text is the only citable evidence; OCR text is returned for reading but is never
-citable until it is machine-verified (a later slice). Budgets are enforced in code and are
-per-tool-instance, so a hosted runtime that restarts mid-run must reconstruct the used amounts.
+command. OCR text is not citable until independently image-cross-checked for scalar draft
+answers. Budgets are enforced in code and are per-tool-instance, so a hosted runtime that
+restarts mid-run must reconstruct the used amounts.
 """
 
 from contextlib import closing
@@ -14,8 +14,9 @@ from typing import Annotated, Literal
 import pypdfium2 as pdfium
 from pydantic import Field
 
-from bd_packet_builder.contracts import Contract, Identifier, Nonblank, Sha256
+from bd_packet_builder.contracts import Contract, Identifier, Nonblank, OcrCitation, Sha256
 from bd_packet_builder.evidence import EvidenceError, TextCitation, resolve_quote
+from bd_packet_builder.history import ArchiveManifest, historical_inventory
 from bd_packet_builder.inventory import (
     Inventory,
     InventoryError,
@@ -26,6 +27,7 @@ from bd_packet_builder.inventory import (
 from bd_packet_builder.ocr import OcrError
 from bd_packet_builder.retrieval import default_catalog, read_page
 from bd_packet_builder.run import EvidenceSnapshot
+from bd_packet_builder.scan import ScanEvidence, ScanVerificationError
 
 Trust = Literal["untrusted_document_text"]
 _UNRELIABLE_NATIVE = frozenset(
@@ -69,6 +71,8 @@ class SourceSummary(Contract):
     period: str | None
     period_basis: str | None
     flags: tuple[str, ...]
+    historical_issuer: str | None = None
+    completed_on: str | None = None
 
 
 class SelectionSummary(Contract):
@@ -148,14 +152,23 @@ class EvidenceTools:
         *,
         limits: EvidenceLimits | None = None,
         allow_ocr: bool = True,
+        scan_evidence: ScanEvidence | None = None,
+        historical_archive: ArchiveManifest | None = None,
     ) -> None:
+        history = historical_inventory(root, historical_archive) if historical_archive else None
+        allowed_history = {s.source_id for s in history.sources} if history else set()
+        if any(
+            s.family == "historical_reference" and s.source_id not in allowed_history
+            for s in inventory.sources
+        ):
+            raise EvidenceToolError("Historical source is not approved by the partition manifest")
         items = {i.path: i for i in snapshot.items}
         for source in inventory.sources:
             item = items.get(source.path)
             if item is None or item.sha256 != source.sha256 or item.size_bytes != source.size_bytes:
                 raise EvidenceToolError("Inventory source is not in this run's evidence snapshot")
         self._root = root.resolve(strict=True)
-        folders = {f.folder for f in default_catalog().families}
+        folders = {f.folder for f in default_catalog().families} | {"historical_reference"}
         # Only designated families are visible; the writer rejects anything else later.
         self._inventory = Inventory(
             inventory.created_at,
@@ -164,12 +177,24 @@ class EvidenceTools:
         )
         self._limits = limits or EvidenceLimits()
         self._allow_ocr = allow_ocr
-        self._folders = {f.folder for f in default_catalog().families}
+        self._folders = folders
+        self._historical = (
+            {
+                entry.path: entry
+                for entry in historical_archive.entries
+                if entry.partition == "reference"
+            }
+            if historical_archive
+            else {}
+        )
         self._calls = 0
-        self._pages = 0
+        self._pages: set[tuple[str, int]] = set()
         self._chars = 0
         self._ocr = 0
         self._attachments: list[str] = []
+        self._scan_evidence = scan_evidence
+        self._page_cache: dict[tuple[str, int, bool], tuple[PageRead, bool]] = {}
+        self._ocr_artifacts: dict[tuple[str, int], str] = {}
 
     @property
     def attachments(self) -> tuple[str, ...]:
@@ -239,6 +264,15 @@ class EvidenceTools:
                 period=s.period,
                 period_basis=s.period_basis,
                 flags=s.flags,
+                historical_issuer=self._historical[s.path].issuer
+                if s.path in self._historical
+                else None,
+                completed_on=(
+                    str(self._historical[s.path].completed_on)
+                    if s.path in self._historical
+                    and self._historical[s.path].completed_on is not None
+                    else None
+                ),
             )
             for s in selected
         )
@@ -309,11 +343,22 @@ class EvidenceTools:
         )
 
     def _page(self, source: SourceRecord, page: int, *, ocr: bool) -> tuple[PageRead, bool]:
+        identity = (source.source_id, page)
+        if identity not in self._pages:
+            if len(self._pages) >= self._limits.max_pages_read:
+                raise ToolLimitError("Evidence distinct-page read limit reached")
+            self._pages.add(identity)
+        cached = self._page_cache.get((source.source_id, page, ocr))
+        if cached is not None:
+            read_source_bytes(self._root, self._inventory, source.source_id)
+            return cached[0], False
         retrieved = read_page(self._root, self._inventory, source, page, ocr)
         used_ocr = retrieved.mode == "ocr"
         issues = retrieved.issues
         reliable = retrieved.mode == "native" and not (set(issues) & _UNRELIABLE_NATIVE)
-        return (
+        if retrieved.ocr_report is not None:
+            self._ocr_artifacts[source.source_id, page] = retrieved.ocr_report
+        result = (
             PageRead(
                 source_id=source.source_id,
                 page=page,
@@ -324,13 +369,13 @@ class EvidenceTools:
             ),
             used_ocr,
         )
+        self._page_cache[source.source_id, page, ocr] = result
+        return result
 
     def read_page(self, source_id: str, page: int) -> PageRead:
         """One page of native text, with automatic OCR for textless or sparse pages."""
         self._tick()
         source = self._pdf(source_id, page)
-        if self._pages >= self._limits.max_pages_read:
-            raise ToolLimitError("Evidence page-read limit reached")
         budget_left = self._ocr < self._limits.max_ocr_pages
         extra: tuple[str, ...] = ()
         try:
@@ -348,7 +393,6 @@ class EvidenceTools:
         if extra:
             result = result.model_copy(update={"issues": (*result.issues, *extra)})
         self._spend_chars(len(result.text))
-        self._pages += 1
         if used_ocr:
             self._ocr += 1
         return result
@@ -359,10 +403,7 @@ class EvidenceTools:
         source = self._pdf(source_id, page)
         if not quote or not quote.strip():
             raise ToolInputError("Quote must be nonblank")
-        if self._pages >= self._limits.max_pages_read:
-            raise ToolLimitError("Evidence page-read limit reached")
         read, _ = self._page(source, page, ocr=False)
-        self._pages += 1
         if not read.citable:
             raise ToolInputError(
                 "Quote location needs reliable native text; this page needs OCR review"
@@ -378,6 +419,7 @@ class EvidenceTools:
             )
         except EvidenceError:
             raise ToolInputError("Quote could not be verified against the page") from None
+        self._spend_chars(len(quote))
         return QuoteLocation(
             source_id=source_id,
             page=page,
@@ -390,9 +432,43 @@ class EvidenceTools:
     def select_attachment(self, source_id: str) -> tuple[str, ...]:
         """Candidate packet attachment; the answer gate still decides which are kept."""
         self._tick()
-        self._pdf(source_id)
+        source = self._pdf(source_id)
+        if source.family == "historical_reference":
+            raise ToolInputError("Prior packets are internal evidence, never packet attachments")
         if source_id not in self._attachments:
             if len(self._attachments) >= self._limits.max_attachments:
                 raise ToolLimitError("Attachment limit reached")
             self._attachments.append(source_id)
         return self.attachments
+
+    def verify_scan_quote(
+        self,
+        source_id: str,
+        page: int,
+        quote: str,
+        expected_subject: str,
+    ) -> OcrCitation:
+        """Cross-check a quote from a previously OCR-read page against a blind image reading."""
+        self._tick()
+        self._pdf(source_id, page)
+        if self._scan_evidence is None:
+            raise ToolInputError("Scanned-evidence cross-checking is not enabled")
+        artifact = self._ocr_artifacts.get((source_id, page))
+        if artifact is None:
+            raise ToolInputError("Read this scanned page with OCR before verifying its quote")
+        if not quote.strip() or len(quote) > 2000 or not expected_subject.strip():
+            raise ToolInputError(
+                "Scan quotes need 1-2000 characters and an explicit source subject"
+            )
+        try:
+            citation = self._scan_evidence.locate(
+                source_id,
+                page,
+                quote,
+                expected_subject,
+                artifact,
+            )
+            self._spend_chars(len(citation.quote) + len(expected_subject))
+            return citation
+        except ScanVerificationError as error:
+            raise ToolInputError(str(error)) from None

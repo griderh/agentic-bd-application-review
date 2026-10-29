@@ -7,14 +7,18 @@ import math
 import re
 import shutil
 import subprocess
+from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Annotated
 
 import pypdfium2 as pdfium
+from pydantic import Field
 
+from bd_packet_builder.contracts import Contract, Nonblank
 from bd_packet_builder.inventory import (
     EvidenceReference,
     Inventory,
@@ -73,6 +77,18 @@ class OcrWord:
     block: int
     paragraph: int
     line: int
+
+
+class OcrWordEvidence(Contract):
+    text: Nonblank
+    confidence: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)]
+    left: Annotated[int, Field(ge=0)]
+    top: Annotated[int, Field(ge=0)]
+    width: Annotated[int, Field(ge=1)]
+    height: Annotated[int, Field(ge=1)]
+    block: Annotated[int, Field(ge=1)]
+    paragraph: Annotated[int, Field(ge=1)]
+    line: Annotated[int, Field(ge=1)]
 
 
 def _execute(command: list[str], temporary: Path, limits: OcrLimits) -> str:
@@ -143,7 +159,7 @@ def _words(tsv: str, width: int, height: int) -> tuple[OcrWord, ...]:
     return tuple(words)
 
 
-def _text(words: tuple[OcrWord, ...]) -> str:
+def ocr_text(words: Sequence[OcrWord | OcrWordEvidence]) -> str:
     lines: list[list[str]] = []
     previous: tuple[int, int, int] | None = None
     for word in words:
@@ -239,7 +255,7 @@ def run_ocr(
             "render_sha256": hashlib.sha256((temporary / "page.png").read_bytes()).hexdigest(),
             "limits": asdict(limits),
             "words": [asdict(word) for word in words],
-            "text": _text(words),
+            "text": ocr_text(words),
             "flags": ["ocr_unverified", "not_semantic_grounding"]
             + ([] if words else ["no_ocr_text"]),
         }

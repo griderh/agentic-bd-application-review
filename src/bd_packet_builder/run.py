@@ -20,6 +20,7 @@ from uuid import uuid4
 from pydantic import AwareDatetime, Field, StringConstraints, ValidationError, model_validator
 
 from bd_packet_builder.contracts import Contract, Identifier, Sha256
+from bd_packet_builder.history import ArchiveManifest
 
 RunStatus = Literal[
     "created",
@@ -80,6 +81,8 @@ class RunRequest(Contract):
     requester_id: Identifier
     blank_name: Label
     as_of: date | None = None
+    issuer: Label | None = None
+    historical_archive: ArchiveManifest | None = None
 
 
 class EvidenceItem(Contract):

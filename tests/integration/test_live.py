@@ -246,7 +246,8 @@ def test_prepare_snapshots_evidence_and_records_agent_and_model_versions(
         "bd_agreements/supporting_data/Firm/Firm profile.pdf"
     ]
     versions = {v.name: v.version for v in manifest.versions}
-    assert versions["agent"] == "packet-agent-v2"
+    assert versions["agent"] == "packet-agent-v6"
+    assert versions["scan-prompt"] == "scan-cross-check-v1"
     assert versions["model"] == "test"
 
 
@@ -278,8 +279,11 @@ def test_live_synthetic_run_reaches_an_explicit_terminal_state(
     print(json.dumps({"status": final.status, "outcome": final.outcome}))
 
 
+@pytest.mark.parametrize("historical", [False, True])
 def test_cli_agent_run_refuses_without_paid_authorization(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    historical: bool,
 ) -> None:
     from bd_packet_builder.cli import main
 
@@ -294,6 +298,11 @@ def test_cli_agent_run_refuses_without_paid_authorization(
             CONFIG.endpoint,
             "--deployment",
             "test",
+            *(
+                ["--historical-manifest", "outputs/approved-history.json", "--issuer", "Broward"]
+                if historical
+                else []
+            ),
         ]
     )
     assert code == 1

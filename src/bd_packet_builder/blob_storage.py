@@ -14,7 +14,8 @@ from azure.identity import AzureCliCredential
 from azure.storage.blob import BlobServiceClient
 from pydantic import Field, field_validator, model_validator
 
-from bd_packet_builder.contracts import Contract, Identifier, Sha256
+from bd_packet_builder.contracts import Contract, Identifier, Nonblank, Sha256
+from bd_packet_builder.history import ArchiveManifest, with_historical_sources
 from bd_packet_builder.inventory import build_inventory
 from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.retrieval import default_catalog
@@ -125,6 +126,9 @@ class InputBundle(Contract):
     evidence_set_id: Identifier
     blank: BlobInput
     evidence: Annotated[tuple[BlobInput, ...], Field(max_length=100)]
+    issuer: Nonblank | None = None
+    historical_archive: ArchiveManifest | None = None
+    historical_inputs: Annotated[tuple[BlobInput, ...], Field(max_length=100)] = ()
 
     @model_validator(mode="after")
     def allowed_inputs(self) -> Self:
@@ -144,7 +148,34 @@ class InputBundle(Contract):
             paths.append(item.path)
         if len(paths) != len(set(paths)):
             raise ValueError("Evidence paths must be unique")
-        if sum(i.size_bytes for i in (*self.evidence, self.blank)) > MAX_BUNDLE_BYTES:
+        expected = (
+            {
+                entry.path: entry.sha256
+                for entry in self.historical_archive.entries
+                if entry.partition == "reference"
+            }
+            if self.historical_archive
+            else {}
+        )
+        if len({i.path for i in self.historical_inputs}) != len(self.historical_inputs) or (
+            {i.path: i.sha256 for i in self.historical_inputs} != expected
+        ):
+            raise ValueError("Historical inputs must match the explicit reference partition")
+        excluded = (
+            {e.sha256 for e in self.historical_archive.entries}
+            if self.historical_archive
+            else set()
+        )
+        if any(i.sha256 in excluded for i in self.evidence):
+            raise ValueError(
+                "Historical/evaluation content cannot be relabeled as current evidence"
+            )
+        if self.historical_inputs and self.issuer is None:
+            raise ValueError("Historical discovery requires an explicit target issuer")
+        if (
+            sum(i.size_bytes for i in (*self.evidence, *self.historical_inputs, self.blank))
+            > MAX_BUNDLE_BYTES
+        ):
             raise ValueError("Bundle exceeds total byte limit")
         return self
 
@@ -164,13 +195,23 @@ class PacketBlobStorage:
     def __init__(self, blobs: BlobPort) -> None:
         self.blobs = blobs
 
-    def upload(self, root: Path, blank: Path, blank_id: str, evidence_set_id: str) -> InputBundle:
+    def upload(
+        self,
+        root: Path,
+        blank: Path,
+        blank_id: str,
+        evidence_set_id: str,
+        *,
+        historical_archive: ArchiveManifest | None = None,
+        issuer: str | None = None,
+    ) -> InputBundle:
         """Stage approved original inputs only; a manifest commits the immutable bundle last."""
         prefix = f"bundles/{_id(blank_id)}/{_id(evidence_set_id)}/"
         root = root.resolve(strict=True)
         blank_data = read_local_input(root, blank, Path("bd_agreements/Blank"), MAX_FILE_BYTES)
         folders = tuple(f.folder for f in default_catalog().families)
         inventory = build_inventory(root, families=folders, max_sources=100)
+        combined = with_historical_sources(root, inventory, historical_archive)
         bundle = InputBundle(
             blank_id=blank_id,
             evidence_set_id=evidence_set_id,
@@ -183,6 +224,13 @@ class PacketBlobStorage:
                 BlobInput(path=s.path, sha256=s.sha256, size_bytes=s.size_bytes)
                 for s in inventory.sources
             ),
+            issuer=issuer,
+            historical_archive=historical_archive,
+            historical_inputs=tuple(
+                BlobInput(path=s.path, sha256=s.sha256, size_bytes=s.size_bytes)
+                for s in combined.sources
+                if s.family == "historical_reference"
+            ),
         )
         self.blobs.put_new(INPUTS, prefix + bundle.blank.path, blank_data)
         for item in bundle.evidence:
@@ -191,6 +239,13 @@ class PacketBlobStorage:
             )
             if hashlib.sha256(data).hexdigest() != item.sha256:
                 raise BlobStorageError("Evidence changed while uploading its snapshot")
+            self.blobs.put_new(INPUTS, prefix + item.path, data)
+        for item in bundle.historical_inputs:
+            data = read_local_input(
+                root, Path(item.path), Path("bd_agreements/Completed"), item.size_bytes
+            )
+            if hashlib.sha256(data).hexdigest() != item.sha256:
+                raise BlobStorageError("Historical evidence changed while uploading")
             self.blobs.put_new(INPUTS, prefix + item.path, data)
         self.blobs.put_new(INPUTS, prefix + "manifest.json", bundle.model_dump_json().encode())
         return bundle
@@ -205,15 +260,16 @@ class PacketBlobStorage:
         resolved = root.resolve(strict=True)
         if root.is_symlink():
             raise BlobStorageError("Staging root must not be a symlink")
-        for item in (bundle.blank, *bundle.evidence):
+        for item in (bundle.blank, *bundle.evidence, *bundle.historical_inputs):
             target = resolved / item.path
             if target.resolve() != target:
                 raise BlobStorageError("Staging path resolves through a symlink escape")
             data = self.blobs.read(INPUTS, prefix + item.path, item.size_bytes)
             if len(data) != item.size_bytes or hashlib.sha256(data).hexdigest() != item.sha256:
                 raise BlobStorageError("Input hash does not match bundle snapshot")
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with target.open("xb") as stream:
+                target.chmod(0o600)
                 stream.write(data)
         return bundle
 
@@ -262,6 +318,8 @@ def main() -> None:
     stage.add_argument("--blank", type=Path, required=True)
     stage.add_argument("--blank-id", required=True)
     stage.add_argument("--evidence-set-id", required=True)
+    stage.add_argument("--issuer")
+    stage.add_argument("--historical-manifest", type=Path)
     download = commands.add_parser("download")
     download.add_argument("--request-id", required=True)
     download.add_argument("--output", type=Path, required=True)
@@ -275,7 +333,26 @@ def main() -> None:
     ):
         storage = PacketBlobStorage(AzureBlobs(client))
         if args.command == "stage":
-            bundle = storage.upload(args.root, args.blank, args.blank_id, args.evidence_set_id)
+            historical = (
+                ArchiveManifest.model_validate_json(
+                    read_local_input(
+                        args.root.resolve(strict=True),
+                        args.historical_manifest,
+                        Path("outputs"),
+                        2 * 1024 * 1024,
+                    )
+                )
+                if args.historical_manifest
+                else None
+            )
+            bundle = storage.upload(
+                args.root,
+                args.blank,
+                args.blank_id,
+                args.evidence_set_id,
+                historical_archive=historical,
+                issuer=args.issuer,
+            )
             print(f"Staged {bundle.blank_id}, evidence set {bundle.evidence_set_id}.")
         else:
             request_id = _id(args.request_id)

@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 from bd_packet_builder.contracts import (
-    Citation,
+    EvidenceStatus,
     IdentifierValue,
     OcrCitation,
     TextValue,
@@ -25,11 +25,14 @@ from bd_packet_builder.draft import (
     DraftReview,
     publish_draft,
     selected_inventory,
+    verify_ocr_citation,
 )
+from bd_packet_builder.history import historical_issues
 from bd_packet_builder.local_inputs import read_local_input
+from bd_packet_builder.scan import ScanCheck
 
-GATE_VERSION = "answer-gate-v2"
-GATE_REVIEWER = "application_validation_gate_v2"
+GATE_VERSION = "answer-gate-v5"
+GATE_REVIEWER = "application_validation_gate_v5"
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
@@ -43,6 +46,7 @@ def validate_answers(
     request_sha256: str,
     *,
     selected_attachment_source_ids: tuple[str, ...] = (),
+    scan_checks: tuple[ScanCheck, ...] = (),
 ) -> DraftReview:
     """Return one decision per proposal; per-answer failures become withheld decisions.
 
@@ -55,19 +59,52 @@ def validate_answers(
     requirements = {r.requirement_id: r for r in request.requirements.requirements}
     mappings = {m.requirement.requirement_id for m in request.layout.responses}
     attached = set(request.attachments)
+    historical = {s.source_id for s in inventory.sources if s.family == "historical_reference"}
+    if attached & historical:
+        raise DraftError("Historical packets must never be submission attachments")
     decisions: list[DraftDecision] = []
     supporting: list[str] = list(selected_attachment_source_ids)
+    render_hashes: dict[tuple[str, int], str] = {}
     for proposal in request.proposals.proposals:
         requirement = requirements[proposal.requirement_id]
         check = check_proposal(root, inventory, requirement, proposal)
         issues: list[str] = []
+        evidence_status: EvidenceStatus = "unsupported"
         if requirement.kind in ("signature", "signature_date"):
             issues.append("human_signing_required")
         elif proposal.outcome != "proposed":
             issues.append(proposal.outcome)
         else:
-            if any(isinstance(c, OcrCitation) for c in proposal.citations):
-                issues.append("ocr_evidence_requires_machine_verification")
+            history_issues, evidence_status = historical_issues(
+                root,
+                inventory,
+                request.historical_archive,
+                request.issuer,
+                requirement,
+                proposal,
+                navigation_context=request.navigation_context.get(proposal.requirement_id, ""),
+            )
+            issues.extend(history_issues)
+            for citation in proposal.citations:
+                if isinstance(citation, OcrCitation):
+                    if not any(
+                        receipt.citation == citation and receipt.supports(requirement, proposal)
+                        for receipt in scan_checks
+                    ):
+                        issues.append("ocr_evidence_requires_machine_verification")
+                    else:
+                        issue, snapshot, _ = verify_ocr_citation(
+                            root, inventory, citation, render_hashes
+                        )
+                        if issue is not None:
+                            issues.append(issue)
+                        elif snapshot is None or not any(
+                            receipt.citation == citation
+                            and receipt.supports(requirement, proposal)
+                            and receipt.agrees_with_artifact(snapshot)
+                            for receipt in scan_checks
+                        ):
+                            issues.append("scan_ocr_subject_or_confidence_disagrees")
             if check.status == "rejected":
                 issues.extend(check.issues)
             if proposal.requirement_id not in mappings:
@@ -75,9 +112,9 @@ def validate_answers(
             period = requirement.requested_period
             if period is not None and proposal.claimed_period != period:
                 issues.append("requested_period_not_confirmed")
-            if any(c.source_id not in attached for c in proposal.citations):
+            if any(c.source_id not in attached | historical for c in proposal.citations):
                 issues.append("supporting_evidence_not_attached")
-            quotes = [c.quote for c in proposal.citations if isinstance(c, Citation)]
+            quotes = [c.quote for c in proposal.citations]
             value = proposal.value
             if isinstance(value, IdentifierValue) and not any(
                 re.search(r"(?<!\w)" + re.escape(value.value) + r"(?!\w)", q) for q in quotes
@@ -90,7 +127,9 @@ def validate_answers(
         unique = tuple(dict.fromkeys(issues))
         verified = not unique
         if verified:
-            supporting.extend(c.source_id for c in proposal.citations)
+            supporting.extend(
+                c.source_id for c in proposal.citations if c.source_id not in historical
+            )
         decisions.append(
             DraftDecision(
                 requirement_id=proposal.requirement_id,
@@ -103,8 +142,38 @@ def validate_answers(
                     if verified
                     else f"{GATE_VERSION}: " + ", ".join(unique)
                 ),
+                evidence_status=evidence_status if verified else "unsupported",
             )
         )
+    notes: list[str] = []
+    if selected_attachment_source_ids:
+        notes.append(
+            "Explicitly selected supporting PDFs are included independently of filled answers. "
+            "Inclusion does not confirm an attachment requirement, reporting period, "
+            "registration sufficiency or attestation has been satisfied."
+        )
+    if scan_checks:
+        notes.append(
+            "Scanned scalar answers use OCR/independent-image transcription agreement, "
+            "not human visual approval or proof of semantic support. "
+            "Reporting periods come from the image reading, not a filename."
+        )
+        for receipt in scan_checks:
+            source = next(
+                (s for s in inventory.sources if s.source_id == receipt.citation.source_id), None
+            )
+            period = receipt.transcript.reporting_period
+            if source is not None and source.period is not None and period is not None:
+                printed = period.end.strftime(
+                    "%Y-%m" if source.period_precision == "monthly" else "%Y"
+                )
+                if printed != source.period:
+                    notes.append(
+                        f"Scanned source {source.source_id}: catalog/filename period "
+                        f"{source.period} differs from image-read period "
+                        f"{period.start.isoformat()} through {period.end.isoformat()}; "
+                        "reviewer verification required."
+                    )
     return DraftReview(
         request_sha256=request_sha256,
         reviewer=GATE_REVIEWER,
@@ -112,13 +181,8 @@ def validate_answers(
         attachment_source_ids=tuple(
             identity for identity in request.attachments if identity in set(supporting)
         ),
-        reviewer_notes=(
-            "Explicitly selected supporting PDFs are included independently of filled answers. "
-            "Inclusion does not confirm an attachment requirement, reporting period, "
-            "registration sufficiency or attestation has been satisfied.",
-        )
-        if selected_attachment_source_ids
-        else (),
+        reviewer_notes=tuple(dict.fromkeys(notes)),
+        scan_checks=scan_checks,
     )
 
 

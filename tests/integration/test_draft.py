@@ -59,7 +59,7 @@ def prepare(
             (40, 740, "CRD: 001234"),
             (40, 760, f"Registered: {'Yes' if registered else 'No'}")
             if registered is not None
-            else (40, 760, "Fictional supporting evidence"),
+            else (40, 760, "Firm: Example LLC"),
             (40, 720, "Treasury and other: Fictional Notes."),
             (40, 700, narrative),
         ],
@@ -221,6 +221,8 @@ def add_ocr_citation(
     data: dict,
     requirement_id: str,
     quote: str = "CRD: 001234",
+    *,
+    subject: str | None = None,
 ) -> Path:
     inventory = build_inventory(root, families=("FINRA_Certification",), max_sources=1)
     record = inventory.sources[0]
@@ -248,6 +250,21 @@ def add_ocr_citation(
         )
         for index, word in enumerate(("CRD:", "001234"))
     ]
+    if subject is not None:
+        words.extend(
+            dict(
+                text=word,
+                confidence=96.0,
+                left=20 + index * 80,
+                top=60,
+                width=70,
+                height=20,
+                block=1,
+                paragraph=1,
+                line=2,
+            )
+            for index, word in enumerate(subject.split())
+        )
     artifact = dict(
         schema_version=1,
         status="ocr_feasibility_unverified_not_answers",
@@ -264,7 +281,7 @@ def add_ocr_citation(
         render_sha256=hashlib.sha256(rendered.getvalue()).hexdigest(),
         limits=dict(timeout_seconds=30, max_pixels=20_000_000, max_output_bytes=4_000_000),
         words=words,
-        text="CRD: 001234",
+        text="CRD: 001234" + (f"\n{subject}" if subject else ""),
         flags=["ocr_unverified", "not_semantic_grounding"],
     )
     artifact_path = root / f"outputs/ocr-{'1' * 32}/ocr.json"
