@@ -55,6 +55,7 @@ class FormInterpretation(Contract):
     layout: ResponseLayout | None
     protected_regions: Annotated[tuple[PageBox, ...], Field(max_length=500)]
     exceptions: Annotated[tuple[ReviewException, ...], Field(max_length=1_000)]
+    navigation_context: dict[str, str] = Field(default_factory=dict)
     status: Literal["automatic_mapping_unapproved_no_answers"] = (
         "automatic_mapping_unapproved_no_answers"
     )
@@ -68,6 +69,8 @@ class FormInterpretation(Contract):
         )
         if any(r.application_sha256 != self.application_sha256 for r in known.values()):
             raise ValueError("Requirements must refer to the interpreted application")
+        if not self.navigation_context.keys() <= known.keys():
+            raise ValueError("Navigation context must refer to an interpreted requirement")
         if self.layout is not None:
             if self.layout.application_sha256 != self.application_sha256:
                 raise ValueError("Layout must refer to the interpreted application")
@@ -198,6 +201,7 @@ class _Builder:
         self.candidates: list[_Candidate] = []
         self.protected: list[PageBox] = []
         self.exceptions: list[ReviewException] = []
+        self.navigation_context: dict[str, str] = {}
 
     def flag(self, code: str, message: str, requirement_id: str | None = None) -> None:
         self.exceptions.append(
@@ -282,6 +286,8 @@ class _Builder:
             choices=choices,
         )
         self.requirements.append(requirement)
+        if item.explanation:
+            self.navigation_context[rid] = item.explanation
         if kind in _SIGNING_KINDS:
             if item.region is not None and page.geometry:
                 self.protected.append(_page_box(item.region, page))
@@ -295,7 +301,13 @@ class _Builder:
             return
         if kind == "attachment":
             return
-        if kind == "boolean":
+        if kind == "boolean" and (
+            item.options
+            or item.region is None
+            or (item.region.right - item.region.left) * page.width / 1000 < 30
+            or (item.region.right - item.region.left) * page.width
+            < 2 * (item.region.bottom - item.region.top) * page.height
+        ):
             self.flag(
                 "boolean_placement_unsupported",
                 f"Requirement {rid} is a standalone yes/no or attestation control "
@@ -445,4 +457,5 @@ def build_form_layout(blank: bytes, pages: Mapping[int, VisualPage]) -> FormInte
         ),
         protected_regions=tuple(builder.protected),
         exceptions=tuple(builder.exceptions),
+        navigation_context=builder.navigation_context,
     )

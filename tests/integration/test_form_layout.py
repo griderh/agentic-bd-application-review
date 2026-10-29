@@ -311,9 +311,13 @@ def test_missing_writable_region_is_an_exception() -> None:
     assert codes(result) == {"p1.name": {"no_writable_region"}}
 
 
-def test_single_attestation_checkbox_is_kept_without_placement() -> None:
+@pytest.mark.parametrize("size", [12, 40])
+def test_single_attestation_checkbox_is_kept_without_placement(size: int) -> None:
     selected = item(
-        "attest", "Is the firm registered with FINRA?", "boolean", nbox(40, 550, 52, 562)
+        "attest",
+        "Is the firm registered with FINRA?",
+        "boolean",
+        nbox(40, 550, 40 + size, 550 + size),
     )
     result = build_form_layout(make_blank([TEXT]), {1: page(selected)})
 
@@ -321,6 +325,34 @@ def test_single_attestation_checkbox_is_kept_without_placement() -> None:
     assert result.requirements.requirements[0].kind == "boolean"
     assert result.layout is None
     assert codes(result) == {"p1.attest": {"boolean_placement_unsupported"}}
+
+
+def test_boolean_with_a_blank_text_answer_line_can_be_placed() -> None:
+    selected = item(
+        "registered",
+        "Is the firm registered with FINRA?",
+        "boolean",
+        nbox(300, 540, 450, 560),
+    )
+    result = build_form_layout(make_blank([TEXT]), {1: page(selected)})
+    assert result.layout is not None
+    assert result.layout.responses[0].requirement.kind == "boolean"
+    assert result.layout.responses[0].text_region is not None
+    assert not result.exceptions
+
+
+def test_navigation_context_does_not_replace_native_requirement_quote() -> None:
+    selected = item(
+        "firm_name",
+        "Firm legal name:",
+        "text",
+        nbox(40, 70, 300, 90),
+        explanation="Firm identification section.",
+    )
+    result = build_form_layout(make_blank([TEXT]), {1: page(selected)})
+    assert result.requirements is not None
+    assert result.requirements.requirements[0].instruction == "Firm legal name:"
+    assert result.navigation_context == {"p1.firm_name": "Firm identification section."}
 
 
 def test_signing_item_without_location_is_still_reported() -> None:

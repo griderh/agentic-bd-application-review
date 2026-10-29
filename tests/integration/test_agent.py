@@ -367,6 +367,27 @@ def test_unanswered_requirements_become_review_exceptions(setup: Setup) -> None:
     assert by_requirement["p1.signature"] == "deferred_to_signing"
 
 
+def test_selected_attachment_is_published_without_any_verified_answers(setup: Setup) -> None:
+    steps = [
+        call("interpret_form"),
+        call("list_sources", {"family": "FINRA_Certification"}),
+        with_result(lambda listing: ("select_attachment", {"source_id": source_id(listing)})),
+        call("finish_evidence"),
+        call("submit_answers", {"proposals": []}),
+        call("assemble_packet"),
+        call("publish_results"),
+    ]
+    final = setup.run(steps)
+    review = json.loads(setup.artifact("answer_review.json"))
+    assert final.status == "published" and final.outcome == "incomplete"
+    assert len(review["attachment_source_ids"]) == 1
+    assert all(d["decision"] == "withhold" for d in review["decisions"])
+    packet = PdfReader(BytesIO(setup.artifact("packet.pdf")))
+    assert len(packet.pages) == 2
+    assert EVIDENCE_TEXT in packet.pages[1].extract_text()
+    assert "Inclusion does not confirm" in setup.artifact("reviewer-summary.txt").decode()
+
+
 @pytest.mark.parametrize("tool", ["submit_answers", "assemble_packet", "publish_results"])
 def test_out_of_order_calls_are_rejected_without_changing_the_run(setup: Setup, tool: str) -> None:
     seen: list[dict] = []

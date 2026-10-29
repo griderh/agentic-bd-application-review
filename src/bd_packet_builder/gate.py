@@ -20,6 +20,7 @@ from bd_packet_builder.contracts import (
 )
 from bd_packet_builder.draft import (
     DraftDecision,
+    DraftError,
     DraftRequest,
     DraftReview,
     publish_draft,
@@ -27,8 +28,8 @@ from bd_packet_builder.draft import (
 )
 from bd_packet_builder.local_inputs import read_local_input
 
-GATE_VERSION = "answer-gate-v1"
-GATE_REVIEWER = "application_validation_gate_v1"
+GATE_VERSION = "answer-gate-v2"
+GATE_REVIEWER = "application_validation_gate_v2"
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
@@ -36,18 +37,26 @@ def _normalized(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
-def validate_answers(root: Path, request: DraftRequest, request_sha256: str) -> DraftReview:
+def validate_answers(
+    root: Path,
+    request: DraftRequest,
+    request_sha256: str,
+    *,
+    selected_attachment_source_ids: tuple[str, ...] = (),
+) -> DraftReview:
     """Return one decision per proposal; per-answer failures become withheld decisions.
 
     Technical failures such as changed or unreadable sources propagate instead of being
     reported as review exceptions.
     """
     inventory = selected_inventory(root, request)
+    if not set(selected_attachment_source_ids) <= set(request.attachments):
+        raise DraftError("Explicit selection contains an unknown attachment")
     requirements = {r.requirement_id: r for r in request.requirements.requirements}
     mappings = {m.requirement.requirement_id for m in request.layout.responses}
     attached = set(request.attachments)
     decisions: list[DraftDecision] = []
-    supporting: list[str] = []
+    supporting: list[str] = list(selected_attachment_source_ids)
     for proposal in request.proposals.proposals:
         requirement = requirements[proposal.requirement_id]
         check = check_proposal(root, inventory, requirement, proposal)
@@ -103,6 +112,13 @@ def validate_answers(root: Path, request: DraftRequest, request_sha256: str) -> 
         attachment_source_ids=tuple(
             identity for identity in request.attachments if identity in set(supporting)
         ),
+        reviewer_notes=(
+            "Explicitly selected supporting PDFs are included independently of filled answers. "
+            "Inclusion does not confirm an attachment requirement, reporting period, "
+            "registration sufficiency or attestation has been satisfied.",
+        )
+        if selected_attachment_source_ids
+        else (),
     )
 
 

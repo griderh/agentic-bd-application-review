@@ -246,7 +246,7 @@ def test_prepare_snapshots_evidence_and_records_agent_and_model_versions(
         "bd_agreements/supporting_data/Firm/Firm profile.pdf"
     ]
     versions = {v.name: v.version for v in manifest.versions}
-    assert versions["agent"] == "packet-agent-v1"
+    assert versions["agent"] == "packet-agent-v2"
     assert versions["model"] == "test"
 
 

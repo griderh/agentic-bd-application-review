@@ -22,6 +22,7 @@ from reportlab.pdfgen.canvas import Canvas
 from bd_packet_builder.contracts import (
     AnswerProposal,
     ApplicationRequirements,
+    BooleanValue,
     Contract,
     Identifier,
     IdentifierValue,
@@ -795,7 +796,7 @@ def publish_draft(
         candidate_marks: list[MarkPlacement] = []
         try:
             value = proposal.value
-            if isinstance(value, (IdentifierValue, TextValue)):
+            if isinstance(value, (IdentifierValue, TextValue, BooleanValue)):
                 if mapped.text_region is None:
                     raise DraftError("Scalar answer has no reviewed writable region")
                 if isinstance(value, IdentifierValue) and not any(
@@ -804,7 +805,15 @@ def publish_draft(
                 ):
                     raise DraftError("Exact identifier is not present in the cited evidence")
                 candidate_texts.append(
-                    TextPlacement(mapped.text_region, _lines(value.value, mapped.text_region))
+                    TextPlacement(
+                        mapped.text_region,
+                        _lines(
+                            ("Yes" if value.value else "No")
+                            if isinstance(value, BooleanValue)
+                            else value.value,
+                            mapped.text_region,
+                        ),
+                    )
                 )
                 placements[identity] = {"mode": "inline"}
             elif isinstance(value, (SingleSelectValue, MultiSelectValue)):

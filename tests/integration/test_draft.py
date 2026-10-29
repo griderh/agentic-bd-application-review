@@ -31,12 +31,14 @@ def make_pdf(path: Path, lines: list[tuple[float, float, str]], *, radio: bool =
     canvas.save()
 
 
-def prepare(root: Path, *, long: bool = False, single: bool = False) -> tuple[Path, Path, dict]:
+def prepare(
+    root: Path, *, long: bool = False, single: bool = False, registered: bool | None = None
+) -> tuple[Path, Path, dict]:
     source = Path("bd_agreements/Blank/form.pdf")
     make_pdf(
         root / source,
         [
-            (40, 740, "Firm CRD:"),
+            (40, 740, "Firm CRD:" if registered is None else "Is the firm registered?"),
             (40, 660, "Choose instruments."),
             (40, 510, "Describe services."),
             (40, 320, "Missing tax ID:"),
@@ -55,6 +57,9 @@ def prepare(root: Path, *, long: bool = False, single: bool = False) -> tuple[Pa
         root / proof,
         [
             (40, 740, "CRD: 001234"),
+            (40, 760, f"Registered: {'Yes' if registered else 'No'}")
+            if registered is not None
+            else (40, 760, "Fictional supporting evidence"),
             (40, 720, "Treasury and other: Fictional Notes."),
             (40, 700, narrative),
         ],
@@ -169,6 +174,13 @@ def prepare(root: Path, *, long: bool = False, single: bool = False) -> tuple[Pa
         attachments=[record.source_id],
         protected_regions=[region(35.0, 180.0, 575.0, 225.0)],
     )
+    if registered is not None:
+        reqs[0].update(instruction="Is the firm registered?", kind="boolean")
+        placements[0]["text_region"] = region(200.0, 730.0, 400.0, 748.0)
+        proposals[0].update(
+            value=dict(kind="boolean", value=registered),
+            citations=[citation(f"Registered: {'Yes' if registered else 'No'}")],
+        )
     request = root / "outputs/request.json"
     request.parent.mkdir()
     request.write_text(json.dumps(data))
@@ -920,6 +932,46 @@ def test_gate_replaces_human_review_and_writes_the_same_supported_answers(tmp_pa
     assert manifest["written_requirements"] == ["crd", "instruments", "services"]
     assert manifest["reviewer"] == GATE_REVIEWER
     assert manifest["status"] == "incomplete_draft_not_for_submission"
+
+
+@pytest.mark.parametrize("registered", [True, False])
+def test_boolean_text_answer_is_rendered_as_yes_or_no(
+    tmp_path: Path,
+    registered: bool,
+) -> None:
+    request, _, _ = prepare(tmp_path, registered=registered)
+    manifest = run_gate(tmp_path, request)
+    assert "crd" in manifest["written_requirements"]
+    expected = "Yes" if registered else "No"
+    output = next((tmp_path / "outputs").glob("draft-*/draft-packet.pdf"))
+    with pdfium.PdfDocument(output) as doc, closing(doc[0]) as p, closing(p.get_textpage()) as t:
+        text = t.get_text_bounded(left=200, bottom=730, right=400, top=748)
+    assert expected in text
+
+
+def test_explicit_attachment_selection_survives_without_a_verified_answer(tmp_path: Path) -> None:
+    request, _, data = prepare(tmp_path)
+    parsed = DraftRequest.model_validate_json(request.read_bytes())
+    # An explicitly selected source can be required as an attachment even with no filled answer.
+    for proposal in data["proposals"]["proposals"]:
+        proposal.update(
+            outcome="missing_evidence",
+            value=None,
+            citations=[],
+            explanation="No answer verified; document is still selected for review.",
+        )
+    parsed = DraftRequest.model_validate_json(json.dumps(data))
+    selected = parsed.attachments[:1]
+    review = validate_answers(
+        tmp_path,
+        parsed,
+        hashlib.sha256(request.read_bytes()).hexdigest(),
+        selected_attachment_source_ids=selected,
+    )
+    assert review.attachment_source_ids == selected
+    assert all(d.decision == "withhold" for d in review.decisions)
+    with pytest.raises(ValueError, match="unknown attachment"):
+        validate_answers(tmp_path, parsed, "a" * 64, selected_attachment_source_ids=("b" * 64,))
 
 
 def test_gate_decides_every_proposal_and_never_verifies_unanswered_or_signing(

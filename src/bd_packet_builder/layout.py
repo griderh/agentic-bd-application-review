@@ -69,7 +69,7 @@ class MappedResponse(Contract):
         elif req.kind == "narrative":
             if self.narrative_region is None or self.text_region is not None:
                 raise ValueError("Mapped narrative requires only a narrative writable region")
-        elif req.kind in ("text", "identifier", "money", "date"):
+        elif req.kind in ("text", "identifier", "money", "date", "boolean"):
             if self.text_region is None or self.narrative_region is not None:
                 raise ValueError("Mapped scalar requires only a text writable region")
         else:
