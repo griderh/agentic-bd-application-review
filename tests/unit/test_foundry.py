@@ -403,4 +403,82 @@ def test_schema_failure_reports_only_codes_not_model_content() -> None:
         )
     assert "CONFIDENTIAL_SENTINEL" not in str(failure.value)
     assert "missing" in str(failure.value)
+    assert "fields:" in str(failure.value)
+    assert "legal_name" in str(failure.value)
     client.close.assert_called_once()
+
+
+def test_large_page_output_budget_is_explicit_and_still_bounded() -> None:
+    from bd_packet_builder.foundry import request_structured
+
+    client = Mock()
+    client.responses.parse.return_value = response()
+    config = FoundryConfig(endpoint=ENDPOINT, deployment="synthetic-model")
+    request_structured(
+        config,
+        allow_paid=True,
+        instructions="Synthetic",
+        input_json="{}",
+        response_type=SmokeAnswers,
+        max_output_tokens=16_384,
+        output_token_limit=16_384,
+        client_factory=lambda _: client,
+    )
+    assert client.responses.parse.call_args.kwargs["max_output_tokens"] == 16_384
+    with pytest.raises(FoundryError, match="limit"):
+        request_structured(
+            config,
+            allow_paid=True,
+            instructions="Synthetic",
+            input_json="{}",
+            response_type=SmokeAnswers,
+            max_output_tokens=16_385,
+            output_token_limit=16_384,
+            client_factory=lambda _: client,
+        )
+    assert client.responses.parse.call_count == 1
+
+
+def test_diagnostics_preserve_raw_response_before_validation_failure(tmp_path: Path) -> None:
+    from bd_packet_builder.foundry import request_structured
+
+    with pytest.raises(ValidationError) as invalid:
+        SmokeAnswers.model_validate({"legal_name": "CONFIDENTIAL_SENTINEL"})
+    client = Mock()
+    raw = client.responses.with_raw_response.parse.return_value
+    raw.text = '{"status":"completed","usage":{"output_tokens":123},"output":[]}'
+    raw.parse.side_effect = invalid.value
+    diagnostic = tmp_path / "diagnostic.json"
+    with pytest.raises(FoundryError, match="strict schema validation"):
+        request_structured(
+            FoundryConfig(endpoint=ENDPOINT, deployment="synthetic-model"),
+            allow_paid=True,
+            instructions="Synthetic",
+            input_json="{}",
+            response_type=SmokeAnswers,
+            max_output_tokens=1000,
+            client_factory=lambda _: client,
+            diagnostic_path=diagnostic,
+        )
+    saved = json.loads(diagnostic.read_text())
+    assert saved["response"]["usage"]["output_tokens"] == 123
+    assert saved["errors"][0]["loc"] == ["legal_name"]
+    assert "CONFIDENTIAL_SENTINEL" not in diagnostic.read_text()
+    assert saved["elapsed_seconds"] >= 0
+    assert diagnostic.stat().st_mode & 0o777 == 0o600
+    client.close.assert_called_once()
+
+
+def test_private_diagnostics_refuse_existing_paths_and_symlink_directories(tmp_path: Path) -> None:
+    from bd_packet_builder.foundry import write_private_json
+
+    target = tmp_path / "existing.json"
+    target.write_text("unchanged")
+    with pytest.raises(FileExistsError):
+        write_private_json(target, {"new": "data"})
+    assert target.read_text() == "unchanged"
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(FoundryError, match="symlink"):
+        write_private_json(alias / "not-created.json", {})
+    assert not (tmp_path / "not-created.json").exists()

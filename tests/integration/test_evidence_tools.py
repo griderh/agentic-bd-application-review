@@ -338,3 +338,16 @@ def test_source_changed_after_the_snapshot_is_a_technical_failure(tmp_path: Path
         tool.read_page(sid, 1)
     with pytest.raises(InventoryError):
         tool.search_pages(("crd",), family="FINRA_Certification")
+
+
+def test_folders_outside_the_designated_catalog_are_neither_listed_nor_readable(
+    tmp_path: Path,
+) -> None:
+    seed(tmp_path)
+    pdf(tmp_path, "Undesignated_Folder/extra.pdf", [LONG])
+    tool = tools(tmp_path)
+    listing = tool.list_sources()
+    assert "Undesignated_Folder" not in {s.family for s in listing.sources}
+    stray = next(s for s in build_inventory(tmp_path).sources if s.family == "Undesignated_Folder")
+    with pytest.raises(ToolInputError):
+        tool.read_page(stray.source_id, 1)

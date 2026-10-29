@@ -193,6 +193,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent.add_argument("--requester-id", default="developer-workstation")
     agent.add_argument("--evidence-set-id", default="local-evidence-set")
     agent.add_argument("--as-of", help="Reporting date YYYY-MM-DD")
+    agent.add_argument(
+        "--runs-dir", type=Path, help="Folder for run output; default <root>/outputs/agent-runs"
+    )
     agent.add_argument("--allow-paid", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -212,13 +215,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_of=as_of,
                 allow_paid=args.allow_paid,
                 trace_sink=trace,
+                runs_dir=args.runs_dir,
             )
             for entry in trace:
                 print(f"  tool: {entry}")
+            runs_dir = args.runs_dir or args.root / "outputs" / "agent-runs"
             print(
                 f"Run {manifest.run_id}: status={manifest.status} outcome={manifest.outcome} "
                 f"exceptions={len(manifest.exceptions())}. Not for submission; "
-                f"artifacts under {args.root / 'outputs' / 'agent-runs' / manifest.run_id}"
+                f"readable files in {runs_dir / manifest.run_id / 'readable'}"
             )
             return 0 if manifest.status != "failed" else 1
         if args.command == "draft":

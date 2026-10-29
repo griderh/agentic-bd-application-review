@@ -155,7 +155,13 @@ class EvidenceTools:
             if item is None or item.sha256 != source.sha256 or item.size_bytes != source.size_bytes:
                 raise EvidenceToolError("Inventory source is not in this run's evidence snapshot")
         self._root = root.resolve(strict=True)
-        self._inventory = inventory
+        folders = {f.folder for f in default_catalog().families}
+        # Only designated families are visible; the writer rejects anything else later.
+        self._inventory = Inventory(
+            inventory.created_at,
+            tuple(s for s in inventory.sources if s.family in folders),
+            inventory.issues,
+        )
         self._limits = limits or EvidenceLimits()
         self._allow_ocr = allow_ocr
         self._folders = {f.folder for f in default_catalog().families}

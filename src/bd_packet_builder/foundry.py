@@ -3,11 +3,14 @@
 import base64
 import hashlib
 import json
+import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import openai
@@ -58,6 +61,7 @@ class FoundryError(ValueError):
 class FoundryConfig(Contract):
     endpoint: str
     deployment: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._-]+$")
+    timeout_seconds: int = Field(default=60, ge=1, le=600)
 
     @field_validator("endpoint")
     @classmethod
@@ -126,7 +130,7 @@ def _client(config: FoundryConfig) -> OpenAI:
         base_url=config.endpoint,
         api_key=token,
         max_retries=0,
-        timeout=60.0,
+        timeout=config.timeout_seconds,
     )
 
 
@@ -138,6 +142,17 @@ class StructuredResult[T]:
     input_sha256: str
 
 
+def write_private_json(path: Path, value: object) -> None:
+    """Create a confidential diagnostic/cache artifact; never overwrite or follow links."""
+    if path.parent.resolve(strict=True) != path.parent.absolute():
+        raise FoundryError("Diagnostic directory must not resolve through symlinks")
+    data = json.dumps(value, indent=2).encode()
+    with os.fdopen(
+        os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb"
+    ) as f:
+        f.write(data)
+
+
 def request_structured[T: Contract](
     config: FoundryConfig,
     *,
@@ -146,13 +161,19 @@ def request_structured[T: Contract](
     input_json: str,
     response_type: type[T],
     max_output_tokens: int,
+    output_token_limit: Literal[4096, 16384] = 4096,
     client_factory: Callable[[FoundryConfig], OpenAI] | None = None,
     image_png: bytes | None = None,
+    diagnostic_path: Path | None = None,
 ) -> StructuredResult[T]:
     """One bounded synchronous request; callers own evidence authorization and publication."""
     if not allow_paid:
         raise FoundryError("Live model calls require --allow-paid")
-    if not 1 <= max_output_tokens <= 4096 or len(input_json.encode()) > 64 * 1024:
+    if (
+        output_token_limit not in (4096, 16_384)
+        or not 1 <= max_output_tokens <= output_token_limit
+        or len(input_json.encode()) > 64 * 1024
+    ):
         raise FoundryError("Model input or output-token configuration exceeds the local limit")
     model_input: str | ResponseInputParam = input_json
     input_bytes = input_json.encode()
@@ -175,22 +196,44 @@ def request_structured[T: Contract](
         ]
         input_bytes += b"\0" + image_png
     client: OpenAI | None = None
+    diagnostic: dict[str, object] = {
+        "input_sha256": hashlib.sha256(input_bytes).hexdigest(),
+        "deployment": config.deployment,
+        "max_output_tokens": max_output_tokens,
+        "timeout_seconds": config.timeout_seconds,
+    }
+    started = time.monotonic()
     try:
         try:
             client = (client_factory or _client)(config)
-            response = client.responses.parse(
-                model=config.deployment,
-                instructions=instructions,
-                input=model_input,
-                text_format=response_type,
-                max_output_tokens=max_output_tokens,
-                store=False,
-            )
+            if diagnostic_path is not None:
+                raw = client.responses.with_raw_response.parse(
+                    model=config.deployment,
+                    instructions=instructions,
+                    input=model_input,
+                    text_format=response_type,
+                    max_output_tokens=max_output_tokens,
+                    store=False,
+                )
+                if len(raw.text.encode()) > 2 * 1024 * 1024:
+                    raise FoundryError("Diagnostic response exceeds the 2 MiB limit")
+                diagnostic["response"] = json.loads(raw.text)
+                response = raw.parse()
+            else:
+                response = client.responses.parse(
+                    model=config.deployment,
+                    instructions=instructions,
+                    input=model_input,
+                    text_format=response_type,
+                    max_output_tokens=max_output_tokens,
+                    store=False,
+                )
         except (CredentialUnavailableError, ClientAuthenticationError):
             raise FoundryError(
                 "Azure CLI authentication failed; sign in with the authorized work account"
             ) from None
         except APITimeoutError:
+            diagnostic["failure"] = "timeout"
             raise FoundryError(
                 "Foundry request timed out; no automatic retry was attempted"
             ) from None
@@ -211,15 +254,26 @@ def request_structured[T: Contract](
                 "deployment/API compatibility or quota. Remote response omitted."
             ) from None
         except ValidationError as error:
+            diagnostic["errors"] = [
+                {"loc": list(item["loc"]), "type": item["type"], "message": item["msg"]}
+                for item in error.errors(include_input=False)
+            ]
             codes = ", ".join(sorted({item["type"] for item in error.errors(include_input=False)}))
+            locations = ", ".join(
+                ".".join(str(part) for part in item["loc"]) or "response"
+                for item in error.errors(include_input=False)[:5]
+            )
             raise FoundryError(
-                f"Foundry response failed strict schema validation ({codes})"
+                f"Foundry response failed strict schema validation ({codes}; fields: {locations})"
             ) from None
         except (json.JSONDecodeError, APIResponseValidationError):
             raise FoundryError("Foundry response failed strict schema validation") from None
     finally:
         if client is not None:
             client.close()
+        if diagnostic_path is not None:
+            diagnostic["elapsed_seconds"] = time.monotonic() - started
+            write_private_json(diagnostic_path, diagnostic)
     if response.status != "completed" or response.output_parsed is None:
         raise FoundryError("Foundry response was incomplete, refused or missing structured output")
     usage = response.usage

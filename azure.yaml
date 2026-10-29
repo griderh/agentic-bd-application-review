@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+infra:
+    provider: microsoft.foundry
+name: agentic-bd-application-review
+services:
+    bd-application-builder:
+        endpoint: https://bd-application-builder-resource.services.ai.azure.com/api/projects/bd-application-builder
+        host: azure.ai.project
+    bd-packet-builder:
+        codeConfiguration:
+            dependencyResolution: remote_build
+            entryPoint: main.py
+            runtime: python_3_13
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        env:
+            AZURE_AI_MODEL_DEPLOYMENT_NAME: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+            BD_BLOB_ACCOUNT_URL: https://bdpoc3ff06060.blob.core.windows.net
+            BD_MODEL_ENDPOINT: https://bd-application-builder-resource.openai.azure.com/openai/v1
+            BD_ALLOW_PAID: "1"
+            PYTHONPATH: src
+            PYTHONNOUSERSITE: "1"
+            OTEL_SDK_DISABLED: "true"
+            OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false"
+        host: azure.ai.agent
+        kind: hosted
+        language: python
+        name: bd-packet-builder
+        project: .
+        protocols:
+            - protocol: responses
+              version: 2.0.0
+        uses:
+            - bd-application-builder

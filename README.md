@@ -9,9 +9,11 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
-The repository contains developer components for local evidence inventory, native-PDF extraction, opt-in OCR, bounded Foundry model experiments, blank-form discovery, visual mapping, requirement-driven evidence retrieval, and deterministic draft writing. These components are not yet connected as the deployed application. A 75-page Broward packet was assembled from manually prepared request and review inputs; it is not application-run end-to-end completion. The target is a Foundry-hosted agent that orchestrates repository-defined prompts and deterministic tools, with Microsoft 365 Copilot/Teams as the intended user front door. No Foundry-hosted workflow or Copilot publication has been implemented yet. The first M3 slice adds a [run store](src/bd_packet_builder/run.py): run identity, an enforced step order, isolated per-run storage, step/time budgets, and a provenance manifest that later application tools will share. It is not yet called by any command or agent; see the [M3 implementation backlog](docs/development-plan.md#m3-implementation-backlog-october-28-2026).
+**October 29 priority:** the immediate PoC runs locally with Foundry inference and Blob storage under the developer's authorized credentials. Cloud hosting and Copilot remain the ultimate target, not prerequisites for this demonstration. Real-document quality is now the next acceptance gate; synthetic tests remain regression safeguards, not the main deliverable.
 
-Local development means code and tests run on a developer workstation; those processes may call remote Foundry APIs. A locally running application is not the target hosted application. The M3 PoC must run its workflow in Foundry without a developer workstation, receive a blank form through the intended Copilot/Teams experience, access only an approved evidence set through its deployed tool layer, and return a packet plus separate reviewer summary. [Blank forms](bd_agreements/Blank/) and [supporting documents](bd_agreements/supporting_data/) are development samples. [Completed packets](bd_agreements/Completed/) remain reference/evaluation material, not current factual authority.
+M3 slices 1-6 connect the run store, form interpretation, evidence tools, deterministic answer gate and PDF writer under Microsoft Agent Framework. The application—not an external coding assistant—has completed synthetic workstation runs against Foundry. Slice 7 adds private Blob staging/publication and a Foundry Responses server, deployed as `bd-packet-builder` version 3 (`active`). A local HTTP build using staged Azure Blob inputs produced three supported answers, withheld the unsupported EIN and signature/date, and uploaded a packet plus separate internal summary. The hosted build fails reading Blob inputs with **HTTP 403**; the hosted identity has no assigned storage roles. **Cloud end-to-end completion is not yet verified.** Copilot publication remains slice 8. See the [hosting decision](docs/decisions/0002-agent-hosting-and-copilot-front-door.md) and [M3 backlog](docs/development-plan.md#m3-implementation-backlog-october-28-2026).
+
+Local development means code and tests run on a developer workstation; those processes may call remote Foundry APIs. A locally running application is not the target hosted application. The M3 PoC must run in Foundry without a developer workstation, select a staged blank through the intended Copilot/Teams experience, access only approved evidence, and return a packet plus separate reviewer summary. Direct file/image upload is not supported on the selected Copilot custom-engine path; staged IDs replace that intake assumption. [Blank forms](bd_agreements/Blank/) and [supporting documents](bd_agreements/supporting_data/) are development samples. [Completed packets](bd_agreements/Completed/) remain reference/evaluation material, not current factual authority.
 
 The offline foundation also includes strict requirement/proposal contracts, a manual-input review harness, and a fact-sheet **draft** validator. No fact-sheet approval or authorized production release reader is implemented. Model-generated answers remain unapproved proposals; the new draft writer requires a separate, exact-snapshot local review record.
 
@@ -36,6 +38,143 @@ python -m pip check
 On Windows, create the environment with `py -3.12 -m venv .venv` and activate it with `.venv\Scripts\Activate.ps1`, then use the same `python -m pip` commands. Windows execution has not yet been validated.
 
 Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for the offline commands or tests.
+
+## Blob staging and Foundry hosting (slice 7)
+
+The [Blob adapter](src/bd_packet_builder/blob_storage.py) uses original bytes, hashes and immutable bundle manifests, not a vector index. The [hosted entry](src/bd_packet_builder/hosted.py) accepts strict JSON commands containing IDs, never arbitrary paths. It calls the same model-driven workflow as workstation runs. Cloud clients use managed identity through `DefaultAzureCredential`; staging/download commands use your Azure CLI sign-in.
+
+The PoC account is `https://bdpoc3ff06060.blob.core.windows.net`. Containers require Entra data roles; anonymous access and shared keys are disabled. The network endpoint is public, not a private endpoint. On October 29 the sponsor authorized uploading the selected Broward blank and designated supporting documents, and sending relevant text/page images to the configured Foundry model. That approval excludes Completed packets, held-out answers/derivatives, restricted financial-reporting sources and unrelated files; it is not blanket authorization for other destinations.
+
+After local setup and `az login`, stage an approved input root:
+
+```bash
+python -m bd_packet_builder.blob_storage \
+  --account-url https://bdpoc3ff06060.blob.core.windows.net stage \
+  --root /path/to/approved-input-root \
+  --blank "bd_agreements/Blank/Synthetic Issuer Questionnaire.pdf" \
+  --blank-id synthetic-issuer-v1 --evidence-set-id synthetic-firm-v1
+```
+
+The command includes all files from designated supporting-document families under that root, not just the blank. Use a purpose-built synthetic root for development. Completed packets and undesignated families are excluded. Inputs are bounded to 64 MiB per file, 100 evidence files and 512 MiB total. Reuse an ID pair only for identical bytes; changed documents require new IDs.
+
+Run the host locally:
+
+```bash
+export BD_BLOB_ACCOUNT_URL=https://bdpoc3ff06060.blob.core.windows.net
+export BD_MODEL_ENDPOINT=https://bd-application-builder-resource.openai.azure.com/openai/v1
+export AZURE_AI_MODEL_DEPLOYMENT_NAME=gpt-6.1-sol
+export BD_ALLOW_PAID=1
+export OTEL_SDK_DISABLED=true
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false
+PYTHONPATH=src python main.py
+```
+
+Paid calls are disabled unless `BD_ALLOW_PAID=1`. Orchestration permits at most 35 model turns, reserving five page-mapping calls within a 40-call total; model calls have no automatic retries. SDK-managed telemetry export is disabled explicitly in the server constructor, not merely through environment variables. Development run files remain under `~/.bd-packet-runs/` or an explicit non-symlink `BD_WORK_ROOT`. Press **F5** for the [VS Code debug configuration](.vscode/launch.json); it defaults to paid calls disabled. Agent Inspector can connect to the running Responses endpoint.
+
+The local server listens on port 8088. `GET /readiness` checks readiness. `POST /responses` accepts an OpenAI Responses envelope with `model: "bd-packet-builder"`, `store: true`, and a JSON command as its `input` string:
+
+```json
+{"operation":"build","request_id":"unique-request-1","blank_id":"synthetic-issuer-v1","evidence_set_id":"synthetic-firm-v1","as_of":"2026-09-30"}
+```
+
+Use `{"operation":"status","request_id":"unique-request-1"}` to retrieve a published result without calling a model. Outer Responses history contains IDs/result metadata; all inner model calls use `store=False`. The custom-agent hosting adapter currently rejects outer `store:false`. Returned Blob locations are **not download links**. Invalid commands and technical/storage failures are errors, never completed packets.
+
+Deployment uses [azure.yaml](azure.yaml), the existing Foundry project and Python 3.13 remote build. [.agentignore](.agentignore) excludes business documents, generated outputs, credentials, tests and development tooling from the uploaded source archive. Inspect the packaged ZIP before each deployment:
+
+```bash
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd package bd-packet-builder \
+  --no-prompt --output-path /tmp/bd-packet-hosted-package.zip
+unzip -l /tmp/bd-packet-hosted-package.zip
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd deploy bd-packet-builder --no-prompt
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent show bd-packet-builder --output json
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent invoke bd-packet-builder \
+  '{"operation":"build","request_id":"unique-cloud-request-1","blank_id":"synthetic-issuer-v1","evidence_set_id":"synthetic-firm-v1","as_of":"2026-09-30"}'
+```
+
+**Administrator prerequisite:** assign the deployed agent's instance identity, not the developer or blueprint identity:
+
+- Principal/object ID: `9b23162c-2c31-4880-8562-2c5b94eae6bb` (recheck after identity replacement).
+- Storage Blob Data Reader on `bdpoc3ff06060/blobServices/default/containers/packet-inputs`.
+- Storage Blob Data Contributor on each of `packet-results` and `reviewer-results`.
+- Cognitive Services OpenAI User on `bd-application-builder-resource` for the direct Azure OpenAI model endpoint, unless equivalent inference permission is already provided. Model access has not yet been reached in the hosted smoke test.
+
+These are role assignments an administrator can make without granting the developer RG-wide RBAC Administrator. Developer Blob Data Contributor does not transfer to the hosted agent.
+
+For an administrator using Azure CLI, the exact scopes are:
+
+```bash
+principal=9b23162c-2c31-4880-8562-2c5b94eae6bb
+rg_scope=/subscriptions/3ff06060-623c-40d7-aa0c-df5d9f124e94/resourceGroups/rg-bd-application-builder-dev
+storage_scope="$rg_scope/providers/Microsoft.Storage/storageAccounts/bdpoc3ff06060/blobServices/default/containers"
+az role assignment create --assignee-object-id "$principal" \
+  --assignee-principal-type ServicePrincipal --role "Storage Blob Data Reader" \
+  --scope "$storage_scope/packet-inputs"
+az role assignment create --assignee-object-id "$principal" \
+  --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" \
+  --scope "$storage_scope/packet-results"
+az role assignment create --assignee-object-id "$principal" \
+  --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" \
+  --scope "$storage_scope/reviewer-results"
+az role assignment create --assignee-object-id "$principal" \
+  --assignee-principal-type ServicePrincipal --role "Cognitive Services OpenAI User" \
+  --scope "$rg_scope/providers/Microsoft.CognitiveServices/accounts/bd-application-builder-resource"
+```
+
+These commands have **not** been executed by the application/developer. Cloud invocation and safe session diagnostics are retained in [cloud-invoke.txt](outputs/hosted-smoke/cloud-invoke.txt) and [cloud-session-log.txt](outputs/hosted-smoke/cloud-session-log.txt). The final smoke test failed before any hosted model calls. Allow role propagation, then retry with a new request ID.
+
+Download a completed or failed run's available artifacts to a new directory:
+
+```bash
+python -m bd_packet_builder.blob_storage \
+  --account-url https://bdpoc3ff06060.blob.core.windows.net download \
+  --request-id unique-request-1 --output outputs/blob-runs/unique-request-1
+```
+
+The persisted local-HTTP/Blob test is in [outputs/hosted-smoke/synthetic-host-smoke-20261028-1/](outputs/hosted-smoke/synthetic-host-smoke-20261028-1/), including [packet.pdf](outputs/hosted-smoke/synthetic-host-smoke-20261028-1/packet.pdf), [reviewer-summary.txt](outputs/hosted-smoke/synthetic-host-smoke-20261028-1/reviewer-summary.txt) and [manifest.json](outputs/hosted-smoke/synthetic-host-smoke-20261028-1/manifest.json). It is synthetic and `published/incomplete`, not a cloud-hosted success or a submission-ready packet.
+
+### Authorized real Broward attempt (October 29)
+
+The full five-page `BrokerDealerQuestionnaire.pdf` was staged as `broward-questionnaire-20261029`, with all 11 PDFs from the six designated supporting families as `approved-support-20261029` (about 30.8 MB). This includes multiple financial-report versions and documents not necessarily relevant to the form. No manually authored field map, answer map or historical completed packet was supplied. The separate two-page authorization form was not included in this first case.
+
+The local application backend downloaded and hash-verified those Blob inputs and invoked `gpt-6.1-sol`. Three attempts ended in technical failure before form interpretation completed:
+
+| Request suffix | Mapping request timeout | Mapping output-token cap | Observed failure |
+| --- | --- | --- | --- |
+| `-1` | 60 s | 4,096 | Model request timed out |
+| `-2` | 180 s | 4,096 | Structured response rejected with `json_invalid` |
+| `-3` | 180 s | 16,384 | Structured response rejected with `value_error` |
+
+Request prefix: `broward-full-questionnaire-20261029`. Manifests and result records are retained in [outputs/broward-agent-20261029/](outputs/broward-agent-20261029/) and the private reviewer container. **None produced a packet or reached evidence selection/answering.** This is a real-world failure finding, not a successful coverage or grounding evaluation. The second failure does not by itself prove output truncation; the third confirms that a larger output allowance alone does not solve schema validity.
+
+`FoundryConfig.timeout_seconds` now accepts an explicit 1-600 s timeout (default unchanged at 60 s), used consistently by mapping and orchestration clients. Real attempts 2-3 used 180 s. Page mapping explicitly opts into a bounded 16,384-token response allowance; other structured callers retain the 4,096-token guard unless they explicitly opt in. Automatic retries remain disabled and each run retains the existing 40-call total cap. Further diagnostics identify the failed page and validation field paths without echoing model/document values. These changes have **not** been redeployed to Foundry; the immediate path remains local.
+
+Next priority is reliable complete-form interpretation with retained page-level diagnostics, followed by actual evidence/attachment selection and rendered packet inspection. Do not substitute hand-authored Broward mappings or weaken validation to manufacture a successful result.
+
+### Mapping triage and resumable page maps
+
+The next diagnostic run isolated the schema failure on **page 5, items 0-5**: each attachment checklist item incorrectly contained a checkbox option. `VisualItem` permits options only for answer-choice kinds; its validator correctly rejected them. The service returned `completed`, with 1,894 output tokens, so that reproduction was not output-token exhaustion. Prompt `visual-map-v3` explicitly distinguishes attachment-presence checkboxes from answer choices (`kind=attachment`, `region=null`, `options=[]`); the schema and validator were not weakened.
+
+The revised prompt passed the actual failing page and then all five real pages: **69 discovered items**. Deterministic conversion retained 69 interpreted requirements but accepted only **7 placed responses**, with 50 native-anchor placement exceptions and two unsupported standalone boolean controls. Attachments/signatures are not ordinary placed answers, so 7/69 is not an answer-accuracy metric. This is progress past the schema blocker, **not broad form-filling acceptance**. The protected [mapping assessment](outputs/broward-agent-20261029/mapping-triage/mapping-assessment.json) records the remaining exceptions.
+
+Reproduce a selected page, or omit `--page` to resume all pages:
+
+```bash
+OTEL_SDK_DISABLED=true python -m bd_packet_builder.mapping_triage \
+  --root . --blank bd_agreements/Blank/Broward_County/BrokerDealerQuestionnaire.pdf \
+  --output outputs/broward-agent-20261029/mapping-triage \
+  --endpoint https://bd-application-builder-resource.openai.azure.com/openai/v1 \
+  --deployment gpt-6.1-sol --timeout-seconds 180 --page 5 --allow-paid
+```
+
+Diagnostics are opt-in, confidential local artifacts (files created with mode `0600`), never ordinary logs or packet attachments. They retain the raw model response **before** SDK schema parsing, service completion/incomplete details, usage, elapsed time, validation field paths and constraint messages without submitted values. No HTTP authorization headers or credentials are recorded. They may contain issuer text in model outputs; keep them under ignored, access-controlled outputs and apply the same retention/access rules as source documents.
+
+Only schema-valid maps are cached, keyed by blank hash, rendered image, page input, exact prompt/version, schema, endpoint/deployment and output-token allowance. Failures are retained but never cached as successes. A retry reuses successful exact-input pages and calls the model only for uncached pages. Prompt/schema/model/input changes invalidate reuse. Cache validity does not prove correct geometry or grounded answers; native anchoring and placement checks still run. The same cache can be passed explicitly as `BlobPacketBackend(..., mapping_diagnostics_dir=...)` for a local complete-workflow attempt. Default runs do not silently enable raw diagnostics.
+
+**Resumed real run:** `broward-full-questionnaire-20261029-4` / run `d97bb56e8e3d4d2dbed08cc80ff74964` reached `published/incomplete` using those cached maps and the 11-file Blob evidence set. The actual [seven-page packet](outputs/broward-agent-20261029/attempt-4/packet.pdf) and separate [reviewer summary](outputs/broward-agent-20261029/attempt-4/reviewer-summary.txt) are retained locally and in their respective Blob containers. Three requirements were written (firm name, broker/DTC number and question 11's narrative); 66 remained blank. Two one-page attachments were included (public-funds material and delivery instructions); selected FOCUS and FINRA attachments were omitted by the existing attachment gate. This is **not** satisfactory packet coverage or attachment completeness.
+
+Artifact hashes were verified after download. The writer recorded zero changed pixels outside allowed regions; rendered form pages 1, 4 and 5 were inspected locally, including the narrative and untouched signature/date/checklist areas. No synthetic company values were found in the real reviewer summary. These checks do not establish exhaustive evidence grounding, full-field placement quality or business approval. Next work is fixing the native-anchor/placement mismatch and diagnosing required-attachment omissions; do not report all blank answers as genuinely missing source facts.
+
+Packet PDFs are stored only in `packet-results`; summaries, original blank, manifests and other internal artifacts go only to `reviewer-results`. A result record is written last; a partial upload has no completed record. Reusing a claimed request ID fails explicitly instead of running or paying twice. Missing records require operator inspection; there is no automatic crash resume, orphan cleanup or cross-requester ACL yet. Downloads may leave partial files on failure; treat them as unusable until the command succeeds and validates hashes. The shared PoC must not be published broadly before slice 8 authorization/result delivery is implemented.
 
 ## Controlled draft completion
 
@@ -173,7 +312,7 @@ bd-packet agent-run --root /path/to/synthetic-root \
   --deployment gpt-6.1-sol --as-of 2026-09-30 --allow-paid
 ```
 
-The run is capped at 40 agent turns plus one mapping call per page. Output is an incomplete draft under `<root>/outputs/agent-runs/<run-id>/`, never for submission.
+The run is capped at 35 agent turns plus at most five page-mapping calls (40 model calls total). Output is an incomplete draft under `<root>/outputs/agent-runs/<run-id>/`, never for submission.
 
 ## Opt-in synthetic Foundry connection test
 

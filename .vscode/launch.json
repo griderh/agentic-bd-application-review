@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Packet agent (Foundry hosting)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "BD_BLOB_ACCOUNT_URL": "https://bdpoc3ff06060.blob.core.windows.net",
+        "BD_MODEL_ENDPOINT": "https://bd-application-builder-resource.openai.azure.com/openai/v1",
+        "AZURE_AI_MODEL_DEPLOYMENT_NAME": "gpt-6.1-sol",
+        "BD_ALLOW_PAID": "0",
+        "OTEL_SDK_DISABLED": "true",
+        "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "false"
+      },
+      "console": "integratedTerminal"
+    }
+  ]
+}
