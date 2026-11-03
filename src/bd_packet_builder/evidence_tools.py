@@ -16,6 +16,7 @@ from pydantic import Field
 
 from bd_packet_builder.contracts import Contract, Identifier, Nonblank, OcrCitation, Sha256
 from bd_packet_builder.evidence import EvidenceError, TextCitation, resolve_quote
+from bd_packet_builder.historical_context import HistoricalContextEvidence, HistoricalPageResult
 from bd_packet_builder.history import ArchiveManifest, historical_inventory
 from bd_packet_builder.inventory import (
     Inventory,
@@ -24,7 +25,7 @@ from bd_packet_builder.inventory import (
     read_source_bytes,
     select_evidence,
 )
-from bd_packet_builder.ocr import OcrError
+from bd_packet_builder.ocr import OcrError, run_ocr
 from bd_packet_builder.retrieval import default_catalog, read_page
 from bd_packet_builder.run import EvidenceSnapshot
 from bd_packet_builder.scan import ScanEvidence, ScanVerificationError
@@ -59,7 +60,7 @@ class EvidenceLimits(Contract):
     max_search_hits: Annotated[int, Field(ge=1, le=100)] = 20
     max_chars_returned: Annotated[int, Field(ge=1, le=5_000_000)] = 200_000
     max_ocr_pages: Annotated[int, Field(ge=0, le=100)] = 5
-    max_attachments: Annotated[int, Field(ge=1, le=10)] = 10
+    max_attachments: Annotated[int, Field(ge=1, le=20)] = 20
 
 
 class SourceSummary(Contract):
@@ -118,6 +119,24 @@ class PageRead(Contract):
     content_trust: Trust = "untrusted_document_text"
 
 
+class PageIndexEntry(Contract):
+    page: int
+    native_character_count: int
+    excerpt: str
+    issues: tuple[str, ...]
+
+
+class SourceIndex(Contract):
+    version: Literal["source-page-index-v1"] = "source-page-index-v1"
+    source_id: Sha256
+    source_sha256: Sha256
+    historical_issuer: str | None
+    pages: tuple[PageIndexEntry, ...]
+    next_page: int | None
+    content_trust: Trust = "untrusted_document_text"
+    scope: Literal["navigation_only_not_answer_evidence"] = "navigation_only_not_answer_evidence"
+
+
 class QuoteLocation(Contract):
     source_id: Sha256
     page: int
@@ -154,6 +173,7 @@ class EvidenceTools:
         allow_ocr: bool = True,
         scan_evidence: ScanEvidence | None = None,
         historical_archive: ArchiveManifest | None = None,
+        allow_historical_disagreements: bool = False,
     ) -> None:
         history = historical_inventory(root, historical_archive) if historical_archive else None
         allowed_history = {s.source_id for s in history.sources} if history else set()
@@ -193,12 +213,31 @@ class EvidenceTools:
         self._ocr = 0
         self._attachments: list[str] = []
         self._scan_evidence = scan_evidence
+        self.historical_context = (
+            HistoricalContextEvidence(
+                scan_evidence, allow_disagreements=allow_historical_disagreements
+            )
+            if scan_evidence
+            else None
+        )
         self._page_cache: dict[tuple[str, int, bool], tuple[PageRead, bool]] = {}
         self._ocr_artifacts: dict[tuple[str, int], str] = {}
 
     @property
     def attachments(self) -> tuple[str, ...]:
         return tuple(self._attachments)
+
+    @property
+    def reading_usage(self) -> dict[str, int]:
+        return {
+            "distinct_pages": len(self._pages),
+            "ocr_pages": self._ocr,
+            "independent_image_pages": self._scan_evidence.pages_attempted
+            if self._scan_evidence is not None
+            else 0,
+            "evidence_calls": self._calls,
+            "returned_characters": self._chars,
+        }
 
     def _tick(self) -> None:
         if self._calls >= self._limits.max_calls:
@@ -277,6 +316,60 @@ class EvidenceTools:
             for s in selected
         )
         return SourceListing(sources=summaries, selection=selection)
+
+    def index_source(
+        self, source_id: str, *, start_page: int = 1, page_limit: int = 20
+    ) -> SourceIndex:
+        """Bounded page previews; missing native text never establishes missing evidence."""
+        self._tick()
+        source = self._pdf(source_id, start_page)
+        if type(page_limit) is not int or not 1 <= page_limit <= 50:
+            raise ToolInputError("Index page limit must be an integer from one to fifty")
+        count = min(page_limit, self._limits.max_search_pages)
+        data = read_source_bytes(self._root, self._inventory, source_id)
+        entries: list[PageIndexEntry] = []
+        try:
+            with pdfium.PdfDocument(data) as document:
+                stop = min(start_page - 1 + count, len(document))
+                for index in range(start_page - 1, stop):
+                    with (
+                        closing(document[index]) as page,
+                        closing(page.get_textpage()) as text,
+                    ):
+                        chars = text.count_chars()
+                        if chars > _MAX_SEARCH_PAGE_CHARS:
+                            raise EvidenceToolError("Page text exceeds the index limit")
+                        native = text.get_text_bounded(errors="strict").replace("\r\n", "\n")
+                        has_images = any(obj.type == 3 for obj in page.get_objects())
+                    excerpt = native.strip()[:600]
+                    self._spend_chars(len(excerpt))
+                    issues = (
+                        ("no_native_text_requires_image_reading",)
+                        if not native.strip()
+                        else ("page_images_may_contain_unindexed_text",)
+                        if has_images
+                        else ()
+                    )
+                    entries.append(
+                        PageIndexEntry(
+                            page=index + 1,
+                            native_character_count=chars,
+                            excerpt=excerpt,
+                            issues=issues,
+                        )
+                    )
+                next_page = stop + 1 if stop < len(document) else None
+        except (pdfium.PdfiumError, UnicodeError):
+            raise EvidenceToolError("A source could not be indexed") from None
+        read_source_bytes(self._root, self._inventory, source_id)
+        entry = self._historical.get(source.path)
+        return SourceIndex(
+            source_id=source_id,
+            source_sha256=source.sha256,
+            historical_issuer=entry.issuer if entry else None,
+            pages=tuple(entries),
+            next_page=next_page,
+        )
 
     def search_pages(self, terms: tuple[str, ...], *, family: str) -> SearchResult:
         """Case-insensitive native-text search within one catalog family."""
@@ -371,6 +464,19 @@ class EvidenceTools:
         )
         self._page_cache[source.source_id, page, ocr] = result
         return result
+
+    @property
+    def candidate_readings(self) -> tuple[dict[str, object], ...]:
+        sources = {s.source_id: s for s in self._inventory.sources}
+        return tuple(
+            {
+                **read.model_dump(mode="json"),
+                "source_sha256": sources[read.source_id].sha256,
+                "artifact_path": self._ocr_artifacts.get((read.source_id, read.page)),
+                "scope": "candidate_observation_not_verified_answer_evidence",
+            }
+            for read, _ in self._page_cache.values()
+        )
 
     def read_page(self, source_id: str, page: int) -> PageRead:
         """One page of native text, with automatic OCR for textless or sparse pages."""
@@ -472,3 +578,49 @@ class EvidenceTools:
             return citation
         except ScanVerificationError as error:
             raise ToolInputError(str(error)) from None
+
+    def verify_exhibit_title(self, source_id: str, page: int, title: str) -> OcrCitation:
+        """Verify an image exhibit label without granting scalar-answer evidence status."""
+        self._tick()
+        self._pdf(source_id, page)
+        artifact = self._ocr_artifacts.get((source_id, page))
+        if self._scan_evidence is None or artifact is None:
+            raise ToolInputError("Image exhibit needs OCR and independent image reading")
+        if not title.strip() or len(title) > 200:
+            raise ToolInputError("Exhibit title must contain 1-200 characters")
+        try:
+            citation = self._scan_evidence.locate_exhibit(source_id, page, title, artifact)
+        except ScanVerificationError as error:
+            raise ToolInputError(str(error)) from None
+        self._spend_chars(len(citation.quote))
+        return citation
+
+    def read_historical_page(self, source_id: str, page: int) -> HistoricalPageResult:
+        """Force OCR of question labels, even when filled answers have native PDF text."""
+        self._tick()
+        source = self._pdf(source_id, page)
+        if source.family != "historical_reference":
+            raise ToolInputError("Historical page reading requires an approved reference source")
+        if self.historical_context is None or not self._allow_ocr:
+            raise ToolInputError("Historical image/OCR relationship reading is not enabled")
+        # Share page and OCR allowances with ordinary evidence reading.
+        self._page(source, page, ocr=False)
+        artifact = self._ocr_artifacts.get((source_id, page))
+        if artifact is None:
+            if self._ocr >= self._limits.max_ocr_pages:
+                raise ToolLimitError("Historical page reading reached the OCR page limit")
+            self._ocr += 1
+            path = run_ocr(
+                self._root,
+                Path(source.path),
+                page,
+                inventory=Inventory(self._inventory.created_at, (source,), ()),
+            )
+            artifact = path.relative_to(self._root).as_posix() + "/ocr.json"
+            self._ocr_artifacts[source_id, page] = artifact
+        try:
+            result = self.historical_context.read(source_id, page, artifact)
+        except ScanVerificationError as error:
+            raise ToolInputError(str(error)) from None
+        self._spend_chars(len(result.model_dump_json()))
+        return result

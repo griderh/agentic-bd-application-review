@@ -223,6 +223,7 @@ class Scripted(FunctionInvocationLayer, BaseChatClient):  # type: ignore[misc]
         super().__init__()
         self.steps = list(steps)
         self.transcripts: list[list[TranscriptEntry]] = []
+        self.context_texts: list[list[str]] = []
         self.tool_names: list[str] = []
         self.stored: object = "unset"
 
@@ -232,6 +233,8 @@ class Scripted(FunctionInvocationLayer, BaseChatClient):  # type: ignore[misc]
         async def respond() -> ChatResponse:
             assert options.get("instructions") == AGENT_INSTRUCTIONS
             self.stored = options.get("store")
+            self.reasoning = options.get("reasoning")
+            self.output_limit = options.get("max_tokens")
             self.tool_names = [t.name for t in options.get("tools", [])]
             transcript = [
                 TranscriptEntry("tool", str(c.result))
@@ -240,6 +243,15 @@ class Scripted(FunctionInvocationLayer, BaseChatClient):  # type: ignore[misc]
                 if c.type == "function_result"
             ]
             self.transcripts.append(transcript)
+            self.context_texts.append(
+                [
+                    c.text
+                    for m in messages
+                    if m.role == "user"
+                    for c in m.contents
+                    if c.type == "text" and c.text is not None
+                ]
+            )
             turn = (
                 self.steps.pop(0)(transcript)
                 if self.steps
@@ -330,6 +342,30 @@ def full_script(value: str = NAME, quote: str = NAME) -> list[Callable[..., Mode
     ]
 
 
+def test_tool_progress_events_expose_names_but_no_arguments_or_document_text(
+    setup: Setup,
+) -> None:
+    events: list[str] = []
+    tools = setup.tools(progress_sink=events.append)
+    result = tools.call("get_run_status", "{}")
+    assert '"ok":true' in result
+    assert len(events) == 2
+    assert "get_run_status" in events[0]
+    assert "started" in events[0]
+    assert "completed" in events[1]
+    assert setup.manifest.run_id not in events[0]
+    assert "Synthetic issuer" not in events[0]
+
+
+def test_terminal_tool_progress_reports_failure_code_not_document_payload(setup: Setup) -> None:
+    events: list[str] = []
+    tools = setup.tools(progress_sink=events.append)
+    tools.fail("scan_verification_failed", "Synthetic sensitive source text must not be logged.")
+    tools.call("read_historical_page", "{}")
+    assert "run_ended" in events[-1]
+    assert "Synthetic sensitive" not in " ".join(events)
+
+
 def test_scripted_model_completes_a_run_with_deterministic_gates(setup: Setup) -> None:
     final = setup.run(full_script())
     assert final.status == "published" and final.failure is None
@@ -357,6 +393,87 @@ def test_scripted_model_completes_a_run_with_deterministic_gates(setup: Setup) -
     )
     assert NAME in packet_text
     assert hashlib.sha256(setup.blank).hexdigest() == final.blank_sha256
+
+
+def test_orchestration_has_explicit_reasoning_and_output_bounds(setup: Setup, caplog) -> None:
+    caplog.set_level("INFO", logger="bd_packet_builder.agent")
+    setup.tools().call("Synthetic confidential tool-name content", "{}")
+    setup.run(full_script())
+    assert setup.model.reasoning == {"effort": "low"}
+    assert setup.model.output_limit == 16_384
+    assert "tool=locate_quote" in caplog.text
+    assert NAME not in caplog.text and EVIDENCE_TEXT not in caplog.text
+    assert "Synthetic confidential tool-name content" not in caplog.text
+
+
+def test_answer_batches_are_idempotent_and_reach_gate_and_writer(setup: Setup) -> None:
+    script = full_script()
+    propose = script[6]
+
+    def stage(transcript):
+        turn = propose(transcript)
+        return ModelTurn(
+            text=None,
+            tool_calls=(ToolCall("batch", "stage_answers", turn.tool_calls[0].arguments),),
+        )
+
+    script[6:7] = [stage, stage, call("submit_answers", {"proposals": []})]
+    final = setup.run(script)
+    assert final.status == "published"
+    request = json.loads(setup.artifact("draft_request.json"))
+    assert len(request["proposals"]["proposals"]) == 3
+    written = json.loads(setup.artifact("draft.json"))["written_requirements"]
+    assert written == ["p1.name"]
+    for transcript, context in zip(
+        setup.model.transcripts[6:],
+        setup.model.context_texts[6:],
+        strict=True,
+    ):
+        assert len([e for e in transcript if e.role == "tool"]) == 1
+        handoff = context[0]
+        assert "native_quote_citations" in handoff
+        assert "p1.name" in handoff and NAME in handoff
+
+
+@pytest.mark.parametrize(
+    ("problem", "error"),
+    [
+        ("conflict", "answer_batch_conflict"),
+        ("duplicate", "duplicate_proposal"),
+        ("oversize", "invalid_arguments"),
+        ("unknown", "unknown_requirement"),
+        ("signature", "signing_requirement_not_answerable"),
+    ],
+)
+def test_invalid_answer_batch_preserves_previously_staged_answer(setup, problem, error):
+    script = full_script()
+    propose = script[6]
+
+    def batch(transcript, *, invalid=False):
+        raw = json.loads(propose(transcript).tool_calls[0].arguments)
+        if invalid:
+            proposal = raw["proposals"][0]
+            if problem == "conflict":
+                proposal["value"]["value"] = "Contradictory replacement"
+            elif problem in ("duplicate", "oversize"):
+                raw["proposals"] *= 2 if problem == "duplicate" else 11
+            else:
+                proposal["requirement_id"] = (
+                    "p1.unknown" if problem == "unknown" else "p1.signature"
+                )
+        return ModelTurn(None, (ToolCall("batch", "stage_answers", json.dumps(raw)),))
+
+    def finalize(result):
+        assert result["error"]["code"] == error
+        return "submit_answers", {"proposals": []}
+
+    script[6:7] = [
+        batch,
+        lambda transcript: batch(transcript, invalid=True),
+        with_result(finalize),
+    ]
+    assert setup.run(script).status == "published"
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == ["p1.name"]
 
 
 def test_scanned_quote_survives_agent_gates_staging_and_publication(
@@ -590,8 +707,13 @@ def test_model_cannot_answer_signing_or_unknown_requirements(setup: Setup) -> No
     ]
     final = setup.run(steps)
     assert final.steps[-1].to_status == "evidence_collected"
-    tool_results = [json.loads(e.content) for e in setup.model.transcripts[-1] if e.role == "tool"]
-    errors = [r["error"]["code"] for r in tool_results if not r["ok"]]
+    tool_results = [
+        json.loads(e.content)
+        for transcript in setup.model.transcripts
+        for e in transcript
+        if e.role == "tool"
+    ]
+    errors = list(dict.fromkeys(r["error"]["code"] for r in tool_results if not r["ok"]))
     assert errors == ["signing_requirement_not_answerable", "unknown_requirement"]
 
 
@@ -648,6 +770,40 @@ def test_repeated_tool_errors_fail_the_run(setup: Setup) -> None:
     assert final.failure.code == "agent_tool_error_limit_exceeded"
 
 
+def test_status_queries_cannot_reset_repeated_tool_error_budget(setup: Setup) -> None:
+    final = setup.run(
+        [call("assemble_packet"), call("get_run_status")] * 3,
+        limits=AgentLimits(max_tool_errors=2),
+    )
+    assert final.failure is not None
+    assert final.failure.code == "agent_tool_error_limit_exceeded"
+
+
+def test_status_retains_answer_validation_feedback(setup: Setup) -> None:
+    tools = setup.tools()
+    tools.call("interpret_form", "{}")
+    tools.call("finish_evidence", "{}")
+    reply = json.loads(
+        tools.call(
+            "stage_answers",
+            json.dumps(
+                {
+                    "proposals": [
+                        {
+                            "requirement_id": "unknown",
+                            "outcome": "missing_evidence",
+                            "explanation": "No applicable source located.",
+                        }
+                    ],
+                }
+            ),
+        )
+    )
+    assert reply["error"]["code"] == "unknown_requirement"
+    status = json.loads(tools.call("get_run_status", "{}"))["result"]
+    assert status["answer_errors"][0]["code"] == "unknown_requirement"
+
+
 def test_model_stopping_early_is_a_failure_not_a_completed_packet(setup: Setup) -> None:
     final = setup.run([call("interpret_form")])
     assert final.status == "failed" and final.failure is not None
@@ -694,15 +850,21 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "interpret_form",
         "list_sources",
         "search_pages",
+        "index_source",
         "read_page",
         "locate_quote",
         "verify_scan_quote",
+        "read_historical_page",
         "select_attachment",
+        "plan_supporting_document",
+        "select_historical_exhibit",
         "finish_evidence",
+        "stage_answers",
         "submit_answers",
         "assemble_packet",
         "publish_results",
     }
+    assert specs["stage_answers"].parameters()["properties"]["proposals"]["maxItems"] == 10
     for spec in specs.values():
         assert spec.description
         assert (
@@ -723,6 +885,23 @@ def test_instructions_are_versioned_and_state_the_hard_rules() -> None:
 def test_model_calls_never_ask_the_service_to_store_the_conversation(setup: Setup) -> None:
     setup.run([call("get_run_status")])
     assert setup.model.stored is False
+
+
+def test_model_failure_preserves_cause_types_not_payloads(setup: Setup) -> None:
+    from agent_framework.exceptions import ChatClientException
+
+    def failed(_transcript):
+        raise ChatClientException(
+            "PRIVATE MODEL PAYLOAD",
+            inner_exception=TimeoutError("PRIVATE SOURCE TEXT"),
+        )
+
+    final = setup.run([failed])
+    assert final.status == "failed"
+    assert final.failure.code == "model_call_failed"
+    assert "ChatClientException" in final.failure.message
+    assert "TimeoutError" in final.failure.message
+    assert "PRIVATE" not in final.failure.message
 
 
 def test_trace_records_tool_names_and_outcomes_without_arguments(setup: Setup) -> None:

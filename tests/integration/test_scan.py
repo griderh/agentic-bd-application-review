@@ -123,18 +123,38 @@ def test_scan_page_budget_cannot_be_bypassed_by_rejected_transcriptions(tmp_path
     reader.transcribe.assert_not_called()
 
 
-def test_five_request_ceiling_includes_failed_remote_attempts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("allowance", [5, 20])
+def test_configured_request_ceiling_includes_failed_remote_attempts(
+    tmp_path: Path, allowance: int
+) -> None:
     request, _, scans, reader, artifact = scan_setup(tmp_path)
+    scans.max_pages = allowance
     parsed = DraftRequest.model_validate_json(request.read_bytes())
     source_id = parsed.proposals.proposals[0].citations[0].source_id
     reader.transcribe.side_effect = FoundryError("Synthetic remote timeout")
-    for _ in range(5):
+    for _ in range(allowance):
         with pytest.raises(FoundryError, match="timeout"):
             scans.locate(source_id, 1, "CRD: 001234", "Example LLC", artifact)
     with pytest.raises(ScanVerificationError, match="scan_verification_budget_exhausted"):
         scans.locate(source_id, 1, "CRD: 001234", "Example LLC", artifact)
-    assert reader.transcribe.call_count == 5
+    assert reader.transcribe.call_count == allowance
+    assert scans.pages_attempted == allowance
     assert not scans.checks
+
+
+def test_exhibit_timeout_propagates_without_fallback_or_cache(tmp_path: Path) -> None:
+    request, _, scans, reader, artifact = scan_setup(tmp_path)
+    parsed = DraftRequest.model_validate_json(request.read_bytes())
+    source_id = parsed.proposals.proposals[0].citations[0].source_id
+    scans.max_pages = 1
+    reader.transcribe.side_effect = FoundryError("Synthetic remote timeout")
+
+    with pytest.raises(FoundryError, match="timeout"):
+        scans.locate_exhibit(source_id, 1, "CRD: 001234", artifact)
+
+    assert reader.transcribe.call_count == 1
+    assert scans.pages_attempted == 1
+    assert not scans.exhibit_checks
 
 
 def test_source_subject_case_difference_does_not_block_independent_verification(

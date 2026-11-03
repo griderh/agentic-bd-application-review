@@ -58,6 +58,10 @@ class FoundryError(ValueError):
     """Actionable connection/response failures without tokens or remote payloads."""
 
 
+class FoundrySchemaError(FoundryError):
+    """The model replied, but its output did not satisfy the strict response contract."""
+
+
 class FoundryConfig(Contract):
     endpoint: str
     deployment: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._-]+$")
@@ -263,11 +267,11 @@ def request_structured[T: Contract](
                 ".".join(str(part) for part in item["loc"]) or "response"
                 for item in error.errors(include_input=False)[:5]
             )
-            raise FoundryError(
+            raise FoundrySchemaError(
                 f"Foundry response failed strict schema validation ({codes}; fields: {locations})"
             ) from None
         except (json.JSONDecodeError, APIResponseValidationError):
-            raise FoundryError("Foundry response failed strict schema validation") from None
+            raise FoundrySchemaError("Foundry response failed strict schema validation") from None
     finally:
         if client is not None:
             client.close()

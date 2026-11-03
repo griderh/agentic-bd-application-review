@@ -123,6 +123,42 @@ def test_search_rejects_unusable_terms(tmp_path: Path, terms: tuple[str, ...]) -
         tools(tmp_path).search_pages(terms, family="FINRA_Certification")
 
 
+def test_source_index_is_bounded_navigation_with_explicit_unreadable_pages(tmp_path: Path) -> None:
+    pdf(tmp_path, "FINRA_Certification/report.pdf", [LONG, "", "Disclosure Event Details"])
+    tool = tools(tmp_path)
+    sid = source_id(tool.list_sources(), "FINRA_Certification")
+    index = tool.index_source(sid, start_page=1, page_limit=2)
+    assert index.source_id == sid
+    assert len(index.source_sha256) == 64
+    assert [page.page for page in index.pages] == [1, 2]
+    assert "CRD: 001234" in index.pages[0].excerpt
+    assert index.pages[1].issues == ("no_native_text_requires_image_reading",)
+    assert index.next_page == 3
+    assert index.scope == "navigation_only_not_answer_evidence"
+    assert index.content_trust == "untrusted_document_text"
+    assert tool.reading_usage["returned_characters"] > 0
+    last = tool.index_source(sid, start_page=3, page_limit=2)
+    assert last.next_page is None
+    assert last.pages[0].excerpt == "Disclosure Event Details"
+
+
+@pytest.mark.parametrize("start,limit", [(0, 1), (1, 0), (1, 51), (4, 1)])
+def test_source_index_rejects_out_of_range_requests(tmp_path: Path, start: int, limit: int) -> None:
+    seed(tmp_path)
+    tool = tools(tmp_path)
+    sid = source_id(tool.list_sources(), "FINRA_Certification")
+    with pytest.raises(ToolInputError):
+        tool.index_source(sid, start_page=start, page_limit=limit)
+
+
+def test_source_index_enforces_existing_character_budget(tmp_path: Path) -> None:
+    seed(tmp_path)
+    tool = tools(tmp_path, limits=EvidenceLimits(max_chars_returned=10))
+    sid = source_id(tool.list_sources(), "FINRA_Certification")
+    with pytest.raises(ToolLimitError, match="character"):
+        tool.index_source(sid)
+
+
 def test_read_page_returns_native_text_as_untrusted_citable_data(tmp_path: Path) -> None:
     seed(tmp_path)
     tool = tools(tmp_path)

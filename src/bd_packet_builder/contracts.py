@@ -1,5 +1,6 @@
 """Untrusted proposal schemas and fail-closed checks, not an answer approval service."""
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -17,6 +18,7 @@ from pydantic import (
 
 from bd_packet_builder.evidence import EvidenceError, TextCitation, resolve_quote
 from bd_packet_builder.inventory import Inventory
+from bd_packet_builder.knowledge import KNOWLEDGE_IDS, KNOWLEDGE_SHA256
 
 Nonblank = Annotated[str, StringConstraints(min_length=1, max_length=20_000, pattern=r"\S")]
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
@@ -234,9 +236,64 @@ class OcrCitation(Contract):
 
 
 class CurrentEvidenceCheck(Contract):
-    citation: Citation
+    citation: Citation | OcrCitation
     finding: Literal["corroborates", "contradicts", "not_corroborated"]
     explanation: Nonblank
+
+
+def explicit_choice_answer(
+    requirement: Requirement | None, value: AnswerValue | None, quote: str
+) -> bool:
+    """Match complete explicit answer labels, never infer marks from a list of options."""
+    if (
+        requirement is None
+        or requirement.choices is None
+        or not isinstance(value, (SingleSelectValue, MultiSelectValue))
+        or value.write_ins
+    ):
+        return False
+    options = {
+        o.option_id: " ".join(o.label.casefold().split()) for o in requirement.choices.options
+    }
+    if not value.selected or not set(value.selected) <= options.keys():
+        return False
+    selected = [options[key] for key in value.selected]
+    if len(set(selected)) != len(selected):
+        return False
+    normalized_quote = " ".join(quote.casefold().split())
+    if len(selected) == 1:
+        return normalized_quote == selected[0]
+    parts = [" ".join(part.casefold().split()) for part in re.split(r"[,;\n]+", quote)]
+    return len(parts) == len(selected) and set(parts) == set(selected)
+
+
+class HistoricalContextCitation(Contract):
+    evidence_kind: Literal["historical_context"]
+    source_id: Sha256
+    page: Annotated[int, Field(ge=1)]
+    check_sha256: Sha256
+    quote: Nonblank
+
+
+class HistoricalCorrespondence(Contract):
+    target_question: Nonblank
+    assessment: Literal["applicable", "uncertain", "incompatible"]
+    differences: Nonblank
+    reason: Nonblank
+
+
+class HistoricalTenure(Contract):
+    prior_value: Nonblank
+    signed_on: date
+    date_citation: Citation | OcrCitation
+    date_context: Citation | HistoricalContextCitation
+
+
+class ReadingResolution(Contract):
+    subject: Nonblank
+    subject_context: HistoricalContextCitation
+    field_label: Nonblank
+    citation: Citation | OcrCitation
 
 
 class HistoricalBasis(Contract):
@@ -249,12 +306,34 @@ class HistoricalBasis(Contract):
         "trading_capability",
         "account_requirement",
         "reference",
+        "disclosure",
+        "tenure",
+        "headcount",
+        "eligibility",
     ]
     context: Literal["firm_wide", "issuer_specific"]
-    prior_question: Citation | OcrCitation
+    prior_question: Citation | OcrCitation | HistoricalContextCitation
     role: Nonblank | None = None
     current_checks: Annotated[tuple[CurrentEvidenceCheck, ...], Field(max_length=20)]
     reviewer_confirmation: Nonblank
+    correspondence: HistoricalCorrespondence | None = None
+    tenure: HistoricalTenure | None = None
+    additional_contexts: Annotated[tuple[HistoricalContextCitation, ...], Field(max_length=10)] = ()
+    reading_resolution: ReadingResolution | None = None
+
+
+class KnowledgeUse(Contract):
+    entry_id: Identifier
+    reason: Nonblank
+    reference_sha256: Sha256 = KNOWLEDGE_SHA256
+
+    @model_validator(mode="after")
+    def known_entry(self) -> Self:
+        if self.entry_id not in KNOWLEDGE_IDS:
+            raise ValueError("Unknown domain knowledge entry")
+        if self.reference_sha256 != KNOWLEDGE_SHA256:
+            raise ValueError("Domain knowledge changed; start a new run")
+        return self
 
 
 class AnswerProposal(Contract):
@@ -275,14 +354,26 @@ class AnswerProposal(Contract):
     confidence: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] | None = None
     explanation: Nonblank | None = None
     historical_basis: HistoricalBasis | None = None
+    supporting_references: Annotated[tuple[Nonblank, ...], Field(max_length=20)] = ()
+    knowledge_applied: Annotated[tuple[KnowledgeUse, ...], Field(max_length=30)] = ()
 
     @model_validator(mode="after")
     def complete_outcome(self) -> Self:
+        if len({k.entry_id for k in self.knowledge_applied}) != len(self.knowledge_applied):
+            raise ValueError("Duplicate domain knowledge references")
         if self.outcome == "proposed":
             if self.value is None or not self.citations or self.confidence is None:
                 raise ValueError("Proposed answers require a value, citations and confidence")
         elif self.value is not None or self.explanation is None:
             raise ValueError("Unanswered outcomes require an explanation and no value")
+        if self.supporting_references and (
+            not isinstance(self.value, TextValue | NarrativeValue)
+            or any(
+                reference.casefold() not in self.value.value.casefold()
+                for reference in self.supporting_references
+            )
+        ):
+            raise ValueError("Supporting references must quote the proposed answer text")
         return self
 
 

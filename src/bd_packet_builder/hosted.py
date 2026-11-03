@@ -33,7 +33,7 @@ from azure.storage.blob import BlobServiceClient
 from openai import AsyncOpenAI, OpenAI
 from pydantic import Field, model_validator
 
-from bd_packet_builder.agent import PacketAgentTools, run_packet_agent
+from bd_packet_builder.agent import PacketAgentTools
 from bd_packet_builder.blob_storage import (
     REVIEWS,
     AzureBlobs,
@@ -43,7 +43,15 @@ from bd_packet_builder.blob_storage import (
 )
 from bd_packet_builder.contracts import Contract
 from bd_packet_builder.foundry import FoundryConfig, FoundryError
-from bd_packet_builder.live import LIVE_LIMITS, FoundryPageMapper, LiveRunRequest, prepare_live_run
+from bd_packet_builder.grouped import run_grouped_packet_agent
+from bd_packet_builder.live import (
+    LIVE_EVIDENCE_LIMITS,
+    LIVE_LIMITS,
+    FoundryPageMapper,
+    LiveRunRequest,
+    prepare_live_run,
+    validate_resume_configuration,
+)
 from bd_packet_builder.run import FileRunStore, RunManifest
 from bd_packet_builder.scan import FoundryScanReader
 
@@ -52,16 +60,29 @@ _PDF_RUN_LOCK = threading.Lock()
 
 
 class HostedCommand(Contract):
-    operation: Literal["build", "status"]
+    operation: Literal["build", "resume", "status"]
     request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,128}$")
     blank_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,128}$")
     evidence_set_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,128}$")
     as_of: date | None = None
+    resume_request_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,128}$")
 
     @model_validator(mode="after")
     def build_ids(self) -> Self:
         if self.operation == "build" and (self.blank_id is None or self.evidence_set_id is None):
             raise ValueError("Build requires staged blank and evidence-set IDs")
+        if self.operation == "resume" and (
+            self.resume_request_id is None
+            or self.blank_id is not None
+            or self.evidence_set_id is not None
+            or self.as_of is not None
+            or self.resume_request_id == self.request_id
+        ):
+            raise ValueError(
+                "Resume requires a prior request and a new request ID, without overrides"
+            )
+        if self.operation != "resume" and self.resume_request_id is not None:
+            raise ValueError("Only resume may name a prior request")
         return self
 
 
@@ -95,48 +116,76 @@ class BlobPacketBackend:
     def build(self, command: HostedCommand) -> dict[str, object]:
         if not self.allow_paid:
             raise FoundryError("Hosted model calls are disabled; enable BD_ALLOW_PAID explicitly")
-        if command.blank_id is None or command.evidence_set_id is None:
+        recovering = command.operation == "resume"
+        blank_id, evidence_set_id = command.blank_id, command.evidence_set_id
+        if recovering and command.resume_request_id is not None:
+            blank_id, evidence_set_id = self.storage.recovery_inputs(command.resume_request_id)
+        if blank_id is None or evidence_set_id is None:
             raise ValueError("Build requires staged IDs")
         with _PDF_RUN_LOCK:
             work = Path(os.environ.get("BD_WORK_ROOT", str(Path.home() / ".bd-packet-runs")))
             if work.is_symlink() or work.resolve() != work.absolute():
                 raise BlobStorageError("Work root must not resolve through symlinks")
             root = work / uuid4().hex
-            root.mkdir(parents=True)
-            bundle = self.storage.stage(command.blank_id, command.evidence_set_id, root)
-            self.storage.claim(command.request_id, command.blank_id, command.evidence_set_id)
+            root.mkdir(parents=True, mode=0o700)
+            bundle = self.storage.stage(blank_id, evidence_set_id, root)
             runs = root / "runs"
-            runs.mkdir()
+            runs.mkdir(mode=0o700)
             store = FileRunStore(runs)
-            manifest = prepare_live_run(
-                store,
-                LiveRunRequest(
-                    blank_name=Path(bundle.blank.path).name,
-                    requester_id="authorized-foundry-poc",
-                    evidence_set_id=command.evidence_set_id,
-                    as_of=command.as_of,
-                    issuer=bundle.issuer,
-                    historical_archive=bundle.historical_archive,
-                ),
-                (root / bundle.blank.path).read_bytes(),
-                root,
-                self.config,
+            manifest = (
+                self.storage.restore_answers(command.resume_request_id, store)
+                if (recovering and command.resume_request_id is not None)
+                else prepare_live_run(
+                    store,
+                    LiveRunRequest(
+                        blank_name=Path(bundle.blank.path).name,
+                        requester_id="authorized-foundry-poc",
+                        evidence_set_id=evidence_set_id,
+                        as_of=command.as_of,
+                        issuer=bundle.issuer,
+                        historical_archive=bundle.historical_archive,
+                    ),
+                    (root / bundle.blank.path).read_bytes(),
+                    root,
+                    self.config,
+                )
             )
+            if recovering:
+                validate_resume_configuration(manifest, self.config)
+            self.storage.claim(command.request_id, blank_id, evidence_set_id)
             try:
-                manifest = asyncio.run(self._run(store, manifest.run_id, root))
+                manifest = asyncio.run(
+                    self._run(store, manifest.run_id, root, resume=True)
+                    if recovering
+                    else self._run(store, manifest.run_id, root)
+                )
             finally:
                 # Preserve failures as well as successful drafts; publication errors propagate.
                 current = store.load(manifest.run_id)
                 if current.status not in ("published", "failed", "cancelled"):
+                    answer_checkpointed = current.status == "evidence_collected" and any(
+                        a.name == "answer-plan.json" for a in current.artifacts
+                    )
                     current = store.fail(
                         manifest.run_id,
-                        code="hosted_run_interrupted",
-                        message="Hosted execution ended before publication; inspect run state.",
+                        code=(
+                            "answer_groups_incomplete"
+                            if answer_checkpointed
+                            else "hosted_run_interrupted"
+                        ),
+                        message=(
+                            "Answer execution was interrupted; inspect private checkpoints "
+                            "and explicitly resume unfinished groups."
+                            if answer_checkpointed
+                            else "Hosted execution ended before publication; inspect run state."
+                        ),
                     )
                 self.storage.publish(command.request_id, store, current)
             return self.status(command.request_id)
 
-    async def _run(self, store: FileRunStore, run_id: str, root: Path) -> RunManifest:
+    async def _run(
+        self, store: FileRunStore, run_id: str, root: Path, *, resume: bool = False
+    ) -> RunManifest:
         with DefaultAzureCredential() as mapping_credential:
             mapping_token = get_bearer_token_provider(
                 mapping_credential, "https://cognitiveservices.azure.com/.default"
@@ -174,6 +223,7 @@ class BlobPacketBackend:
                     root,
                     mapper,
                     limits=LIVE_LIMITS,
+                    evidence_limits=LIVE_EVIDENCE_LIMITS,
                     scan_reader=FoundryScanReader(
                         self.config,
                         allow_paid=True,
@@ -182,7 +232,7 @@ class BlobPacketBackend:
                     scan_endpoint=self.config.endpoint,
                     scan_deployment=self.config.deployment,
                 )
-                return await run_packet_agent(client, tools)
+                return await run_grouped_packet_agent(client, tools, resume=resume)
 
 
 class PacketHostedAgent:

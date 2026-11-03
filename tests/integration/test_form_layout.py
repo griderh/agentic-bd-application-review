@@ -208,11 +208,76 @@ def test_full_page_converts_to_writer_coordinates_and_native_quotations(tmp_path
         pytest.approx(HEIGHT - 350, abs=1),
     ]
     assert codes(result) == {"p1.capital": {"financial_units_unresolved"}}
-
     source = Path("bd_agreements/Blank/synthetic.pdf")
     (tmp_path / source.parent).mkdir(parents=True)
     (tmp_path / source).write_bytes(blank)
     validate_layout(tmp_path, source, result.layout)
+
+
+@pytest.mark.parametrize("number", ["10.", "12.", "13)"])
+def test_question_number_glued_to_first_word_keeps_exact_native_anchor(number: str) -> None:
+    instruction = "Please describe account requirements"
+    blank = make_blank([[(40, 60, number + instruction)]])
+    result = build_form_layout(
+        blank,
+        {
+            1: page(
+                item(
+                    "account",
+                    instruction,
+                    "narrative",
+                    nbox(40, 80, 550, 130),
+                )
+            )
+        },
+    )
+    assert result.layout is not None
+    assert result.layout.responses[0].requirement.instruction == number + instruction
+
+
+def test_native_anchor_does_not_ignore_an_explicitly_wrong_question_number() -> None:
+    blank = make_blank([[(40, 60, "10.Please describe account requirements")]])
+    result = build_form_layout(
+        blank,
+        {
+            1: page(
+                item(
+                    "account",
+                    "13.Please describe account requirements",
+                    "narrative",
+                    nbox(40, 80, 550, 130),
+                )
+            )
+        },
+    )
+    assert result.layout is None
+    assert codes(result) == {"p1.account": {"placement_not_native_anchored"}}
+
+
+def test_small_edge_overlap_is_trimmed_to_actual_blank_writing_space(tmp_path: Path) -> None:
+    blank = make_blank([[(40, 60, "Email:")]])
+    result = build_form_layout(
+        blank,
+        {
+            1: page(
+                item(
+                    "email",
+                    "Email:",
+                    "text",
+                    nbox(65, 45, 500, 70),
+                )
+            )
+        },
+    )
+    assert result.layout is not None
+    region = result.layout.responses[0].text_region
+    assert region is not None
+    assert region.left > 65
+    assert region.right <= 501
+    source = tmp_path / "bd_agreements/Blank/synthetic.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(blank)
+    validate_layout(tmp_path, source.relative_to(tmp_path), result.layout)
 
 
 def test_case_whitespace_and_trailing_punctuation_still_anchor_exact_native_text() -> None:

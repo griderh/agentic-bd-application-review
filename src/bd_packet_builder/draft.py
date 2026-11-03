@@ -6,7 +6,7 @@ import math
 import re
 from contextlib import closing
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -25,18 +25,35 @@ from bd_packet_builder.contracts import (
     BooleanValue,
     Contract,
     EvidenceStatus,
+    HistoricalContextCitation,
     Identifier,
     IdentifierValue,
     MultiSelectValue,
     NarrativeValue,
     Nonblank,
     OcrCitation,
+    Requirement,
     Sha256,
     SingleSelectValue,
     TextValue,
+    check_native_citations,
     check_proposal,
 )
-from bd_packet_builder.history import ArchiveManifest, historical_issues, with_historical_sources
+from bd_packet_builder.exhibits import (
+    ExhibitError,
+    HistoricalExhibit,
+    audit_support,
+    extract_exhibit,
+)
+from bd_packet_builder.historical_context import HistoricalContextCheck, control_option_id
+from bd_packet_builder.history import (
+    ArchiveManifest,
+    HistoricalReusePolicy,
+    historical_issues,
+    historical_review_concerns,
+    requires_personal_action,
+    with_historical_sources,
+)
 from bd_packet_builder.inventory import (
     Inventory,
     SourceRecord,
@@ -44,9 +61,16 @@ from bd_packet_builder.inventory import (
     publish_json_run,
     read_source_bytes,
 )
+from bd_packet_builder.knowledge import knowledge_context
 from bd_packet_builder.layout import MappedResponse, PageBox, ResponseLayout, validate_layout
 from bd_packet_builder.local_inputs import LocalInputError, read_local_input
 from bd_packet_builder.ocr import OcrWordEvidence, ocr_text
+from bd_packet_builder.reconciliation import (
+    ReconciliationError,
+    RequirementAssessment,
+    reconcile_requirement,
+    validate_assessments,
+)
 from bd_packet_builder.responses import (
     NarrativeRegion,
     PacketPagination,
@@ -56,7 +80,61 @@ from bd_packet_builder.responses import (
 )
 from bd_packet_builder.retrieval import default_catalog
 from bd_packet_builder.review import AnswerProposals
-from bd_packet_builder.scan import ScanCheck
+from bd_packet_builder.scan import (
+    SUPPORTED_SCAN_VERSIONS,
+    ExhibitImageCheck,
+    ScanCheck,
+    ScanVerificationError,
+    check_agreement,
+    normalized,
+    parse_ocr_artifact,
+)
+
+
+@dataclass(frozen=True)
+class ConditionalApplicability:
+    parent_id: str
+    applicable: bool | None
+    historical_candidate: bool
+
+
+def conditional_applicability(
+    requirements: tuple[Requirement, ...],
+    requirement: Requirement,
+    written: dict[str, AnswerProposal],
+) -> ConditionalApplicability | None:
+    if not re.fullmatch(
+        r"if yes[,:\s]+(?:please\s+)?explain[:.\s]*", requirement.instruction.strip(), re.IGNORECASE
+    ):
+        return None
+    index = requirements.index(requirement)
+    if index == 0:
+        return None
+    parent = requirements[index - 1]
+    if parent.page != requirement.page or parent.kind not in ("boolean", "single_select"):
+        return None
+    proposal = written.get(parent.requirement_id)
+    value = proposal.value if proposal is not None else None
+    answer: bool | None = None
+    if isinstance(value, BooleanValue):
+        answer = value.value
+    elif isinstance(value, SingleSelectValue) and parent.choices is not None:
+        label = next(
+            (
+                o.label.strip().casefold()
+                for o in parent.choices.options
+                if o.option_id in value.selected
+            ),
+            "",
+        )
+        if label in ("yes", "no"):
+            answer = label == "yes"
+    return ConditionalApplicability(
+        parent.requirement_id,
+        answer,
+        proposal is not None and proposal.historical_basis is not None,
+    )
+
 
 MAX_PACKET_PAGES = 100
 BANNER_HEIGHT = 24
@@ -108,19 +186,27 @@ class DraftRequest(Contract):
     requirements: ApplicationRequirements
     layout: ResponseLayout
     proposals: AnswerProposals
-    sources: Annotated[tuple[DraftSource, ...], Field(max_length=10)]
-    attachments: Annotated[tuple[Sha256, ...], Field(max_length=10)]
+    sources: Annotated[tuple[DraftSource, ...], Field(max_length=26)]
+    attachments: Annotated[tuple[Sha256, ...], Field(max_length=20)]
     protected_regions: Annotated[tuple[PageBox, ...], Field(max_length=100)]
     additional_forms: Annotated[tuple[DraftAdditionalForm, ...], Field(max_length=10)] = ()
     issuer: Nonblank | None = None
     historical_archive: ArchiveManifest | None = None
+    historical_policy: HistoricalReusePolicy = "conservative"
+    calculation_date: date | None = None
     navigation_context: dict[Identifier, Nonblank] = Field(default_factory=dict)
+    historical_exhibits: Annotated[tuple[HistoricalExhibit, ...], Field(max_length=5)] = ()
 
     @model_validator(mode="after")
     def identities(self) -> Self:
         requirements = {r.requirement_id: r for r in self.requirements.requirements}
         if not self.navigation_context.keys() <= requirements.keys():
             raise ValueError("Navigation context must refer to declared requirements")
+        if any(e.requirement_id not in requirements for e in self.historical_exhibits):
+            raise ValueError("Exhibits must refer to declared requirements")
+        keys = [e.exhibit_id for e in self.historical_exhibits]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Historical exhibit selections must be unique")
         if len(requirements) > 100:
             raise ValueError("Draft trial supports at most 100 requirements")
         if {p.requirement_id for p in self.proposals.proposals} != requirements.keys():
@@ -184,8 +270,16 @@ class DraftReview(Contract):
     reviewer: Nonblank
     decisions: Annotated[tuple[DraftDecision, ...], Field(max_length=100)]
     attachment_source_ids: Annotated[tuple[Sha256, ...], Field(max_length=10)] = ()
-    reviewer_notes: Annotated[tuple[Nonblank, ...], Field(max_length=20)] = ()
+    reviewer_notes: Annotated[tuple[Nonblank, ...], Field(max_length=200)] = ()
     scan_checks: Annotated[tuple[ScanCheck, ...], Field(max_length=100)] = ()
+    historical_context_checks: Annotated[
+        tuple[HistoricalContextCheck, ...], Field(max_length=100)
+    ] = ()
+    historical_exhibit_ids: Annotated[tuple[Identifier, ...], Field(max_length=5)] = ()
+    exhibit_image_checks: Annotated[tuple[ExhibitImageCheck, ...], Field(max_length=5)] = ()
+    requirement_assessments: Annotated[
+        tuple[RequirementAssessment, ...], Field(max_length=100)
+    ] = ()
 
     @model_validator(mode="after")
     def unique(self) -> Self:
@@ -193,6 +287,12 @@ class DraftReview(Contract):
             raise ValueError("Draft review decisions cannot repeat a requirement")
         if len(set(self.attachment_source_ids)) != len(self.attachment_source_ids):
             raise ValueError("Attachment reviews cannot repeat a source")
+        if len(set(self.historical_exhibit_ids)) != len(self.historical_exhibit_ids):
+            raise ValueError("Exhibit reviews cannot repeat a selection")
+        if len({a.requirement_id for a in self.requirement_assessments}) != len(
+            self.requirement_assessments
+        ):
+            raise ValueError("Requirement assessments cannot repeat")
         return self
 
 
@@ -349,8 +449,412 @@ def verify_ocr_citation(
     )
 
 
+def historical_answer_citations(
+    proposal: AnswerProposal, snapshots: tuple[tuple[OcrCitation, bytes], ...]
+) -> tuple[OcrCitation, ...]:
+    basis = proposal.historical_basis
+    if basis is None:
+        return ()
+    return tuple(
+        citation
+        for citation, _ in snapshots
+        if citation.source_id == basis.prior_question.source_id
+        or (basis.reading_resolution is not None and citation == basis.reading_resolution.citation)
+    )
+
+
+def verify_historical_context(
+    root: Path,
+    inventory: Inventory,
+    proposal: AnswerProposal,
+    checks: tuple[HistoricalContextCheck, ...],
+    render_hashes: dict[tuple[str, int], str],
+    requirement: Requirement | None = None,
+    allow_disagreements: bool = False,
+    mapping: MappedResponse | None = None,
+    scan_checks: tuple[ScanCheck, ...] = (),
+) -> tuple[tuple[str, ...], tuple[tuple[OcrCitation, bytes], ...]]:
+    basis = proposal.historical_basis
+    if basis is None:
+        return (), ()
+    current_snapshots: list[tuple[OcrCitation, bytes]] = []
+    for current_check in basis.current_checks:
+        citation = current_check.citation
+        if not isinstance(citation, OcrCitation):
+            continue
+        issue, raw, _ = verify_ocr_citation(root, inventory, citation, render_hashes)
+        if issue or raw is None:
+            return (issue or "historical_current_scan_unavailable",), ()
+        verified = False
+        for scan in scan_checks:
+            if (
+                scan.citation != citation
+                or scan.prompt_version not in SUPPORTED_SCAN_VERSIONS
+                or not scan.agrees_with_artifact(raw)
+            ):
+                continue
+            try:
+                check_agreement(scan.transcript, scan.expected_subject, citation.quote)
+            except ScanVerificationError:
+                continue
+            verified = True
+            break
+        if not verified:
+            return ("historical_current_scan_requires_machine_verification",), ()
+        current_snapshots.append((citation, raw))
+    if not isinstance(basis.prior_question, HistoricalContextCitation):
+        issues, date_snapshots = _verify_signature_metadata(
+            root, inventory, proposal, checks, render_hashes
+        )
+        return (issues, ()) if issues else ((), tuple(current_snapshots) + date_snapshots)
+    receipt = next(
+        (check for check in checks if check.context_citation == basis.prior_question), None
+    )
+    if receipt is None:
+        return ("historical_relationship_receipt_missing_or_mismatched",), ()
+    snapshots = current_snapshots
+    receipts = [receipt]
+    if receipt.answer_disputed or basis.reading_resolution is not None:
+        resolution_issue, subject_receipt, resolution_snapshots = _verify_reading_resolution(
+            root, inventory, proposal, receipt, checks, render_hashes, requirement, scan_checks
+        )
+        if resolution_issue:
+            return (resolution_issue,), ()
+        if subject_receipt is not None:
+            receipts.append(subject_receipt)
+        snapshots.extend(resolution_snapshots)
+    choice_contexts = (
+        proposal.value is not None
+        and proposal.value.kind in ("single_select", "multi_select")
+        and receipt.field.control is not None
+    )
+    if basis.additional_contexts and not choice_contexts:
+        if basis.tenure is not None or not isinstance(proposal.value, (TextValue, NarrativeValue)):
+            return ("historical_composition_kind_not_allowed",), ()
+        for context in basis.additional_contexts:
+            part = next((c for c in checks if c.context_citation == context), None)
+            if part is None or part in receipts:
+                return ("historical_composition_receipt_missing_or_repeated",), ()
+            receipts.append(part)
+        if basis.correspondence is None or any(
+            c.field.control is not None
+            or c.answer.source_id != receipt.answer.source_id
+            or (normalized(c.role.quote) if c.role else None)
+            != (normalized(receipt.role.quote) if receipt.role else None)
+            for c in receipts
+        ):
+            return ("historical_composition_context_mismatch",), ()
+
+        def part_text(c: HistoricalContextCheck) -> str:
+            return c.field.answer.text if c.discrepancies else c.answer.quote
+
+        def joined(text: str) -> str:
+            return re.sub(r"[\s,;/&]+", " ", text).strip().casefold()
+
+        if joined(proposal.value.value) != joined(" ".join(part_text(c) for c in receipts)):
+            return ("historical_composition_has_unsupported_text",), ()
+        for checked in receipts:
+            part_proposal = proposal.model_copy(
+                update={
+                    "value": TextValue(kind="text", value=part_text(checked)),
+                    "historical_basis": basis.model_copy(
+                        update={
+                            "prior_question": checked.context_citation,
+                            "additional_contexts": (),
+                        }
+                    ),
+                }
+            )
+            if not checked.supports(part_proposal, requirement):
+                return ("historical_relationship_receipt_missing_or_mismatched",), ()
+    elif not receipt.supports(proposal, requirement):
+        return ("historical_relationship_receipt_missing_or_mismatched",), ()
+    if receipt.field.control is not None:
+        receipts.extend(
+            check
+            for check in checks
+            if check != receipt
+            and check.field.control is not None
+            and check.answer in proposal.citations
+            and check.supports(proposal, requirement)
+        )
+        if requirement is not None and requirement.choices is not None:
+            selected = (
+                set(proposal.value.selected)
+                if proposal.value is not None
+                and proposal.value.kind in ("single_select", "multi_select")
+                else set()
+            )
+            covered: set[str] = set()
+            for checked in receipts:
+                option_id = control_option_id(
+                    checked.field, checked.transcript.historical_fields, requirement, mapping
+                )
+                if option_id is not None:
+                    covered.add(option_id)
+            observed: set[str] = set()
+            main_role = receipt.field.section_role
+            for field in receipt.transcript.historical_fields:
+                field_role = field.section_role
+                if (
+                    field.control is None
+                    or field.control.state == "unselected"
+                    or normalized(field.question.text) != normalized(receipt.field.question.text)
+                    or (normalized(field_role.text) if field_role else None)
+                    != (normalized(main_role.text) if main_role else None)
+                ):
+                    continue
+                option_id = control_option_id(
+                    field, receipt.transcript.historical_fields, requirement, mapping
+                )
+                if field.control.state == "ambiguous" or option_id is None:
+                    return ("historical_selected_controls_incomplete_or_ambiguous",), ()
+                observed.add(option_id)
+            if selected != covered or selected != observed:
+                return ("historical_selected_controls_incomplete_or_ambiguous",), ()
+            value = proposal.value
+            if value is not None and value.kind in ("single_select", "multi_select"):
+                required_write_ins = {
+                    option.option_id
+                    for option in requirement.choices.options
+                    if option.option_id in selected and option.write_in
+                }
+                if not required_write_ins <= {w.option_id for w in value.write_ins}:
+                    return ("historical_write_in_relationship_unresolved",), ()
+                for write_in in value.write_ins:
+                    control = next(
+                        (
+                            c
+                            for c in receipts
+                            if control_option_id(
+                                c.field, c.transcript.historical_fields, requirement, mapping
+                            )
+                            == write_in.option_id
+                        ),
+                        None,
+                    )
+                    linked = [
+                        c
+                        for c in checks
+                        if control is not None
+                        and c.field.control is None
+                        and c.answer in proposal.citations
+                        and c.question.source_id == control.question.source_id
+                        and c.question.page == control.question.page
+                        and normalized(c.field.answer.text) == normalized(write_in.text)
+                        and abs(c.field.answer.box.top - control.field.answer.box.top) <= 25
+                        and 0 <= c.field.answer.box.left - control.field.answer.box.left <= 200
+                        and normalized(c.field.question.text).strip(" _:.")
+                        == normalized(control.field.answer.text).strip(" _:.")
+                    ]
+                    if linked and all(
+                        c.answer == linked[0].answer
+                        and max(
+                            abs(a - b)
+                            for a, b in zip(
+                                c.field.answer.box.model_dump().values(),
+                                linked[0].field.answer.box.model_dump().values(),
+                                strict=True,
+                            )
+                        )
+                        <= 8
+                        for c in linked
+                    ):
+                        linked = [min(linked, key=lambda c: len(c.discrepancies))]
+                    if len(linked) != 1:
+                        return ("historical_write_in_relationship_unresolved",), ()
+                    receipts.extend(c for c in linked if c not in receipts)
+                linked_contexts = {c.context_citation for c in receipts if c.field.control is None}
+                if any(c not in linked_contexts for c in basis.additional_contexts):
+                    return ("historical_write_in_relationship_unresolved",), ()
+    for checked in receipts:
+        current: list[tuple[OcrCitation, bytes]] = []
+        for citation in checked.ocr_citations:
+            issue, raw, _ = verify_ocr_citation(root, inventory, citation, render_hashes)
+            if issue or raw is None:
+                return (issue or "historical_relationship_artifact_unavailable",), ()
+            current.append((citation, raw))
+        if not current or not checked.recheck(
+            root, inventory, current[0][1], allow_disagreements=allow_disagreements
+        ):
+            return ("historical_relationship_text_or_geometry_disagrees",), ()
+        snapshots.extend(current)
+    date_issues, date_snapshots = _verify_signature_metadata(
+        root, inventory, proposal, checks, render_hashes
+    )
+    if date_issues:
+        return date_issues, ()
+    return (), tuple(snapshots) + date_snapshots
+
+
+def _verify_reading_resolution(
+    root: Path,
+    inventory: Inventory,
+    proposal: AnswerProposal,
+    receipt: HistoricalContextCheck,
+    checks: tuple[HistoricalContextCheck, ...],
+    render_hashes: dict[tuple[str, int], str],
+    requirement: Requirement | None,
+    scan_checks: tuple[ScanCheck, ...],
+) -> tuple[str | None, HistoricalContextCheck | None, tuple[tuple[OcrCitation, bytes], ...]]:
+    basis = proposal.historical_basis
+    resolution = basis.reading_resolution if basis is not None else None
+    value = proposal.value
+    if resolution is None:
+        return "reading_conflict_requires_reconciliation", None, ()
+    if (
+        not isinstance(value, (IdentifierValue, TextValue))
+        or receipt.field.control is not None
+        or basis is None
+        or basis.tenure is not None
+        or basis.additional_contexts
+        or value.value not in (receipt.field.answer.text, receipt.answer.quote)
+        or requirement is None
+    ):
+        return "reading_resolution_value_or_context_invalid", None, ()
+    subject = next((c for c in checks if c.context_citation == resolution.subject_context), None)
+    if (
+        subject is None
+        or subject == receipt
+        or subject.discrepancies
+        or subject.field.control is not None
+        or subject.answer.source_id != receipt.answer.source_id
+        or normalized(subject.answer.quote) != normalized(resolution.subject)
+        or not re.search(r"\bname\b", subject.question.quote, re.IGNORECASE)
+        or (normalized(subject.role.quote) if subject.role else None)
+        != (normalized(receipt.role.quote) if receipt.role else None)
+    ):
+        return "reading_resolution_subject_not_verified", None, ()
+    citation = resolution.citation
+    source = next((s for s in inventory.sources if s.source_id == citation.source_id), None)
+    original = next((s for s in inventory.sources if s.source_id == receipt.answer.source_id), None)
+    if (
+        source is None
+        or original is None
+        or source.family == "historical_reference"
+        or source.sha256 == original.sha256
+        or citation not in proposal.citations
+    ):
+        return "reading_resolution_requires_independent_current_source", None, ()
+    label = normalized(resolution.field_label).strip(" :.#")
+    if (
+        len(label) < 3
+        or not re.search(
+            r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalized(receipt.field.question.text)
+        )
+        or not re.search(
+            r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalized(receipt.question.quote)
+        )
+        or not re.search(
+            r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalized(requirement.instruction)
+        )
+        or not re.search(
+            r"(?<!\w)"
+            + re.escape(normalized(resolution.subject))
+            + r"[\s;,:.-]+"
+            + re.escape(label)
+            + r"\s*[:#=-]?\s*"
+            + re.escape(normalized(value.value))
+            + r"(?!\w)",
+            normalized(citation.quote),
+        )
+    ):
+        return "reading_resolution_identity_field_value_not_linked", None, ()
+    for other in (receipt.field.answer.text, receipt.answer.quote):
+        if other != value.value and re.search(
+            r"(?<!\w)"
+            + re.escape(normalized(resolution.subject))
+            + r"[\s;,:.-]+"
+            + re.escape(label)
+            + r"\s*[:#=-]?\s*"
+            + re.escape(normalized(other))
+            + r"(?!\w)",
+            normalized(citation.quote),
+        ):
+            return "reading_resolution_corroborating_quote_conflicts", None, ()
+    if isinstance(citation, OcrCitation):
+        issue, raw, _ = verify_ocr_citation(root, inventory, citation, render_hashes)
+        if (
+            issue
+            or raw is None
+            or not any(
+                c.citation == citation
+                and normalized(c.expected_subject) == normalized(resolution.subject)
+                and c.supports(requirement, proposal)
+                and c.agrees_with_artifact(raw)
+                for c in scan_checks
+            )
+        ):
+            return "reading_resolution_current_scan_not_verified", None, ()
+        return None, subject, ((citation, raw),)
+    _, issues = check_native_citations(root, inventory, (citation,))
+    if issues:
+        return "reading_resolution_current_quote_not_verified", None, ()
+    return None, subject, ()
+
+
+def _verify_signature_metadata(
+    root: Path,
+    inventory: Inventory,
+    proposal: AnswerProposal,
+    checks: tuple[HistoricalContextCheck, ...],
+    render_hashes: dict[tuple[str, int], str],
+) -> tuple[tuple[str, ...], tuple[tuple[OcrCitation, bytes], ...]]:
+    basis = proposal.historical_basis
+    if (
+        basis is not None
+        and basis.tenure is not None
+        and isinstance(basis.tenure.date_context, HistoricalContextCitation)
+    ):
+        from bd_packet_builder.historical_time import signature_proposal, signed_date
+
+        date_receipt = next(
+            (c for c in checks if c.context_citation == basis.tenure.date_context), None
+        )
+        if date_receipt is None or (
+            not re.search(r"\bdate\b", date_receipt.field.question.text, re.IGNORECASE)
+            or not re.search(
+                r"\b(sign(?:ed|ature)|executed)\b", date_receipt.transcript.text, re.IGNORECASE
+            )
+        ):
+            return ("historical_signature_context_unresolved",), ()
+        dates: set[date] = set()
+        for checked in checks:
+            if checked.answer.source_id != date_receipt.answer.source_id or not re.search(
+                r"\bdate\b", checked.field.question.text, re.IGNORECASE
+            ):
+                continue
+            try:
+                dates.add(signed_date(checked.field.answer.text))
+            except ValueError:
+                continue
+        if dates != {basis.tenure.signed_on}:
+            return ("historical_signature_dates_conflict_or_unresolved",), ()
+        date_issues, date_snapshots = verify_historical_context(
+            root,
+            inventory,
+            signature_proposal(proposal),
+            checks,
+            render_hashes,
+            allow_disagreements=False,
+        )
+        if not date_issues and not any(
+            re.search(
+                r"\b(sign(?:ed|ature)|executed)\b",
+                ocr_text(parse_ocr_artifact(raw).words),
+                re.IGNORECASE,
+            )
+            for _, raw in date_snapshots
+        ):
+            return ("historical_signature_anchor_not_locally_verified",), ()
+        return date_issues, date_snapshots
+    return (), ()
+
+
 def _writable(mapped: MappedResponse) -> list[PageBox | NarrativeRegion]:
     regions: list[PageBox | NarrativeRegion] = [o.box for o in mapped.options]
+    if mapped.checklist_box is not None:
+        regions.append(mapped.checklist_box)
     regions.extend(o.write_in_region for o in mapped.options if o.write_in_region is not None)
     if mapped.narrative_region is not None:
         regions.append(mapped.narrative_region)
@@ -595,6 +1099,10 @@ def publish_draft(
         raise DraftError("Draft review contains an unknown requirement")
     if not set(review.attachment_source_ids) <= set(request.attachments):
         raise DraftError("Attachment review contains an unknown attachment")
+    if not set(review.historical_exhibit_ids) <= {
+        e.exhibit_id for e in request.historical_exhibits
+    }:
+        raise DraftError("Exhibit review contains an unknown selection")
     if any(
         requirements[d.requirement_id].kind in ("signature", "signature_date")
         and d.decision == "draft_verified"
@@ -693,6 +1201,20 @@ def publish_draft(
         raise DraftError("Writable region overlaps protected signing or other content")
     inventory = selected_inventory(root, request)
     sources = {s.source_id: s for s in inventory.sources}
+    with pdfium.PdfDocument(original) as document:
+        form_text: dict[int, str] = {}
+        for index in range(len(document)):
+            with closing(document[index]) as page, closing(page.get_textpage()) as text:
+                form_text[index + 1] = text.get_text_bounded(errors="strict").replace("\r\n", "\n")
+    assessments = {a.requirement_id: a for a in review.requirement_assessments}
+    for proposal in request.proposals.proposals:
+        assessment = assessments.get(proposal.requirement_id)
+        if (
+            assessment is not None
+            and assessment.applicability != "required"
+            and proposal.outcome == "proposed"
+        ):
+            raise DraftError("Applicability review cannot discard a proposed answer")
     if not set(request.attachments) <= sources.keys():
         raise DraftError("Attachment is not a version-bound selected source")
     if any(sources[i].family == "historical_reference" for i in request.attachments):
@@ -707,8 +1229,28 @@ def publish_draft(
     attachment_readers = [
         (source, _validate_pdf(data, blank=False)) for source, data in attachments
     ]
+    approved_exhibits = tuple(
+        e for e in request.historical_exhibits if e.exhibit_id in review.historical_exhibit_ids
+    )
+    exhibit_data = []
+    for exhibit in approved_exhibits:
+        try:
+            data = extract_exhibit(
+                root,
+                inventory,
+                exhibit,
+                proposals=request.proposals.proposals,
+                image_checks=review.exhibit_image_checks,
+            )
+        except ExhibitError as error:
+            raise DraftError(str(error)) from None
+        exhibit_data.append((exhibit, data, _validate_pdf(data, blank=False)))
+    exhibit_page_count = sum(len(r.pages) for _, _, r in exhibit_data)
     form_count = len(reader.pages) + sum(len(form.pages) for _, _, form in additional_forms_data)
-    if form_count + sum(len(r.pages) for _, r in attachment_readers) > MAX_PACKET_PAGES:
+    if (
+        form_count + exhibit_page_count + sum(len(r.pages) for _, r in attachment_readers)
+        > MAX_PACKET_PAGES
+    ):
         raise DraftError("Draft packet exceeds its total page budget")
     decisions = {d.requirement_id: d for d in review.decisions}
     mappings = {m.requirement.requirement_id: m for m in request.layout.responses}
@@ -722,12 +1264,132 @@ def publish_draft(
     supplement_page_count = 0
     ocr_render_hashes: dict[tuple[str, int], str] = {}
     ocr_artifact_snapshots: dict[Path, bytes] = {}
-    for proposal in request.proposals.proposals:
+
+    def verify_assessment_ocr(citation: OcrCitation) -> None:
+        issue, snapshot, _ = verify_ocr_citation(root, inventory, citation, ocr_render_hashes)
+        if issue or snapshot is None:
+            raise DraftError(issue or "Assessment OCR artifact unavailable")
+        ocr_artifact_snapshots[Path(citation.artifact_path)] = snapshot
+
+    try:
+        validate_assessments(
+            root,
+            inventory,
+            request.requirements.requirements,
+            review.requirement_assessments,
+            form_text,
+            verify_ocr=verify_assessment_ocr,
+        )
+    except ReconciliationError as error:
+        raise DraftError(str(error)) from None
+    for exhibit in approved_exhibits:
+        if isinstance(exhibit.title, OcrCitation):
+            path = Path(exhibit.title.artifact_path)
+            ocr_artifact_snapshots[path] = read_local_input(
+                root, path, Path("outputs"), 2 * 1024 * 1024
+            )
+            if (
+                hashlib.sha256(ocr_artifact_snapshots[path]).hexdigest()
+                != exhibit.title.artifact_sha256
+            ):
+                raise DraftError("Exhibit OCR artifact changed during assembly")
+
+    def reserve_supplement(identity: str, text: str) -> None:
+        nonlocal supplement_page_count
+        full = wrap_text(text, 520.0, 10.0, _measure)
+        if full is None:
+            raise DraftError("Answer has an unbreakable word that cannot fit")
+        count = max(1, math.ceil(len(full) / SUPPLEMENT_LINES))
+        if (
+            supplement_page_count
+            + count
+            + form_count
+            + exhibit_page_count
+            + sum(len(r.pages) for _, r in attachment_readers)
+            > MAX_PACKET_PAGES
+        ):
+            raise DraftError("Answer exceeds the bounded supplemental page budget")
+        supplement_starts[identity] = supplement_page_count + 1
+        supplement_page_count += count
+        supplements.append((identity, full))
+
+    written_by_id: dict[str, AnswerProposal] = {}
+    requirement_order = {
+        r.requirement_id: i for i, r in enumerate(request.requirements.requirements)
+    }
+    for proposal in sorted(
+        request.proposals.proposals, key=lambda p: requirement_order[p.requirement_id]
+    ):
         identity = proposal.requirement_id
         req = requirements[identity]
+        assessment = assessments.get(identity)
+        if assessment is not None and assessment.applicability != "required":
+            results.append(
+                {
+                    "requirement_id": identity,
+                    "status": "optional_not_supplied"
+                    if assessment.applicability == "optional"
+                    else "not_applicable",
+                    "issues": [],
+                    "proposal": proposal.model_dump(mode="json"),
+                    "review_reason": assessment.reason,
+                    "effective_explanation": assessment.reason,
+                    "evidence_status": "reviewed_applicability_not_an_answer",
+                    "requirement_assessment": assessment.model_dump(mode="json"),
+                }
+            )
+            continue
+        conditional = conditional_applicability(
+            request.requirements.requirements, req, written_by_id
+        )
+        if conditional is not None and conditional.applicable is not True:
+            basis = (
+                "historical candidate, NOT confirmation of current facts"
+                if conditional.historical_candidate
+                else "written answer"
+            )
+            reason = (
+                f"Conditional follow-up is not applicable because {conditional.parent_id} "
+                f"is No ({basis}). No explanation is required on that basis."
+                if conditional.applicable is False
+                else f"Conditional applicability unresolved: {conditional.parent_id} was not "
+                "written with an explicit Yes or No. Resolve the parent first."
+            )
+            results.append(
+                {
+                    "requirement_id": identity,
+                    "status": "not_applicable" if conditional.applicable is False else "blank",
+                    "issues": []
+                    if conditional.applicable is False
+                    else ["conditional_parent_unresolved"],
+                    "proposal": proposal.model_dump(mode="json"),
+                    "review_reason": reason,
+                    "effective_explanation": reason,
+                    "conditional": asdict(conditional),
+                    "evidence_status": "historical_continuity_unconfirmed"
+                    if conditional.historical_candidate
+                    else None,
+                }
+            )
+            continue
         decision = decisions.get(identity)
         mapped = mappings.get(identity)
         check = check_proposal(root, inventory, req, proposal)
+        context_issues, context_snapshots = verify_historical_context(
+            root,
+            inventory,
+            proposal,
+            review.historical_context_checks,
+            ocr_render_hashes,
+            req,
+            request.historical_policy == "answer_first_review",
+            mapped,
+            review.scan_checks,
+        )
+        answer_citations = historical_answer_citations(proposal, context_snapshots)
+        context_verified = bool(answer_citations) and not context_issues
+        for context_citation, context_snapshot in context_snapshots:
+            ocr_artifact_snapshots[Path(context_citation.artifact_path)] = context_snapshot
         history_issues, evidence_status = historical_issues(
             root,
             inventory,
@@ -736,7 +1398,12 @@ def publish_draft(
             req,
             proposal,
             navigation_context=request.navigation_context.get(identity, ""),
+            context_verified=context_verified,
+            historical_policy=request.historical_policy,
+            calculation_date=request.calculation_date,
+            verified_current_scans=tuple(c for c, _ in context_snapshots),
         )
+        history_issues = (*context_issues, *history_issues)
         issues: list[str] = []
         result: dict[str, object] = {
             "requirement_id": identity,
@@ -745,8 +1412,30 @@ def publish_draft(
             "proposal": proposal.model_dump(mode="json"),
             "citation_check": asdict(check),
             "review_reason": decision.reason if decision else None,
+            "effective_explanation": proposal.explanation,
             "evidence_status": evidence_status,
         }
+        discrepancies = {
+            d.model_dump_json(): d.model_dump(mode="json")
+            for c in review.historical_context_checks
+            if c.supports(proposal, req) or c.answer in proposal.citations
+            for d in c.discrepancies
+        }
+        if discrepancies:
+            result["historical_extraction_discrepancies"] = list(discrepancies.values())
+            result["historical_candidate_status"] = (
+                "reconciled_with_independent_evidence"
+                if context_verified
+                and proposal.historical_basis is not None
+                and proposal.historical_basis.reading_resolution is not None
+                else "reconciled_with_native_text_and_ocr"
+                if context_verified
+                and any(
+                    d["code"] == "historical_native_numeric_layout_reconciled"
+                    for d in discrepancies.values()
+                )
+                else "extraction_discrepancy_unresolved"
+            )
         ocr_citations = tuple(c for c in proposal.citations if isinstance(c, OcrCitation))
         ocr_evidence: list[dict[str, object]] = []
         ocr_valid = True
@@ -764,6 +1453,17 @@ def publish_draft(
         if ocr_citations:
             result["ocr_evidence"] = ocr_evidence
         results.append(result)
+        if conditional is not None:
+            result["conditional"] = asdict(conditional)
+            result["review_reason"] = (
+                f"{conditional.parent_id} is Yes; its conditional explanation is required. "
+                + (
+                    "The explanation has not been supplied."
+                    if proposal.outcome != "proposed"
+                    else (decision.reason if decision else "Not reviewed.")
+                )
+            )
+            result["effective_explanation"] = result["review_reason"]
         if req.kind in ("signature", "signature_date"):
             issues.append("human_signing_required")
             continue
@@ -778,7 +1478,8 @@ def publish_draft(
             continue
         if ocr_citations:
             machine_checked = all(
-                any(
+                (context_verified and citation in answer_citations)
+                or any(
                     check.citation == citation
                     and check.supports(req, proposal)
                     and Path(citation.artifact_path) in ocr_artifact_snapshots
@@ -841,18 +1542,27 @@ def publish_draft(
                     for c in proposal.citations
                 ):
                     raise DraftError("Exact identifier is not present in the cited evidence")
-                candidate_texts.append(
-                    TextPlacement(
-                        mapped.text_region,
-                        _lines(
-                            ("Yes" if value.value else "No")
-                            if isinstance(value, BooleanValue)
-                            else value.value,
-                            mapped.text_region,
-                        ),
-                    )
+                text = (
+                    ("Yes" if value.value else "No")
+                    if isinstance(value, BooleanValue)
+                    else value.value
                 )
-                placements[identity] = {"mode": "inline"}
+                if any(not (32 <= ord(c) <= 126 or c == "\n") for c in text):
+                    raise DraftError(
+                        "Unsupported font characters; answer needs a reviewed font/layout"
+                    )
+                region = mapped.text_region
+                lines = wrap_text(text, region.right - region.left, region.font_size, _measure)
+                overflow = lines is None or len(lines) > math.floor(
+                    (region.top - region.bottom) / region.leading
+                )
+                if overflow and isinstance(value, TextValue):
+                    _lines(f"See packet page {MAX_PACKET_PAGES}.", region)
+                    reserve_supplement(identity, text)
+                    placements[identity] = {"mode": "supplement"}
+                else:
+                    candidate_texts.append(TextPlacement(region, _lines(text, region)))
+                    placements[identity] = {"mode": "inline"}
             elif isinstance(value, (SingleSelectValue, MultiSelectValue)):
                 for option in mapped.options:
                     if option.option_id in value.selected:
@@ -893,21 +1603,7 @@ def publish_draft(
                         f"See Supplemental Answers, {identity}, packet page {MAX_PACKET_PAGES}.",
                         narrative_region,
                     )
-                    full = wrap_text(value.value, 520.0, 10.0, _measure)
-                    if full is None:
-                        raise DraftError("Narrative has an unbreakable word that cannot fit")
-                    count = max(1, math.ceil(len(full) / SUPPLEMENT_LINES))
-                    if (
-                        supplement_page_count
-                        + count
-                        + form_count
-                        + sum(len(r.pages) for _, r in attachment_readers)
-                        > MAX_PACKET_PAGES
-                    ):
-                        raise DraftError("Narrative exceeds the bounded supplemental page budget")
-                    supplement_starts[identity] = supplement_page_count + 1
-                    supplement_page_count += count
-                    supplements.append((identity, full))
+                    reserve_supplement(identity, value.value)
                 placements[identity] = {"mode": "supplement" if overflow else "inline"}
             else:
                 raise DraftError("This draft slice does not write this answer type")
@@ -919,6 +1615,78 @@ def publish_draft(
         result["status"] = "written_to_draft"
         issues.append("draft_only_requires_final_human_review")
         accepted.append(proposal)
+        written_by_id[identity] = proposal
+
+    results_by_id = {str(r["requirement_id"]): r for r in results}
+    reconciled: set[str] = set()
+
+    def reconcile(identity: str) -> None:
+        if identity in reconciled:
+            return
+        assessment = assessments.get(identity)
+        if assessment is None:
+            return
+        for dependency in assessment.depends_on:
+            reconcile(dependency)
+        result = results_by_id[identity]
+        coverage = reconcile_requirement(
+            assessment,
+            {key: str(r["status"]) for key, r in results_by_id.items()},
+            tuple(attachment_ids),
+        )
+        result["requirement_assessment"] = assessment.model_dump(mode="json")
+        result["coverage"] = asdict(coverage)
+        if assessment.applicability == "required" and requirements[identity].kind == "attachment":
+            if coverage.satisfied and requires_personal_action(requirements[identity]):
+                raise DraftError("Checklist cannot clear a new personal act")
+            result["review_reason"] = assessment.reason
+            result["effective_explanation"] = assessment.reason
+            result["issues"] = (
+                [] if coverage.satisfied else ["requirement_coverage_" + coverage.evidence_state]
+            )
+            result["status"] = "requirement_satisfied" if coverage.satisfied else "blank"
+            mapping = mappings.get(identity)
+            if coverage.satisfied and mapping is not None and mapping.checklist_box is not None:
+                marks.append(MarkPlacement(mapping.checklist_box, "checkbox"))
+                result["checklist_state"] = "marked"
+            else:
+                result["checklist_state"] = (
+                    "satisfied_placement_unavailable" if coverage.satisfied else "not_satisfied"
+                )
+        reconciled.add(identity)
+
+    for identity in assessments:
+        reconcile(identity)
+    results.sort(key=lambda result: requirement_order[str(result["requirement_id"])])
+    completion = {
+        "populated": sum(r["status"] == "written_to_draft" for r in results),
+        "conditional_not_applicable": sum(
+            r["status"] == "not_applicable" and "conditional" in r for r in results
+        ),
+        "not_applicable": sum(
+            r["status"] == "not_applicable" and "conditional" not in r for r in results
+        ),
+        "optional_not_supplied": sum(r["status"] == "optional_not_supplied" for r in results),
+        "evidence_satisfied": sum(r["status"] == "requirement_satisfied" for r in results),
+        "human_action_required": 0,
+        "unresolved": 0,
+    }
+    for result in results:
+        if result["status"] != "blank":
+            continue
+        req = requirements[str(result["requirement_id"])]
+        result_issues = result["issues"]
+        human = requires_personal_action(req) or (
+            isinstance(result_issues, list)
+            and (
+                "historical_personal_act_not_permitted" in result_issues
+                or "unresolved_signer" in result_issues
+                or "deferred_to_signing" in result_issues
+            )
+        )
+        disposition = "human_action_required" if human else "unresolved"
+        result["completion_disposition"] = disposition
+        completion[disposition] += 1
 
     section_data = [
         PacketSection(
@@ -954,6 +1722,15 @@ def publish_draft(
             role="evidence",
         )
         for source, attachment_reader in attachment_readers
+    )
+    section_data.extend(
+        PacketSection(
+            section_id=exhibit.exhibit_id,
+            source_sha256=hashlib.sha256(data).hexdigest(),
+            page_count=len(exhibit_reader.pages),
+            role="evidence",
+        )
+        for exhibit, data, exhibit_reader in exhibit_data
     )
     pagination = PacketPagination(sections=tuple(section_data))
     accepted_by_id = {proposal.requirement_id: proposal for proposal in accepted}
@@ -1006,6 +1783,17 @@ def publish_draft(
             else "Historical draft basis; internal reviewer confirmation required."
         )
         supplement_evidence[identity] = evidence_text
+        if isinstance(proposal.value, TextValue) and identity in supplement_starts:
+            scalar_region = mappings[identity].text_region
+            if scalar_region is None:
+                raise DraftError("Text mapping disappeared")
+            start = pagination.resolve(
+                PacketReference(section_id="answers", page=supplement_starts[identity]),
+                role="supplemental_answers",
+            )
+            texts.append(
+                TextPlacement(scalar_region, _lines(f"See packet page {start}.", scalar_region))
+            )
         if isinstance(proposal.value, NarrativeValue):
             answer_narrative_region = mappings[identity].narrative_region
             if answer_narrative_region is None:
@@ -1078,6 +1866,10 @@ def publish_draft(
             start = len(writer.pages)
             writer.append(attachment_reader, import_outline=False)
             writer.add_outline_item(f"Evidence {source.source_id[:12]}", start)
+        for exhibit, _, exhibit_reader in exhibit_data:
+            start = len(writer.pages)
+            writer.append(exhibit_reader, import_outline=False)
+            writer.add_outline_item(f"Historical exhibit {exhibit.exhibit_id}", start)
         writer.add_metadata({"/Title": "INCOMPLETE DRAFT - NOT FOR SUBMISSION"})
         buffer = BytesIO()
         writer.write(buffer)
@@ -1110,8 +1902,9 @@ def publish_draft(
                 raise DraftError("OCR evidence changed; no output published")
 
     payload: dict[str, object] = {
+        "domain_knowledge": knowledge_context(),
         "schema_version": 1,
-        "writer_version": "reviewed-draft-overlay-v5",
+        "writer_version": "reviewed-draft-overlay-v14",
         "created_at": datetime.now(UTC).isoformat(),
         "status": "incomplete_draft_not_for_submission",
         "mode": request.mode,
@@ -1126,10 +1919,27 @@ def publish_draft(
         "additional_forms": additional_form_manifest,
         "packet_sha256": hashlib.sha256(packet).hexdigest(),
         "written_requirements": [p.requirement_id for p in accepted],
+        "completion": completion,
         "answers": results,
         "placements": placements,
         "pagination": pagination.model_dump(mode="json"),
         "sources": [asdict(s) for s in inventory.sources],
+        "historical_exhibits": [
+            {
+                **exhibit.model_dump(mode="json"),
+                "exhibit_id": exhibit.exhibit_id,
+                "extracted_sha256": hashlib.sha256(data).hexdigest(),
+                "source_sha256": sources[exhibit.title.source_id].sha256,
+                "source_path": sources[exhibit.title.source_id].path,
+            }
+            for exhibit, data, _ in exhibit_data
+        ],
+        "supporting_document_audit": [
+            a.model_dump(mode="json")
+            for a in audit_support(
+                tuple(accepted), inventory, tuple(attachment_ids), approved_exhibits
+            )
+        ],
         "historical_archive": (
             request.historical_archive.model_dump(mode="json")
             if request.historical_archive
@@ -1185,16 +1995,19 @@ def publish_draft(
                         closing(document[number - 1]) as page,
                         closing(page.get_textpage()) as text,
                     ):
-                        actual = " ".join(
-                            text.get_text_bounded(
-                                left=40.0, bottom=105.0, right=560.0, top=705.0, errors="strict"
-                            ).split()
+                        extracted = text.get_text_bounded(
+                            left=40.0, bottom=105.0, right=560.0, top=705.0, errors="strict"
                         )
+                        # PDFium replaces a visible line-ending hyphen and break with STX.
+                        actual = " ".join(extracted.replace("\x02", "- ").split())
                         expected = " ".join(
                             " ".join(lines[offset : offset + SUPPLEMENT_LINES]).split()
                         )
                         if expected not in actual:
-                            raise DraftError("Supplemental answer is missing or clipped")
+                            raise DraftError(
+                                f"Supplemental answer is missing or clipped: {identity}, "
+                                f"page {number}"
+                            )
                     with _render_image(packet, number - 1) as image:
                         image.save(output / f"supplement-page-{number}.png")
         render["supplement_pages_rendered_and_text_checked"] = supplement_page_count
@@ -1207,6 +2020,7 @@ def publish_draft(
             f"Mode: {request.mode}",
             "Coverage: declared subset only; all other form fields remain unresolved.",
             "Signatures and signature dates must be completed only by humans at signing.",
+            f"Completion: {completion}. Conditional not-applicable is NOT a populated answer.",
         ]
         for form in additional_form_manifest:
             summary.append(
@@ -1216,7 +2030,133 @@ def publish_draft(
         if review.reviewer_notes:
             summary.extend(["", "Reviewer notes:"])
             summary.extend(f"- {note}" for note in review.reviewer_notes)
-        for item, proposal in zip(results, request.proposals.proposals, strict=True):
+        summary.extend(["", "REVIEWER ACTION LIST (internal only):"])
+        for item in results:
+            identity = str(item["requirement_id"])
+            if item["status"] in ("blank", "requirement_satisfied") or identity in assessments:
+                assessment = assessments.get(identity)
+                summary.append(
+                    f"- Form page {requirements[identity].page}, {identity}: "
+                    f"{'LEFT BLANK' if item['status'] == 'blank' else item['status']}; "
+                    + (
+                        "Conflicting readings were not resolved with verified evidence "
+                        "linking the same subject, field and value."
+                        if item.get("historical_extraction_discrepancies")
+                        else str(item.get("effective_explanation") or item["review_reason"])
+                    )
+                )
+                if item["status"] == "blank":
+                    summary.append(
+                        f"  Validation details: {item['review_reason']}; "
+                        f"writer checks: {item['issues']}"
+                    )
+                if item.get("historical_extraction_discrepancies"):
+                    summary.append(
+                        "  Conflicting extraction readings: "
+                        + json.dumps(item["historical_extraction_discrepancies"])
+                    )
+                if assessment is not None:
+                    summary.append(
+                        f"  Reviewed applicability: {assessment.applicability}; "
+                        f"reviewer/provenance: {assessment.reviewer}. "
+                        "Local review input is not authenticated approval."
+                    )
+                    for criterion in assessment.criteria:
+                        summary.append(
+                            f"  Issuer criterion: {criterion.issuer_quote}; "
+                            f"coverage={criterion.status}. {criterion.explanation}"
+                        )
+                        if criterion.status not in ("supported", "not_applicable"):
+                            summary.append(f"  ACTION: {criterion.action}")
+                        for assessed_citation in criterion.evidence:
+                            assessed_source = sources[assessed_citation.source_id]
+                            in_packet = assessed_citation.source_id in attachment_ids
+                            packet_page = (
+                                pagination.resolve(
+                                    PacketReference(
+                                        section_id=assessed_citation.source_id,
+                                        page=assessed_citation.page,
+                                    ),
+                                    role="evidence",
+                                )
+                                if in_packet
+                                else "not included"
+                            )
+                            summary.append(
+                                f"  Evidence: {assessed_source.path}; "
+                                f"sha256={assessed_source.sha256}; "
+                                f"source page {assessed_citation.page}; packet page {packet_page}; "
+                                "inclusion alone is not requirement satisfaction."
+                            )
+                    if assessment.depends_on:
+                        summary.append(
+                            "  Completion evaluated from actual required-item outcomes: "
+                            + str(item.get("coverage"))
+                        )
+                    for note in assessment.historical_notes:
+                        assessed_source = sources[note.citation.source_id]
+                        summary.append(
+                            f"  HISTORICAL LIMITATION, NOT INITIALS OR CURRENT CONFIRMATION: "
+                            f"{note.citation.quote}; {note.explanation} "
+                            f"Source: {assessed_source.path}; sha256={assessed_source.sha256}; "
+                            f"page {note.citation.page}. ACTION: {note.action}"
+                        )
+                elif item["status"] == "blank":
+                    summary.append(
+                        "  ACTION: Verify the conflicting readings against an independent "
+                        "source for the same subject and field; enter the supported value "
+                        "only after verification."
+                        if item.get("historical_extraction_discrepancies")
+                        else "  ACTION: "
+                        + str(item.get("effective_explanation") or item["review_reason"])
+                    )
+            elif item["status"] == "written_to_draft":
+                proposal = next(
+                    p for p in request.proposals.proposals if p.requirement_id == identity
+                )
+                basis = proposal.historical_basis
+                if basis is not None and basis.reading_resolution is not None:
+                    summary.append(
+                        f"- Form page {requirements[identity].page}, {identity}: "
+                        "FILLED AFTER RECONCILIATION; selected value "
+                        + str(proposal.value.model_dump(mode="json") if proposal.value else None)
+                        + "; independent identity/field evidence "
+                        + basis.reading_resolution.citation.model_dump_json()
+                        + "; original readings "
+                        + json.dumps(item.get("historical_extraction_discrepancies", []))
+                    )
+                elif (
+                    item.get("historical_candidate_status") == "reconciled_with_native_text_and_ocr"
+                ):
+                    summary.append(
+                        f"- Form page {requirements[identity].page}, {identity}: "
+                        "FILLED AFTER RECONCILIATION; exact native digits and high-confidence "
+                        "OCR agree within the historical answer region. Original readings: "
+                        + json.dumps(item.get("historical_extraction_discrepancies", []))
+                    )
+        summary.extend(["", "Supporting-document completeness (not semantic approval):"])
+        for audit in audit_support(
+            tuple(accepted), inventory, tuple(attachment_ids), approved_exhibits
+        ):
+            summary.append(
+                f"- {audit.requirement_id}: current documents="
+                f"{','.join(audit.current_source_ids) or 'none'}; "
+                f"historical exhibits={','.join(audit.historical_exhibits) or 'none'}; "
+                "referenced support="
+                f"{'; '.join(audit.referenced_support) or 'none declared/detected'}; "
+                f"issues={','.join(audit.issues) or 'no physical dependency gaps detected'}."
+            )
+        for exhibit in approved_exhibits:
+            summary.append(
+                f"- HISTORICAL EXHIBIT {exhibit.exhibit_id}, requirement {exhibit.requirement_id}: "
+                f"{sources[exhibit.title.source_id].path}, source hash "
+                f"{sources[exhibit.title.source_id].sha256}, pages {exhibit.pages}. "
+                f"{exhibit.reason} LIMITATION: {exhibit.limitation} "
+                "Historical inclusion does not verify current truth or satisfy a dated claim."
+            )
+        proposals_by_id = {p.requirement_id: p for p in request.proposals.proposals}
+        for item in results:
+            proposal = proposals_by_id[str(item["requirement_id"])]
             summary_decision = decisions.get(proposal.requirement_id)
             packet_pages = placements.get(proposal.requirement_id, {}).get(
                 "evidence_packet_pages", []
@@ -1228,12 +2168,63 @@ def publish_draft(
                     f"Question: {requirements[proposal.requirement_id].instruction}",
                     f"Form page: {requirements[proposal.requirement_id].page}",
                     "Proposed value: "
-                    + (proposal.value.model_dump_json() if proposal.value else "(blank)"),
+                    + (
+                        "(not applicable; no answer written)"
+                        if item["status"] == "not_applicable"
+                        else proposal.value.model_dump_json()
+                        if proposal.value
+                        else "(blank)"
+                    ),
                     f"Review: {item['review_reason']}",
+                    f"Explanation: {item.get('effective_explanation') or '(none supplied)'}",
                     f"Evidence packet pages: {packet_pages}",
+                    "MODEL-REPORTED KNOWLEDGE APPLICATION (not verified reasoning): "
+                    + (
+                        "; ".join(
+                            f"{use.entry_id}: {use.reason}" for use in proposal.knowledge_applied
+                        )
+                        if proposal.knowledge_applied
+                        else "none reported"
+                    ),
                 ]
             )
+            if item["status"] == "not_applicable" or (
+                item["status"] != "written_to_draft" and item.get("conditional") is not None
+            ):
+                continue
+            if proposal.historical_basis is not None and isinstance(
+                proposal.historical_basis.prior_question, HistoricalContextCitation
+            ):
+                receipt = next(
+                    (
+                        c
+                        for c in review.historical_context_checks
+                        if c.context_citation == proposal.historical_basis.prior_question
+                    ),
+                    None,
+                )
+                summary.append(
+                    "Question/answer association: localized OCR and independent image reading, "
+                    "with source/render hashes and normalized question/answer/role boxes; "
+                    "not human approval or current role confirmation."
+                )
+                if receipt is not None:
+                    extraction_details = item.get("historical_extraction_discrepancies", [])
+                    if isinstance(extraction_details, list):
+                        for discrepancy in extraction_details:
+                            summary.append(
+                                "EXTRACTION DISCREPANCY - ORIGINAL READINGS "
+                                "(see final disposition): " + json.dumps(discrepancy)
+                            )
+                    summary.append(
+                        "Image-proposed association regions (0-1000, full image, top-left; "
+                        "also checked against local text geometry): "
+                        + receipt.field.model_dump_json()
+                    )
             if proposal.historical_basis is not None:
+                summary.extend(
+                    historical_review_concerns(requirements[proposal.requirement_id], proposal)
+                )
                 basis = proposal.historical_basis
                 status = (
                     "HISTORICAL - CONTINUITY UNCONFIRMED"
@@ -1251,6 +2242,15 @@ def publish_draft(
                         "to the packet.",
                     ]
                 )
+                if basis.tenure is not None:
+                    summary.append(
+                        f"DERIVED TENURE: prior={basis.tenure.prior_value}; "
+                        f"signed={basis.tenure.signed_on}; calculated as of="
+                        f"{request.calculation_date}; completed calendar anniversaries "
+                        "(February 29 anniversaries use February 28 in non-leap years). "
+                        f"Signing metadata provenance: {basis.tenure.model_dump_json()}. "
+                        "Not a verified founding/hire date or confirmation of continuity."
+                    )
                 for entry in (
                     request.historical_archive.entries if request.historical_archive else ()
                 ):
@@ -1305,7 +2305,8 @@ def publish_draft(
                     == "machine_cross_checked_draft_not_human_approval"
                 ):
                     summary.append(
-                        "Machine cross-check: OCR and independent image transcription agree; "
+                        "Machine evidence processing: see localized receipt and any extraction "
+                        "discrepancies above; agreement must not be presumed. "
                         "not human visual approval or proof of semantic support. "
                         "See answer_review.json for subject, period, prompt/model and transcript."
                     )

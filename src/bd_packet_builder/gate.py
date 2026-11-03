@@ -13,6 +13,7 @@ from pathlib import Path
 
 from bd_packet_builder.contracts import (
     EvidenceStatus,
+    HistoricalContextCitation,
     IdentifierValue,
     OcrCitation,
     TextValue,
@@ -23,16 +24,22 @@ from bd_packet_builder.draft import (
     DraftError,
     DraftRequest,
     DraftReview,
+    historical_answer_citations,
     publish_draft,
     selected_inventory,
+    verify_historical_context,
     verify_ocr_citation,
 )
-from bd_packet_builder.history import historical_issues
+from bd_packet_builder.exhibits import ExhibitError, audit_support, extract_exhibit
+from bd_packet_builder.historical_context import HistoricalContextCheck
+from bd_packet_builder.historical_time import prior_tenure_proposal
+from bd_packet_builder.history import historical_issues, primary_representative_rule
 from bd_packet_builder.local_inputs import read_local_input
-from bd_packet_builder.scan import ScanCheck
+from bd_packet_builder.reconciliation import RequirementAssessment
+from bd_packet_builder.scan import ExhibitImageCheck, ScanCheck
 
-GATE_VERSION = "answer-gate-v5"
-GATE_REVIEWER = "application_validation_gate_v5"
+GATE_VERSION = "answer-gate-v14"
+GATE_REVIEWER = "application_validation_gate_v14"
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
@@ -47,6 +54,9 @@ def validate_answers(
     *,
     selected_attachment_source_ids: tuple[str, ...] = (),
     scan_checks: tuple[ScanCheck, ...] = (),
+    historical_context_checks: tuple[HistoricalContextCheck, ...] = (),
+    exhibit_image_checks: tuple[ExhibitImageCheck, ...] = (),
+    requirement_assessments: tuple[RequirementAssessment, ...] = (),
 ) -> DraftReview:
     """Return one decision per proposal; per-answer failures become withheld decisions.
 
@@ -57,11 +67,72 @@ def validate_answers(
     if not set(selected_attachment_source_ids) <= set(request.attachments):
         raise DraftError("Explicit selection contains an unknown attachment")
     requirements = {r.requirement_id: r for r in request.requirements.requirements}
-    mappings = {m.requirement.requirement_id for m in request.layout.responses}
+    mappings = {m.requirement.requirement_id: m for m in request.layout.responses}
     attached = set(request.attachments)
     historical = {s.source_id for s in inventory.sources if s.family == "historical_reference"}
     if attached & historical:
         raise DraftError("Historical packets must never be submission attachments")
+    needed: dict[str, HistoricalContextCheck] = {}
+    receipts_by_hash = {c.context_citation.check_sha256: c for c in historical_context_checks}
+    for historical_receipt in historical_context_checks:
+        for proposal in request.proposals.proposals:
+            basis = proposal.historical_basis
+            context = basis.prior_question if basis is not None else None
+            main_receipt = (
+                receipts_by_hash.get(context.check_sha256)
+                if isinstance(context, HistoricalContextCitation)
+                else None
+            )
+            same_control_group = (
+                historical_receipt.field.control is not None
+                and isinstance(context, HistoricalContextCitation)
+                and context.source_id == historical_receipt.question.source_id
+                and context.page == historical_receipt.question.page
+                and context.quote == historical_receipt.context_citation.quote
+                and main_receipt is not None
+                and historical_receipt.transcript == main_receipt.transcript
+            )
+            value = prior_tenure_proposal(proposal).value
+            write_in_receipt = (
+                historical_receipt.field.control is None
+                and historical_receipt.answer in proposal.citations
+                and value is not None
+                and value.kind in ("single_select", "multi_select")
+                and any(
+                    _normalized(w.text) == _normalized(historical_receipt.field.answer.text)
+                    for w in value.write_ins
+                )
+            )
+            if (
+                write_in_receipt
+                or same_control_group
+                or (
+                    basis is not None
+                    and (
+                        basis.prior_question == historical_receipt.context_citation
+                        or basis.reading_resolution is not None
+                        and basis.reading_resolution.subject_context
+                        == historical_receipt.context_citation
+                    )
+                )
+                or (
+                    basis is not None
+                    and basis.tenure is not None
+                    and basis.tenure.date_context == historical_receipt.context_citation
+                )
+                or (
+                    basis is not None
+                    and basis.additional_contexts
+                    and (
+                        historical_receipt.context_citation in basis.additional_contexts
+                        or basis.prior_question == historical_receipt.context_citation
+                    )
+                )
+                or historical_receipt.supports(proposal, requirements[proposal.requirement_id])
+            ):
+                needed[historical_receipt.context_citation.check_sha256] = historical_receipt
+                break
+    historical_context_checks = tuple(needed.values())
     decisions: list[DraftDecision] = []
     supporting: list[str] = list(selected_attachment_source_ids)
     render_hashes: dict[tuple[str, int], str] = {}
@@ -75,6 +146,20 @@ def validate_answers(
         elif proposal.outcome != "proposed":
             issues.append(proposal.outcome)
         else:
+            context_issues, context_snapshots = verify_historical_context(
+                root,
+                inventory,
+                proposal,
+                historical_context_checks,
+                render_hashes,
+                requirement,
+                request.historical_policy == "answer_first_review",
+                mappings.get(proposal.requirement_id),
+                scan_checks,
+            )
+            answer_citations = historical_answer_citations(proposal, context_snapshots)
+            context_verified = bool(answer_citations) and not context_issues
+            issues.extend(context_issues)
             history_issues, evidence_status = historical_issues(
                 root,
                 inventory,
@@ -83,10 +168,16 @@ def validate_answers(
                 requirement,
                 proposal,
                 navigation_context=request.navigation_context.get(proposal.requirement_id, ""),
+                context_verified=context_verified,
+                historical_policy=request.historical_policy,
+                calculation_date=request.calculation_date,
+                verified_current_scans=tuple(c for c, _ in context_snapshots),
             )
             issues.extend(history_issues)
             for citation in proposal.citations:
                 if isinstance(citation, OcrCitation):
+                    if context_verified and citation in answer_citations:
+                        continue
                     if not any(
                         receipt.citation == citation and receipt.supports(requirement, proposal)
                         for receipt in scan_checks
@@ -115,13 +206,15 @@ def validate_answers(
             if any(c.source_id not in attached | historical for c in proposal.citations):
                 issues.append("supporting_evidence_not_attached")
             quotes = [c.quote for c in proposal.citations]
-            value = proposal.value
+            value = prior_tenure_proposal(proposal).value
             if isinstance(value, IdentifierValue) and not any(
                 re.search(r"(?<!\w)" + re.escape(value.value) + r"(?!\w)", q) for q in quotes
             ):
                 issues.append("identifier_not_in_cited_evidence")
-            if isinstance(value, TextValue) and not any(
-                _normalized(value.value) in _normalized(q) for q in quotes
+            if (
+                isinstance(value, TextValue)
+                and not context_verified
+                and not any(_normalized(value.value) in _normalized(q) for q in quotes)
             ):
                 issues.append("text_value_not_in_cited_evidence")
         unique = tuple(dict.fromkeys(issues))
@@ -130,6 +223,10 @@ def validate_answers(
             supporting.extend(
                 c.source_id for c in proposal.citations if c.source_id not in historical
             )
+            if proposal.historical_basis is not None:
+                for current_check in proposal.historical_basis.current_checks:
+                    if current_check.citation.source_id not in historical:
+                        supporting.append(current_check.citation.source_id)
         decisions.append(
             DraftDecision(
                 requirement_id=proposal.requirement_id,
@@ -139,6 +236,16 @@ def validate_answers(
                 placement_confirmed=verified,
                 reason=(
                     f"{GATE_VERSION}: code checks passed; no human approval."
+                    + (
+                        " Sponsor Broward role rule: Qualified Representative defaults to "
+                        "Primary Representative for printed identity only."
+                        if primary_representative_rule(
+                            request.issuer,
+                            requirement,
+                            request.navigation_context.get(proposal.requirement_id, ""),
+                        )
+                        else ""
+                    )
                     if verified
                     else f"{GATE_VERSION}: " + ", ".join(unique)
                 ),
@@ -146,6 +253,34 @@ def validate_answers(
             )
         )
     notes: list[str] = []
+    exhibit_ids = []
+    for exhibit in request.historical_exhibits:
+        try:
+            extract_exhibit(
+                root,
+                inventory,
+                exhibit,
+                proposals=request.proposals.proposals,
+                image_checks=exhibit_image_checks,
+            )
+        except ExhibitError as error:
+            notes.append(f"Historical exhibit {exhibit.exhibit_id} withheld: {error}")
+        else:
+            exhibit_ids.append(exhibit.exhibit_id)
+    attached_ids = tuple(
+        identity for identity in request.attachments if identity in set(supporting)
+    )
+    for audit in audit_support(
+        request.proposals.proposals,
+        inventory,
+        attached_ids,
+        tuple(e for e in request.historical_exhibits if e.exhibit_id in exhibit_ids),
+    ):
+        if audit.issues:
+            notes.append(
+                f"Supporting documents for {audit.requirement_id}: {', '.join(audit.issues)}. "
+                "Inclusion does not establish semantic support, matching dates or current validity."
+            )
     if selected_attachment_source_ids:
         notes.append(
             "Explicitly selected supporting PDFs are included independently of filled answers. "
@@ -183,6 +318,10 @@ def validate_answers(
         ),
         reviewer_notes=tuple(dict.fromkeys(notes)),
         scan_checks=scan_checks,
+        historical_context_checks=historical_context_checks,
+        historical_exhibit_ids=tuple(exhibit_ids),
+        exhibit_image_checks=exhibit_image_checks,
+        requirement_assessments=requirement_assessments,
     )
 
 

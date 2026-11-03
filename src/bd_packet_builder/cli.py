@@ -12,6 +12,14 @@ from pydantic import ValidationError
 from pypdf.errors import PdfReadError
 from pypdfium2 import PdfiumError
 
+from bd_packet_builder.demo import (
+    DEFAULT_DEPLOYMENT,
+    DEFAULT_ENDPOINT,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    demo_config,
+    prepare_broward_demo,
+    run_broward_demo,
+)
 from bd_packet_builder.discovery import discover_requirements
 from bd_packet_builder.draft import DraftError, run_draft
 from bd_packet_builder.evidence import (
@@ -24,13 +32,14 @@ from bd_packet_builder.fact_sheet import FactSheetError, run_fact_sheet_check
 from bd_packet_builder.foundry import FoundryConfig, FoundryError, run_foundry_smoke
 from bd_packet_builder.history import HistoryError, run_history_check
 from bd_packet_builder.inventory import InventoryError, build_inventory, publish_inventory
-from bd_packet_builder.live import run_agent_command
+from bd_packet_builder.live import LIVE_MAX_MODEL_CALLS, resume_agent_command, run_agent_command
 from bd_packet_builder.local_inputs import LocalInputError
 from bd_packet_builder.ocr import OcrError, OcrLimits, run_ocr
 from bd_packet_builder.pdf_demo import PdfDemoError, create_demo, inspect_pdf
 from bd_packet_builder.poc import initialize_poc, run_poc
 from bd_packet_builder.retrieval import RetrievalError, run_targeted_retrieval
 from bd_packet_builder.review import ReviewError, run_review
+from bd_packet_builder.run import RunInputError
 from bd_packet_builder.visual import map_visual
 
 
@@ -190,26 +199,80 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent.add_argument("--blank", type=Path, required=True, help="Root-relative blank PDF")
     agent.add_argument("--endpoint", required=True)
     agent.add_argument("--deployment", required=True)
+    agent.add_argument("--request-timeout-seconds", type=int, default=60)
     agent.add_argument("--requester-id", default="developer-workstation")
     agent.add_argument("--evidence-set-id", default="local-evidence-set")
     agent.add_argument("--as-of", help="Reporting date YYYY-MM-DD")
     agent.add_argument("--issuer", help="Target issuer for historical-context checks")
     agent.add_argument(
+        "--historical-policy",
+        choices=("conservative", "answer_first_review"),
+        default="answer_first_review",
+        help="Prefill checked historical candidates with reviewer concerns; never signing",
+    )
+    agent.add_argument(
         "--historical-manifest", type=Path, help="Approved partition JSON under outputs/"
+    )
+    agent.add_argument(
+        "--requirement-assessments",
+        type=Path,
+        help="Trusted form/hash-bound reviewer assessments JSON under outputs/; not model output",
     )
     agent.add_argument(
         "--runs-dir", type=Path, help="Folder for run output; default <root>/outputs/agent-runs"
     )
     agent.add_argument("--allow-paid", action="store_true")
+    resume = commands.add_parser(
+        "agent-resume", help="Explicit paid recovery of unfinished saved answer groups"
+    )
+    resume.add_argument("--root", type=Path, required=True)
+    resume.add_argument("--runs-dir", type=Path, required=True)
+    resume.add_argument("--run-id", required=True)
+    resume.add_argument("--endpoint", required=True)
+    resume.add_argument("--deployment", required=True)
+    resume.add_argument("--allow-paid", action="store_true")
+    broward_demo = commands.add_parser(
+        "broward-demo",
+        help="Run the fresh paid Broward demo with explicit inputs and live safe progress",
+    )
+    broward_demo.add_argument("--root", type=Path, required=True)
+    broward_demo.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    broward_demo.add_argument("--deployment", default=DEFAULT_DEPLOYMENT)
+    broward_demo.add_argument(
+        "--request-timeout-seconds", type=int, default=DEFAULT_REQUEST_TIMEOUT_SECONDS
+    )
+    broward_demo.add_argument("--runs-dir", type=Path)
+    broward_demo.add_argument("--requirement-assessments", type=Path)
+    broward_demo.add_argument("--allow-paid", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "agent-resume":
+            manifest = resume_agent_command(
+                args.root,
+                args.runs_dir,
+                args.run_id,
+                FoundryConfig(endpoint=args.endpoint, deployment=args.deployment),
+                allow_paid=args.allow_paid,
+            )
+            print(f"Run {manifest.run_id}: status={manifest.status} outcome={manifest.outcome}")
+            return 1 if manifest.status == "failed" else 0
         if args.command == "agent-run":
             as_of = date.fromisoformat(args.as_of) if args.as_of else None
             try:
-                agent_config = FoundryConfig(endpoint=args.endpoint, deployment=args.deployment)
+                agent_config = FoundryConfig(
+                    endpoint=args.endpoint,
+                    deployment=args.deployment,
+                    timeout_seconds=args.request_timeout_seconds,
+                )
             except ValidationError:
-                raise FoundryError("Invalid Foundry endpoint or deployment") from None
-            trace: list[str] = []
+                raise FoundryError(
+                    "Invalid Foundry endpoint, deployment or request timeout"
+                ) from None
+            print(
+                "Starting fresh paid model execution. Page images and selected evidence may be "
+                "sent to Foundry; progress output excludes document text.",
+                flush=True,
+            )
             manifest = run_agent_command(
                 args.root,
                 args.blank,
@@ -218,18 +281,65 @@ def main(argv: Sequence[str] | None = None) -> int:
                 evidence_set_id=args.evidence_set_id,
                 as_of=as_of,
                 allow_paid=args.allow_paid,
-                trace_sink=trace,
                 runs_dir=args.runs_dir,
                 historical_manifest=args.historical_manifest,
                 issuer=args.issuer,
+                historical_policy=args.historical_policy,
+                requirement_assessments=args.requirement_assessments,
+                progress_sink=lambda event: print(f"[progress] {event}", flush=True),
             )
-            for entry in trace:
-                print(f"  tool: {entry}")
             runs_dir = args.runs_dir or args.root / "outputs" / "agent-runs"
             print(
-                f"Run {manifest.run_id}: status={manifest.status} outcome={manifest.outcome} "
-                f"exceptions={len(manifest.exceptions())}. Not for submission; "
-                f"readable files in {runs_dir / manifest.run_id / 'readable'}"
+                f"Run {manifest.run_id}: status={manifest.status} outcome={manifest.outcome}; "
+                f"{len(manifest.exceptions())} review exceptions. Not for submission. "
+                f"Readable outputs: {runs_dir / manifest.run_id / 'readable'}"
+            )
+            return 0 if manifest.status != "failed" else 1
+        if args.command == "broward-demo":
+            if not args.allow_paid:
+                raise FoundryError("The Broward demo requires explicit --allow-paid authorization")
+            broward_config = demo_config(
+                args.endpoint, args.deployment, args.request_timeout_seconds
+            )
+            plan = prepare_broward_demo(args.root)
+            print("BROWARD DEMO PREFLIGHT (metadata only; no document text shown)")
+            print(f"Blank: {plan.blank} sha256={plan.blank_sha256}")
+            print(
+                f"Approved historical reference: {plan.historical_source.path} "
+                f"sha256={plan.historical_source.sha256}"
+            )
+            print(
+                "Historical policy: answer_first_review; no other completed applications included"
+            )
+            print(f"Available supporting documents: {len(plan.available_sources)}")
+            for source in plan.available_sources:
+                print(f"  {source.family}: {source.path} sha256={source.sha256}")
+            print(
+                f"Model: {args.deployment} at {args.endpoint}\n"
+                f"HTTP request timeout: {broward_config.timeout_seconds} seconds; "
+                "automatic retries: 0.\n"
+                f"This fresh run may make up to {LIVE_MAX_MODEL_CALLS} paid model calls, "
+                "run for up to 60 minutes, "
+                "and send selected document text and page images to Foundry. No total dollar "
+                "spending cap is configured. It creates an incomplete, unsigned draft only."
+            )
+            try:
+                confirmation = input("Type RUN to start the paid model-driven demo: ")
+            except EOFError:
+                confirmation = ""
+            if confirmation != "RUN":
+                print("Demo cancelled; no model calls were made.")
+                return 1
+            manifest = run_broward_demo(
+                plan,
+                broward_config,
+                progress_sink=lambda event: print(f"[progress] {event}", flush=True),
+                runs_dir=args.runs_dir,
+                requirement_assessments=args.requirement_assessments,
+            )
+            print(
+                f"Fresh run {manifest.run_id}: status={manifest.status}; "
+                f"outcome={manifest.outcome}; not for submission."
             )
             return 0 if manifest.status != "failed" else 1
         if args.command == "draft":
@@ -430,6 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "retrieve",
                 "draft",
                 "agent-run",
+                "broward-demo",
             )
             else "PDF"
         )
@@ -460,6 +571,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "retrieve",
                 "draft",
                 "agent-run",
+                "broward-demo",
             )
             else "PDF"
         )
@@ -467,6 +579,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{label} I/O failed. Check the input exists and output folder is writable.",
             file=sys.stderr,
         )
+        return 1
+    except RunInputError as error:
+        print(f"Run input rejected: {error}", file=sys.stderr)
+        if args.command == "agent-resume":
+            print(
+                "Recovery did not complete. For changed evidence, restore the original source "
+                "version or start a new run; do not replace the saved snapshot.",
+                file=sys.stderr,
+            )
         return 1
     except (ValueError, PdfReadError, PdfiumError) as error:
         print(

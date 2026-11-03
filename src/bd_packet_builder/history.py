@@ -16,9 +16,11 @@ from bd_packet_builder.contracts import (
     AnswerProposal,
     AnswerValue,
     ApplicationRequirements,
+    BooleanValue,
     Citation,
     Contract,
     EvidenceStatus,
+    HistoricalContextCitation,
     Identifier,
     IdentifierValue,
     MoneyValue,
@@ -31,7 +33,9 @@ from bd_packet_builder.contracts import (
     TextValue,
     check_native_citations,
     check_proposal,
+    explicit_choice_answer,
 )
+from bd_packet_builder.historical_time import adjusted_tenure, prior_tenure_proposal, signed_date
 from bd_packet_builder.inventory import (
     Inventory,
     InventoryError,
@@ -43,6 +47,62 @@ from bd_packet_builder.local_inputs import LocalInputError, read_local_input
 from bd_packet_builder.review import AnswerProposals
 
 _ARCHIVE = Path("bd_agreements/Completed")
+HistoricalReusePolicy = Literal["conservative", "answer_first_review"]
+
+_PERSONAL_ACT = re.compile(
+    r"\b(signature|signatory|signer|acknowledg\w*|read|understand\w*|"
+    r"i have|we have reviewed|i understand|i agree|i certify|we certify|i attest|we attest|"
+    r"initial\w*)\b",
+    re.IGNORECASE,
+)
+_DISCLOSURE = re.compile(
+    r"\b(disciplin\w*|investigat\w*|fraud\w*|litigation|lawsuit\w*|disclos\w*|"
+    r"sanction\w*|convict\w*|criminal|bankrupt\w*|regulatory action)\b",
+    re.IGNORECASE,
+)
+
+
+def requires_personal_action(requirement: Requirement) -> bool:
+    return requirement.kind in ("signature", "signature_date") or bool(
+        _PERSONAL_ACT.search(requirement.instruction)
+    )
+
+
+def historical_review_concerns(
+    requirement: Requirement, proposal: AnswerProposal
+) -> tuple[str, ...]:
+    if proposal.historical_basis is None:
+        return ()
+    concerns = [
+        "HISTORICAL CANDIDATE: prior representation, not verification of current truth "
+        "or human approval. Confirm applicability and continuity."
+    ]
+    if _DISCLOSURE.search(requirement.instruction):
+        concerns.append(
+            "DISCLOSURE REVIEW: prior legal interpretation is preserved, not re-approved. "
+            "Compare current disclosed events with the prior baseline; public records do not "
+            "establish absence of confidential ongoing investigations."
+        )
+    if not proposal.historical_basis.current_checks:
+        concerns.append("Current-source comparison was not established for this candidate.")
+    if proposal.historical_basis.category == "headcount":
+        concerns.append(
+            "HEADCOUNT REVIEW: unchanged historical count, including its approximation; "
+            "not a current employee measurement. Confirm current headcount."
+        )
+    if proposal.historical_basis.category == "tenure":
+        concerns.append(
+            "TENURE REVIEW: derived from a prior stated value, not an independently verified "
+            "founding/hire date. Confirm operating or employment continuity."
+        )
+    correspondence = proposal.historical_basis.correspondence
+    if correspondence is not None:
+        concerns.append(
+            f"QUESTION CORRESPONDENCE ({correspondence.assessment}; model interpretation, "
+            f"not independent semantic approval): {correspondence.reason} "
+            f"Differences/uncertainty: {correspondence.differences}"
+        )
+    return tuple(concerns)
 
 
 class HistoryError(ValueError):
@@ -210,6 +270,22 @@ def with_historical_sources(
     return Inventory(current.created_at, current.sources + history.sources, current.issues)
 
 
+def primary_representative_rule(
+    issuer: str | None, requirement: Requirement, navigation_context: str
+) -> bool:
+    """Sponsor-approved Broward printed-name assignment, never signing permission."""
+    return (
+        issuer is not None
+        and issuer.casefold().strip() in ("broward", "broward county")
+        and requirement.kind == "text"
+        and requirement.instruction.casefold().strip()
+        in ("printed name & title", "printed name and title")
+        and "qualified representative"
+        in (navigation_context + " " + (requirement.required_signer_role or "")).casefold()
+        and requirement.required_signer_role in (None, "Qualified Representative")
+    )
+
+
 def historical_issues(
     root: Path,
     inventory: Inventory,
@@ -219,6 +295,10 @@ def historical_issues(
     proposal: AnswerProposal,
     *,
     navigation_context: str = "",
+    context_verified: bool = False,
+    historical_policy: HistoricalReusePolicy = "conservative",
+    calculation_date: date | None = None,
+    verified_current_scans: tuple[OcrCitation, ...] = (),
 ) -> tuple[tuple[str, ...], EvidenceStatus]:
     """Check provenance and bounded reuse, not semantic equivalence or human approval."""
     sources = {s.source_id: s for s in inventory.sources}
@@ -237,28 +317,154 @@ def historical_issues(
     if basis is None or manifest is None:
         return ("historical_context_required",), "unsupported"
     issues: list[str] = []
-    if requirement.kind not in ("text", "identifier", "narrative"):
+    if basis.additional_contexts and not context_verified:
+        issues.append("historical_composition_requires_checked_relationship")
+    correspondence = basis.correspondence
+    if correspondence is not None:
+        if correspondence.target_question != requirement.instruction:
+            issues.append("historical_target_question_mismatch")
+        if correspondence.assessment == "incompatible":
+            issues.append("historical_question_incompatible")
+    if basis.category in ("tenure", "headcount", "eligibility") and (
+        historical_policy != "answer_first_review"
+    ):
+        issues.append("historical_answer_first_policy_required")
+    if basis.tenure is not None:
+        temporal = basis.tenure
+        if (
+            basis.category != "tenure"
+            or not re.search(
+                r"\b(years?\s+(?:established|with|in|of)|tenure|how long|"
+                r"length of (?:service|employment)|established|operat\w*)\b",
+                requirement.instruction,
+                re.IGNORECASE,
+            )
+            or re.search(
+                r"\b(capital|assets|revenue|volume|financial|employee count|number of employees)\b",
+                requirement.instruction,
+                re.IGNORECASE,
+            )
+        ):
+            issues.append("historical_tenure_field_not_allowed")
+        if calculation_date is None:
+            issues.append("historical_calculation_date_required")
+        else:
+            try:
+                if adjusted_tenure(proposal, calculation_date).value != proposal.value:
+                    issues.append("historical_tenure_calculation_mismatch")
+            except ValueError:
+                issues.append("historical_tenure_invalid")
+        if temporal.date_citation.source_id not in {c.source_id for c in prior} or (
+            temporal.date_context.source_id != temporal.date_citation.source_id
+            or temporal.date_context.page != temporal.date_citation.page
+        ):
+            issues.append("historical_signature_source_mismatch")
+        try:
+            if signed_date(temporal.date_citation.quote) != temporal.signed_on:
+                issues.append("historical_signature_date_mismatch")
+        except ValueError:
+            issues.append("historical_signature_date_unresolved")
+        if isinstance(temporal.date_context, Citation):
+            _, problems = check_native_citations(
+                root,
+                inventory,
+                (temporal.date_context,)
+                + (
+                    (temporal.date_citation,)
+                    if isinstance(temporal.date_citation, Citation)
+                    else ()
+                ),
+            )
+            if (
+                problems
+                or not isinstance(temporal.date_citation, Citation)
+                or (
+                    temporal.date_citation.quote not in temporal.date_context.quote
+                    or not re.search(
+                        r"\b(signature\s+date|date\s+(?:of\s+signature|signed|executed)|signed(?:\s+on)?)\b",
+                        temporal.date_context.quote,
+                        re.IGNORECASE,
+                    )
+                )
+            ):
+                issues.append("historical_signature_context_unresolved")
+        elif not context_verified:
+            issues.append("historical_signature_context_unresolved")
+    answer_first = historical_policy == "answer_first_review" and (
+        context_verified
+        or (
+            isinstance(basis.prior_question, Citation)
+            and all(isinstance(c, Citation) for c in prior)
+        )
+    )
+    primary_rule = (
+        primary_representative_rule(issuer, requirement, navigation_context)
+        and basis.category == "representative_assignment"
+        and basis.role is not None
+        and basis.role.casefold().strip() == "primary representative"
+        and basis.context == "issuer_specific"
+    )
+    if requirement.kind not in (
+        "text",
+        "identifier",
+        "narrative",
+        "boolean",
+        "single_select",
+        "multi_select",
+    ):
         issues.append("historical_sensitive_requirement")
+    if requirement.kind in ("single_select", "multi_select") and (
+        not context_verified
+        or (not answer_first and basis.category not in ("firm_description", "trading_capability"))
+    ):
+        issues.append("historical_choice_requires_checked_relationship")
+    if requirement.kind == "boolean" and (
+        not context_verified
+        or (not answer_first and basis.category not in ("firm_description", "trading_capability"))
+    ):
+        issues.append("historical_boolean_requires_checked_relationship")
     # A model's permissive category must not override recognizable high-risk issuer requests.
     sensitive = re.compile(
         r"\b(signature|signatory|signer|attest\w*|certif\w*|acknowledg\w*|"
-        r"disciplin\w*|litigation|lawsuit\w*|disclos\w*|sanction\w*|"
+        r"disciplin\w*|investigat\w*|fraud\w*|loss\w*|litigation|lawsuit\w*|"
+        r"disclos\w*|sanction\w*|read|understand\w*|confirm\w*|"
         r"capital|assets|liabilit\w*|revenue|net worth|financial|"
         r"i have|we have reviewed|i understand|i agree|"
         r"convict\w*|criminal|bankrupt\w*|regulatory action)\b",
         re.IGNORECASE,
     )
-    if sensitive.search(requirement.instruction) or requirement.required_signer_role:
+    if (
+        requires_personal_action(requirement)
+        or (sensitive.search(requirement.instruction) and not answer_first)
+    ) or (requirement.required_signer_role and not primary_rule):
         issues.append("historical_sensitive_requirement")
     if requirement.requested_period is not None:
         issues.append("historical_current_period_requires_current_evidence")
+    if (
+        isinstance(proposal.value, TextValue)
+        and re.search(
+            r"\b(capital|assets|liabilit\w*|revenue|net worth|financial amount)\b",
+            requirement.instruction,
+            re.IGNORECASE,
+        )
+        and re.search(r"\d", proposal.value.value)
+    ):
+        issues.append("historical_financial_quantity_requires_current_evidence")
     entries = {e.path: e for e in manifest.entries if e.partition == "reference"}
+    value_supported = False
     for citation in prior:
         source = sources[citation.source_id]
         entry = entries.get(source.path)
         if entry is None or entry.sha256 != source.sha256:
             issues.append("historical_source_not_approved")
             continue
+        if (
+            historical_policy == "answer_first_review"
+            and issuer is not None
+            and entry.issuer.casefold().strip() != issuer.casefold().strip()
+            and basis.correspondence is None
+        ):
+            issues.append("historical_cross_issuer_correspondence_required")
         if basis.context == "issuer_specific" and (
             issuer is None or entry.issuer.casefold().strip() != issuer.casefold().strip()
         ):
@@ -267,19 +473,59 @@ def historical_issues(
             issues.append("historical_question_source_mismatch")
         if basis.prior_question.page != citation.page:
             issues.append("historical_question_page_mismatch")
-        if isinstance(citation, OcrCitation) and basis.prior_question != citation:
-            issues.append("historical_ocr_context_must_be_verified_answer_quote")
-        value = proposal.value
-        if not isinstance(value, (TextValue, IdentifierValue, NarrativeValue)) or (
-            value.value not in citation.quote
+        if (
+            isinstance(citation, OcrCitation)
+            and basis.prior_question != citation
+            and not context_verified
         ):
+            issues.append("historical_ocr_context_must_be_verified_answer_quote")
+        value = prior_tenure_proposal(proposal).value
+        if basis.category == "headcount" and isinstance(value, TextValue):
+            qualified_counts = re.findall(
+                r"(?:~\s*|(?:approximately|approx\.?|about)\s+)\d[\d,]*",
+                citation.quote,
+                flags=re.IGNORECASE,
+            )
+            if qualified_counts and not any(
+                " ".join(q.casefold().split()) in " ".join(value.value.casefold().split())
+                for q in qualified_counts
+            ):
+                issues.append("historical_headcount_qualifier_missing")
+        literal_match = (
+            citation.quote.strip().casefold() == ("yes" if value.value else "no")
+            if isinstance(value, BooleanValue)
+            else isinstance(value, (TextValue, IdentifierValue, NarrativeValue))
+            and re.search(
+                r"(?<!\w)" + re.escape(" ".join(value.value.split())) + r"(?!\w)",
+                " ".join(citation.quote.split()),
+                flags=re.IGNORECASE if isinstance(value, (TextValue, NarrativeValue)) else 0,
+            )
+            is not None
+        )
+        value_supported = (
+            value_supported
+            or literal_match
+            or explicit_choice_answer(requirement, value, citation.quote)
+        )
+    if not value_supported and not (
+        context_verified and historical_policy == "answer_first_review"
+    ):
+        value_supported = context_verified and explicit_choice_answer(
+            requirement, proposal.value, "; ".join(c.quote for c in prior)
+        )
+        if not value_supported:
             issues.append("historical_value_not_in_prior_answer")
+    if basis.tenure is not None and not value_supported and not context_verified:
+        issues.append("historical_tenure_baseline_not_supported")
     if basis.category == "representative_assignment" and (
         basis.context != "issuer_specific"
         or not basis.role
         or basis.role.casefold() not in basis.prior_question.quote.casefold()
-        or basis.role.casefold()
-        not in (requirement.instruction + " " + navigation_context).casefold()
+        or (
+            not primary_rule
+            and basis.role.casefold()
+            not in (requirement.instruction + " " + navigation_context).casefold()
+        )
     ):
         issues.append("historical_role_context_mismatch")
 
@@ -287,16 +533,29 @@ def historical_issues(
         _, quote_issues = check_native_citations(root, inventory, (basis.prior_question,))
         if quote_issues:
             issues.append("historical_question_unresolved")
+    elif isinstance(basis.prior_question, HistoricalContextCitation):
+        if not context_verified:
+            issues.append("historical_relationship_not_verified")
     elif basis.prior_question not in proposal.citations:
         issues.append("historical_ocr_context_must_be_verified_answer_quote")
-    corroborated = False
-    if not basis.current_checks and any(
-        s.family != "historical_reference" for s in inventory.sources
+    corroborated = context_verified and basis.reading_resolution is not None
+    if (
+        not answer_first
+        and not basis.current_checks
+        and any(s.family != "historical_reference" for s in inventory.sources)
     ):
         issues.append("historical_current_checks_required")
     for check in basis.current_checks:
         checked_source = sources.get(check.citation.source_id)
-        _, check_issues = check_native_citations(root, inventory, (check.citation,))
+        check_issues: tuple[str, ...]
+        if isinstance(check.citation, OcrCitation):
+            check_issues = (
+                ()
+                if check.citation in verified_current_scans
+                else ("historical_current_scan_requires_machine_verification",)
+            )
+        else:
+            _, check_issues = check_native_citations(root, inventory, (check.citation,))
         if (
             checked_source is None
             or checked_source.family == "historical_reference"

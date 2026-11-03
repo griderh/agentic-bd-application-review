@@ -100,6 +100,7 @@ class _Candidate:
 
 
 def _normalized_token(token: str) -> str:
+    token = re.sub(r"^\d{1,3}[.)](?=[A-Za-z])", "", token)
     return token.casefold().strip(string.punctuation)
 
 
@@ -112,11 +113,18 @@ def _anchor(wanted: str, native: str) -> str | None:
         if (token := _normalized_token(m.group()))
     ]
     size = len(target)
+    wanted_number = re.match(r"^(\d{1,3})[.)](?=[A-Za-z])", wanted.strip())
     if not size:
         return None
     for index in range(len(spans) - size + 1):
         if all(spans[index + k][2] == target[k] for k in range(size)):
-            return native[spans[index][0] : spans[index + size - 1][1]]
+            quote = native[spans[index][0] : spans[index + size - 1][1]]
+            native_number = re.match(r"^(\d{1,3})[.)](?=[A-Za-z])", quote)
+            if wanted_number is not None and (
+                native_number is None or wanted_number.group(1) != native_number.group(1)
+            ):
+                continue
+            return quote
     return None
 
 
@@ -148,7 +156,44 @@ def _region(box: NormalizedBox, page: _Page) -> NarrativeRegion | str:
     else:
         return "answer_region_too_small"
     if _bounded(page, left, bottom, right, top).replace("_", "").strip():
-        return "answer_region_overlaps_issuer_text"
+        # Trim only within the model's proposed area; never invent writing space.
+        obstacles: list[tuple[float, float, float, float]] = []
+        for index in range(page.text.count_chars()):
+            char = page.text.get_text_range(index, 1)
+            if not char.strip() or char == "_":
+                continue
+            x0, y0, x1, y1 = page.text.get_charbox(index)
+            if x1 > left and x0 < right and y1 > bottom and y0 < top:
+                obstacles.append((x0 - 1, y0 - 1, x1 + 1, y1 + 1))
+        candidates = [(left, bottom, right, top)]
+        for x0, y0, x1, y1 in obstacles:
+            split: list[tuple[float, float, float, float]] = []
+            for a, b, c, d in candidates:
+                if min(c, x1) <= max(a, x0) or min(d, y1) <= max(b, y0):
+                    split.append((a, b, c, d))
+                else:
+                    split.extend(
+                        [
+                            (a, b, min(c, x0), d),
+                            (max(a, x1), b, c, d),
+                            (a, b, c, min(d, y0)),
+                            (a, max(b, y1), c, d),
+                        ]
+                    )
+            candidates = sorted(
+                (r for r in split if r[2] - r[0] >= 30 and r[3] - r[1] >= MIN_LEADING),
+                key=lambda r: (r[2] - r[0]) * (r[3] - r[1]),
+                reverse=True,
+            )[:32]
+        if not candidates or (
+            (candidates[0][2] - candidates[0][0]) * (candidates[0][3] - candidates[0][1])
+            < 0.9 * (right - left) * (top - bottom)
+        ):
+            return "answer_region_overlaps_issuer_text"
+        left, bottom, right, top = candidates[0]
+        if _bounded(page, left, bottom, right, top).replace("_", "").strip():
+            return "answer_region_overlaps_issuer_text"
+        leading = min(LEADING, top - bottom)
     return NarrativeRegion(
         page=page.number,
         left=left,

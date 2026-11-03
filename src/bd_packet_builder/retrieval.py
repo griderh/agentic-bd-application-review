@@ -81,9 +81,32 @@ class SourceFamily(Contract):
         return self
 
 
+class SupportingDocument(Contract):
+    folder: Nonblank
+    purpose: Nonblank
+    supported_topics: Annotated[tuple[Nonblank, ...], Field(min_length=1, max_length=8)]
+    inclusion_class: Literal["issuer-required", "business-required", "relevant-supporting"]
+    inclusion_conditions: Annotated[tuple[Nonblank, ...], Field(min_length=1, max_length=5)]
+    identity_matching: Nonblank
+    period_matching: Nonblank
+    limitations: Annotated[tuple[Nonblank, ...], Field(min_length=1, max_length=6)]
+    routing: Literal["retrieval-allowlisted", "navigation-only"]
+
+    @model_validator(mode="after")
+    def valid(self) -> Self:
+        if (
+            Path(self.folder).name != self.folder
+            or self.folder in (".", "..")
+            or "\\" in self.folder
+        ):
+            raise ValueError("Catalog folders must be single supporting-data directory names")
+        return self
+
+
 class SourceCatalog(Contract):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     families: Annotated[tuple[SourceFamily, ...], Field(min_length=1, max_length=20)]
+    supporting_documents: Annotated[tuple[SupportingDocument, ...], Field(max_length=32)] = ()
 
     @model_validator(mode="after")
     def unique(self) -> Self:
@@ -91,12 +114,347 @@ class SourceCatalog(Contract):
             {f.folder for f in self.families}
         ) != len(self.families):
             raise ValueError("Catalog family identities and folders must be unique")
+        if self.supporting_documents:
+            folders = [document.folder for document in self.supporting_documents]
+            if len(set(folders)) != len(folders):
+                raise ValueError("Supporting-document folders must be unique")
+            routed = {
+                document.folder
+                for document in self.supporting_documents
+                if document.routing == "retrieval-allowlisted"
+            }
+            if routed != {family.folder for family in self.families}:
+                raise ValueError("Only existing source families may be retrieval-allowlisted")
         return self
+
+
+def _supporting_documents() -> tuple[SupportingDocument, ...]:
+    records = (
+        (
+            "FINRA_Certification",
+            "Firm and representative registration and BrokerCheck context",
+            ("Firm registration identifiers", "Firm and representative BrokerCheck disclosures"),
+            "issuer-required",
+            (
+                "Include when the issuer requests registration or BrokerCheck "
+                "evidence, or an approved packet checklist requires it.",
+            ),
+            "Match the report's printed subject and CRD identity to the firm or named "
+            "representative; never transfer an individual report to the firm.",
+            "Verify report date and the question's stated lookback period; do not "
+            "infer coverage from a filename.",
+            (
+                "Public reports can omit matters outside their stated coverage; an "
+                "event is not automatically an answer to every issuer question.",
+            ),
+            "retrieval-allowlisted",
+        ),
+        (
+            "SIPC_list",
+            "SIPC membership listing",
+            ("SIPC membership",),
+            "issuer-required",
+            ("Include only when requested by the issuer or an approved attachment checklist.",),
+            "Match the listed legal member identity, not a similar trade name.",
+            "Verify the listing's printed date; do not treat membership as time-independent.",
+            (
+                "Membership does not establish capital, regulatory history, or any "
+                "other eligibility criterion.",
+            ),
+            "retrieval-allowlisted",
+        ),
+        (
+            "Focus_Reports",
+            "Monthly FOCUS financial and net-capital reporting",
+            ("Monthly financial condition", "Net capital", "Capital and financial eligibility"),
+            "business-required",
+            (
+                "Use the applicable monthly report for a current financial question; "
+                "attach only when an issuer requirement or approved packet policy "
+                "calls for it.",
+            ),
+            "Confirm the reporting entity from the report itself.",
+            "Use the printed monthly reporting period; a filename date is only a "
+            "selection hint. Keep monthly evidence distinct from annual audited "
+            "statements.",
+            (
+                "A FOCUS report does not satisfy a request for audited statements or "
+                "restricted financial-reporting tiers.",
+            ),
+            "retrieval-allowlisted",
+        ),
+        (
+            "Audited_Financials",
+            "Annual audited financial statements",
+            ("Audited annual financial statements", "Annual financial condition", "Audit opinion"),
+            "business-required",
+            (
+                "Attach only when explicitly requested or required by an approved "
+                "packet policy; use the relevant annual statement for answers.",
+            ),
+            "Confirm the audited legal entity and statement scope.",
+            "Verify the printed fiscal year and audit period; do not substitute a "
+            "monthly FOCUS period or roll values forward.",
+            (
+                "An annual audit does not establish current monthly capital; do not "
+                "expand access to financial reporting beyond the approved FOCUS and "
+                "audited tiers.",
+            ),
+            "retrieval-allowlisted",
+        ),
+        (
+            "Insperex_Public_Funds",
+            "Firm marketing and public-funds profile",
+            ("Firm identity and background", "Public-fund services", "Products and capabilities"),
+            "relevant-supporting",
+            (
+                "Use or include only when the issuer asks about the described services "
+                "or an approved reviewer finds the material relevant.",
+            ),
+            "Match claims to the firm and the specific service or product in the issuer question.",
+            "Check any printed as-of date and the period requested; undated marketing "
+            "is not current-period evidence.",
+            (
+                "Marketing language does not prove regulatory status, financial "
+                "amounts, a personal act, or issuer-specific authority.",
+            ),
+            "retrieval-allowlisted",
+        ),
+        (
+            "settlement_delivery_instructions",
+            "Confidential settlement and delivery instructions",
+            ("Settlement instructions", "Clearing and delivery identifiers"),
+            "relevant-supporting",
+            (
+                "Keep necessary confidential material in scope; include only when the "
+                "issuer request or approved packet policy requires it.",
+            ),
+            "Match the named legal entity, account, and requested destination using "
+            "explicit source identifiers.",
+            "Verify effective or revision dates and applicable account context; do not "
+            "assume undated instructions remain current.",
+            (
+                "Confidentiality does not exclude necessary evidence, but these "
+                "instructions do not establish unrelated account-opening requirements.",
+            ),
+            "retrieval-allowlisted",
+        ),
+        (
+            "US_agencies_snapshot",
+            "U.S. agency market or activity snapshot",
+            ("Agency market activity", "Agency performance and positioning"),
+            "relevant-supporting",
+            (
+                "Include only for an explicit snapshot or agency-market support "
+                "request, or an approved packet-specific need.",
+            ),
+            "Match the firm, agency product, market, and metric definition to the question.",
+            "Verify the snapshot's printed as-of date and measurement window; "
+            "filenames do not establish recency.",
+            (
+                "A snapshot is bounded context, not a substitute for audited "
+                "statements or a complete performance record.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "Bloomberg_League_Tables",
+            "Bloomberg league-table rankings",
+            ("Bloomberg rankings", "Transaction volume and league-table position"),
+            "issuer-required",
+            (
+                "Include only when the issuer explicitly requests rankings or an "
+                "approved packet checklist requires them.",
+            ),
+            "Match firm identity, ranking category, product, geography, side, and ranking basis.",
+            "Verify the printed ranking period and publication date; never claim it is "
+            "the latest based on a filename.",
+            (
+                "Rankings are category- and methodology-dependent and do not establish "
+                "all firm-wide volume or current eligibility.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "bios",
+            "Representative biographies",
+            (
+                "Representative qualifications",
+                "Titles and work history",
+                "Representative experience",
+            ),
+            "issuer-required",
+            (
+                "Include only for a named representative when the issuer requests a "
+                "biography or its checklist requires one.",
+            ),
+            "Match the printed individual to the current approved roster and requested "
+            "representative role; do not guess identity.",
+            "Verify dates and employment periods as printed; do not treat a prior "
+            "biography as current.",
+            (
+                "A biography does not establish current registration, a "
+                "regulatory-disclosure baseline, or an assignment to an "
+                "issuer-specific role.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "Business Continuity Statement",
+            "Business-continuity statement",
+            ("Business continuity", "Disaster recovery"),
+            "issuer-required",
+            ("Include only when requested by the issuer or an approved packet checklist.",),
+            "Match the statement to the firm legal entity.",
+            "Check its stated effective, review, or revision date and the period requested.",
+            (
+                "A statement's existence does not prove performance of a particular "
+                "control or answer unrelated security questions.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "fi_market_highlight",
+            "Fixed-income market and performance highlights",
+            ("Fixed-income performance", "Market highlights", "Trading activity"),
+            "relevant-supporting",
+            (
+                "Include only when the issuer requests the described market or "
+                "performance data, or an approved packet-specific need applies.",
+            ),
+            "Match the product, firm, geography, and metric definition.",
+            "Use the document's stated measurement period and publication date; do not "
+            "infer recency from a filename.",
+            (
+                "Highlights may be selective and do not independently establish a "
+                "complete or audited performance record.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "AML_Certification",
+            "Anti-money-laundering certification",
+            ("AML program certification", "Compliance attestation"),
+            "issuer-required",
+            (
+                "Include only when the issuer requests this certification or an "
+                "approved checklist requires it.",
+            ),
+            "Verify the certifying entity and any signer identity in the current "
+            "source; do not copy a personal acknowledgment.",
+            "Check certification date, covered period, and validity language.",
+            (
+                "Do not carry forward signatures, dates, or attestations from a prior "
+                "certification.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "Delivery_Instructions",
+            "Delivery instructions",
+            ("Settlement and delivery", "Clearing identifiers"),
+            "relevant-supporting",
+            (
+                "Include only when a current issuer requirement or approved packet "
+                "policy requests delivery details.",
+            ),
+            "Match entity, account, and destination using explicit identifiers.",
+            "Verify effective/revision date and transaction context.",
+            ("Do not infer a delivery destination from a similar account or prior packet.",),
+            "navigation-only",
+        ),
+        (
+            "Cover_Letters",
+            "Unsigned application transmittal cover letter",
+            ("Application transmittal", "Packet contents and contact routing"),
+            "issuer-required",
+            (
+                "If required by the issuer or approved workflow, generate from current "
+                "packet facts or obtain a newly prepared human-approved letter; keep "
+                "the component unsigned.",
+            ),
+            "Use only the current issuer, application, and approved firm identity; "
+            "verify the addressee from the current packet.",
+            "Use the current packet date only where a human-approved unsigned letter "
+            "requires it; do not reuse an old date.",
+            (
+                "Never copy an old signed cover letter or carry forward signatures, "
+                "signature dates, contact details, or personal acknowledgments.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "corporate_agency_overview",
+            "Corporate agency business overview",
+            ("Agency business", "Firm capabilities", "Market positioning"),
+            "relevant-supporting",
+            (
+                "Include only when the issuer asks about the described business or "
+                "approved reviewers identify a packet-specific need.",
+            ),
+            "Match claims to the firm, corporate-agency business, and scope asked.",
+            "Verify any stated as-of date and measurement period; undated text is not "
+            "proof of current status.",
+            (
+                "Narrative positioning is not a substitute for source-verified "
+                "rankings, financials, or current regulatory evidence.",
+            ),
+            "navigation-only",
+        ),
+        (
+            "Sustainable_Finance_Statement",
+            "Sustainable-finance statement",
+            ("Sustainable finance", "Environmental and social finance activities"),
+            "issuer-required",
+            (
+                "Include only when the issuer asks about sustainable finance or an "
+                "approved checklist requires the statement.",
+            ),
+            "Match the issuer's requested activity and the firm's stated role; "
+            "distinguish firm activity from client activity.",
+            "Verify the statement's as-of date and any period-specific claims.",
+            (
+                "Do not infer sustainable-finance activity from marketing language or "
+                "treat the statement as an independent performance audit.",
+            ),
+            "navigation-only",
+        ),
+    )
+    return tuple(
+        SupportingDocument.model_validate_json(
+            json.dumps(
+                {
+                    "folder": folder,
+                    "purpose": purpose,
+                    "supported_topics": topics,
+                    "inclusion_class": inclusion_class,
+                    "inclusion_conditions": conditions,
+                    "identity_matching": identity_matching,
+                    "period_matching": period_matching,
+                    "limitations": limitations,
+                    "routing": "navigation-only"
+                    if folder == "Cover_Letters"
+                    else "retrieval-allowlisted",
+                }
+            )
+        )
+        for (
+            folder,
+            purpose,
+            topics,
+            inclusion_class,
+            conditions,
+            identity_matching,
+            period_matching,
+            limitations,
+            routing,
+        ) in records
+    )
 
 
 def default_catalog() -> SourceCatalog:
     """Developer routing metadata; does not confer business source approval."""
-    entries = (
+    entries: tuple[tuple[str, str, str, str], ...] = (
         (
             "registration",
             "FINRA_Certification",
@@ -134,6 +492,13 @@ def default_catalog() -> SourceCatalog:
             "single",
         ),
     )
+    documents = _supporting_documents()
+    existing = {entry[1] for entry in entries}
+    entries += tuple(
+        (d.folder.lower().replace("_", "-").replace(" ", "-"), d.folder, d.purpose, "single")
+        for d in documents
+        if d.folder not in existing and d.routing == "retrieval-allowlisted"
+    )
     return SourceCatalog.model_validate_json(
         json.dumps(
             {
@@ -146,10 +511,83 @@ def default_catalog() -> SourceCatalog:
                         "page_hints": [1, 2],
                     }
                     for identity, folder, purpose, selection in entries
-                ]
+                ],
+                "supporting_documents": [
+                    document.model_dump(mode="json") for document in _supporting_documents()
+                ],
             }
         )
     )
+
+
+SOURCE_CONTEXT_VERSION = "source-context-v5"
+
+
+def source_context() -> dict[str, object]:
+    """Document routing plus a fingerprint of the shared domain reference."""
+    from bd_packet_builder.knowledge import KNOWLEDGE_SHA256, REFERENCE
+
+    catalog = default_catalog()
+    document_metadata = {item.folder: item for item in catalog.supporting_documents}
+    return {
+        "version": SOURCE_CONTEXT_VERSION,
+        "trust": "navigation_and_sponsor_policy_not_document_evidence",
+        "domain_knowledge": {
+            "version": REFERENCE.version,
+            "sha256": KNOWLEDGE_SHA256,
+            "entry_ids": [e.entry_id for e in REFERENCE.entries],
+            "location": "shared agent instructions; immutable domain_knowledge.json run artifact",
+        },
+        "families": [
+            {
+                "folder": family.folder,
+                "purpose": family.purpose,
+                "look_for": list(document_metadata[family.folder].supported_topics),
+                "limitations": list(document_metadata[family.folder].limitations),
+                "supported_topics": list(document_metadata[family.folder].supported_topics),
+                "inclusion_class": document_metadata[family.folder].inclusion_class,
+                "inclusion_conditions": list(document_metadata[family.folder].inclusion_conditions),
+                "identity_matching": document_metadata[family.folder].identity_matching,
+                "period_matching": document_metadata[family.folder].period_matching,
+                "routing": document_metadata[family.folder].routing,
+            }
+            for family in catalog.families
+        ]
+        + [
+            {
+                "folder": "historical_reference",
+                "purpose": "Approved prior issuer context",
+                "look_for": [
+                    "Inspect approved prior questions, full answers and supplemental references."
+                ],
+                "limitations": [
+                    "Apply historical-reuse in the domain reference; not current confirmation."
+                ],
+                "supported_topics": [
+                    "Prior question meaning and same-role business representations",
+                    "Supporting-document relationships in explicitly approved prior packets",
+                ],
+                "inclusion_class": "relevant-supporting",
+                "inclusion_conditions": [
+                    "Use only explicitly approved prior packets as historical context, "
+                    "not automatic current confirmation."
+                ],
+                "identity_matching": (
+                    "Compare source/target municipalities, question meaning, entity and role. "
+                    "Same-municipality history is not required for transferable firm-wide "
+                    "facts; another municipality's acceptance does not prove equivalence."
+                ),
+                "period_matching": (
+                    "Preserve the historical packet's date and reporting period; historical "
+                    "financial amounts are never rolled forward."
+                ),
+                "routing": "historical-context-only",
+            }
+        ],
+        "supporting_documents": [
+            item.model_dump(mode="json") for item in catalog.supporting_documents
+        ],
+    }
 
 
 class EvidenceNeed(Contract):
@@ -306,7 +744,10 @@ def read_page(
             if len(native) > 20_000:
                 raise RetrievalError("Selected page exceeds the 20,000 character limit")
             rotation = page.get_rotation()
-            image_dominant = False
+            image_dominant = (
+                len(native.strip()) < 200
+                and sum(1 for _ in page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_PATH])) >= 100
+            )
             for image in page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE]):
                 with closing(image):
                     left, bottom, right, top = image.get_bounds()

@@ -144,16 +144,53 @@ def test_mapping_resume_keeps_successful_pages_but_retries_invalid_pages(tmp_pat
     reply = fake.responses.parse.return_value
     with pytest.raises(ValidationError) as invalid:
         VisualPage.model_validate({"readable": False})
-    raw.parse.side_effect = [reply, invalid.value, reply]
+    raw.parse.side_effect = [reply, invalid.value, invalid.value, reply]
     mapper = FoundryPageMapper(
         CONFIG, allow_paid=True, client_factory=lambda _: fake, diagnostics_dir=tmp_path
     )
     blank = pdf(2)
     with pytest.raises(PageMapError, match="Page 2"):
         mapper.map_pages(blank)
-    assert len(list(tmp_path.glob("page-*.json"))) == 2
+    assert len(list(tmp_path.glob("page-*.json"))) == 3
     assert set(mapper.map_pages(blank)) == {1, 2}
-    assert raw.parse.call_count == 3
+    assert raw.parse.call_count == 4
+
+
+def _invalid_page_error() -> Exception:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as invalid:
+        VisualPage.model_validate({"readable": False})
+    return invalid.value
+
+
+def test_schema_invalid_page_map_gets_one_fresh_request() -> None:
+    fake = api()
+    reply = fake.responses.parse.return_value
+    fake.responses.parse.side_effect = [_invalid_page_error(), reply]
+    mapper = FoundryPageMapper(CONFIG, allow_paid=True, client_factory=lambda _: fake)
+    assert mapper.map_pages(pdf(1)) == {1: UNREADABLE}
+    assert fake.responses.parse.call_count == 2
+
+
+def test_repeated_schema_invalid_page_map_fails_after_bounded_attempts() -> None:
+    fake = api()
+    fake.responses.parse.side_effect = [_invalid_page_error(), _invalid_page_error()]
+    mapper = FoundryPageMapper(CONFIG, allow_paid=True, client_factory=lambda _: fake)
+    with pytest.raises(PageMapError, match="Page 1 mapping failed .*after 2 schema-invalid"):
+        mapper.map_pages(pdf(1))
+    assert fake.responses.parse.call_count == 2
+
+
+def test_page_map_timeout_is_not_retried() -> None:
+    fake = api()
+    fake.responses.parse.side_effect = FoundryError(
+        "Foundry request timed out; no automatic retry was attempted"
+    )
+    mapper = FoundryPageMapper(CONFIG, allow_paid=True, client_factory=lambda _: fake)
+    with pytest.raises(PageMapError, match="timed out"):
+        mapper.map_pages(pdf(1))
+    assert fake.responses.parse.call_count == 1
 
 
 def test_selected_page_failure_reports_actual_page_number() -> None:
@@ -246,8 +283,13 @@ def test_prepare_snapshots_evidence_and_records_agent_and_model_versions(
         "bd_agreements/supporting_data/Firm/Firm profile.pdf"
     ]
     versions = {v.name: v.version for v in manifest.versions}
-    assert versions["agent"] == "packet-agent-v6"
-    assert versions["scan-prompt"] == "scan-cross-check-v1"
+    assert versions["agent"] == "packet-agent-v25"
+    assert versions["historical-context"] == "historical-page-context-v7"
+    assert versions["domain-knowledge"] == "domain-knowledge-v2"
+    assert len(versions["domain-knowledge-sha256"]) == 64
+    assert versions["reading-budget"] == "full-questionnaire-v1"
+    assert versions["scan-prompt"] == "scan-cross-check-v6"
+    assert manifest.request.historical_policy == "conservative"
     assert versions["model"] == "test"
 
 
@@ -259,6 +301,58 @@ def test_run_live_requires_explicit_paid_authorization(tmp_path: Path, evidence_
     with pytest.raises(FoundryError):
         asyncio.run(run_live(store, manifest.run_id, evidence_root, CONFIG, allow_paid=False))
     assert store.load(manifest.run_id).status == "created"
+
+
+@pytest.mark.parametrize("version_name", ["domain-knowledge", "domain-knowledge-sha256"])
+def test_recovery_rejects_changed_knowledge(tmp_path, evidence_root, version_name):
+    from bd_packet_builder.live import validate_resume_configuration
+
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    manifest = prepare_live_run(FileRunStore(runs), request(), pdf(1), evidence_root, CONFIG)
+    validate_resume_configuration(manifest, CONFIG)
+    changed = manifest.model_copy(
+        update={
+            "versions": tuple(
+                v.model_copy(update={"version": "changed"}) if v.name == version_name else v
+                for v in manifest.versions
+            )
+        }
+    )
+    with pytest.raises(FoundryError, match="domain knowledge"):
+        validate_resume_configuration(changed, CONFIG)
+
+
+def test_live_run_reuses_the_private_page_map_cache(
+    tmp_path: Path, evidence_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bd_packet_builder import live
+
+    seen: list[Path | None] = []
+
+    class Mapper:
+        def __init__(self, *args: object, diagnostics_dir: Path | None = None, **kw: object):
+            seen.append(diagnostics_dir)
+
+    async def finished(client: object, tools: object, *, resume: bool) -> str:
+        return "done"
+
+    monkeypatch.setattr(live, "FoundryPageMapper", Mapper)
+    monkeypatch.setattr(live, "build_live_client", lambda config: object())
+    monkeypatch.setattr(live, "FoundryScanReader", lambda *a, **k: object())
+    monkeypatch.setattr(live, "PacketAgentTools", lambda *a, **k: Mock(trace=[]))
+    monkeypatch.setattr(live, "run_grouped_packet_agent", finished)
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    store = FileRunStore(runs)
+    manifest = prepare_live_run(store, request(), pdf(1), evidence_root, CONFIG)
+    cache = tmp_path / "page-map-cache"
+    asyncio.run(
+        run_live(
+            store, manifest.run_id, evidence_root, CONFIG, allow_paid=True, mapping_cache_dir=cache
+        )
+    )
+    assert seen == [cache]
 
 
 @pytest.mark.skipif(
@@ -310,6 +404,40 @@ def test_cli_agent_run_refuses_without_paid_authorization(
     assert not (tmp_path / "outputs").exists()
 
 
+def test_cli_resume_reports_snapshot_failure_not_pdf_error(tmp_path, monkeypatch, capsys):
+    from bd_packet_builder import cli
+    from bd_packet_builder.run import RunInputError
+
+    def rejected(*args, **kwargs):
+        raise RunInputError("Evidence changed after the run snapshot: synthetic/history.pdf")
+
+    monkeypatch.setattr(cli, "resume_agent_command", rejected)
+    assert (
+        cli.main(
+            [
+                "agent-resume",
+                "--root",
+                str(tmp_path),
+                "--runs-dir",
+                str(tmp_path / "runs"),
+                "--run-id",
+                "synthetic-run",
+                "--endpoint",
+                CONFIG.endpoint,
+                "--deployment",
+                CONFIG.deployment,
+                "--allow-paid",
+            ]
+        )
+        == 1
+    )
+    error = capsys.readouterr().err
+    assert "Run input rejected" in error
+    assert "Evidence changed after the run snapshot: synthetic/history.pdf" in error
+    assert "restore the original source" in error
+    assert "PDF processing failed" not in error
+
+
 def test_export_writes_readable_files_and_keeps_summary_separate_from_packet(
     tmp_path: Path, evidence_root: Path
 ) -> None:
@@ -334,7 +462,58 @@ def test_export_writes_readable_files_and_keeps_summary_separate_from_packet(
     assert not (folder / "packet.pdf").exists()
 
 
-def test_live_budget_reserves_five_page_mapping_calls() -> None:
-    from bd_packet_builder.live import LIVE_LIMITS
+def test_failed_live_run_persists_progress_and_exposes_failure_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bd_packet_builder import live
 
-    assert LIVE_LIMITS.max_turns + 5 <= 40
+    root = tmp_path / "evidence"
+    blank = root / "bd_agreements/Blank/form.pdf"
+    blank.parent.mkdir(parents=True)
+    blank.write_bytes(pdf(1))
+    source = root / "bd_agreements/supporting_data/Firm/proof.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(pdf(1))
+    events: list[str] = []
+
+    async def failed_run(store, run_id, *args, progress_sink, mapping_cache_dir, **kwargs):
+        seen_cache.append(mapping_cache_dir)
+        progress_sink("Evidence review: read_historical_page started")
+        store.fail(
+            run_id,
+            code="scan_verification_failed",
+            message="Foundry request timed out; no automatic retry was attempted",
+        )
+        return store.load(run_id)
+
+    seen_cache: list[Path] = []
+    monkeypatch.setattr(live, "run_live", failed_run)
+    result = live.run_agent_command(
+        root,
+        Path("bd_agreements/Blank/form.pdf"),
+        CONFIG,
+        requester_id="synthetic-operator",
+        evidence_set_id="synthetic-evidence",
+        as_of=None,
+        allow_paid=True,
+        progress_sink=events.append,
+    )
+    assert result.status == "failed"
+    assert "scan_verification_failed" in events[-1]
+    assert "reason=Foundry request timed out" in events[-1]
+    assert seen_cache == [root.resolve() / "outputs/page-map-cache"]
+    run_dir = root / "outputs/agent-runs" / result.run_id
+    recorded = [json.loads(line) for line in (run_dir / "progress.jsonl").read_text().splitlines()]
+    assert [entry["event"] for entry in recorded] == events
+    assert all(entry["timestamp"] for entry in recorded)
+    assert (run_dir / "readable/manifest.json").is_file()
+
+
+def test_live_budget_covers_current_and_historical_reading_with_explicit_total() -> None:
+    from bd_packet_builder.live import LIVE_EVIDENCE_LIMITS, LIVE_LIMITS, LIVE_MAX_MODEL_CALLS
+
+    assert LIVE_EVIDENCE_LIMITS.max_ocr_pages >= 20
+    assert LIVE_EVIDENCE_LIMITS.max_pages_read >= 80
+    assert LIVE_LIMITS.max_turns >= 60
+    assert LIVE_LIMITS.max_turns + 10 + LIVE_EVIDENCE_LIMITS.max_ocr_pages == LIVE_MAX_MODEL_CALLS
+    assert LIVE_MAX_MODEL_CALLS <= 100

@@ -2,6 +2,430 @@
 
 Status: implementation roadmap, rebaselined October 28, 2026.
 
+**Saved-run extraction/reference repair (v25):** the v24 live run still left eligibility and
+instrument choices blank and regressed three previously populated answers. Padded control hints
+now resolve against actual bounded outlines; unboxed check arms are measured against the mark,
+not hint whitespace. Competing controls still reject. Digit-only image misreadings reconcile
+only against agreeing exact native text and high-confidence local OCR in the same answer box,
+without relaxing identity matching or historical/current policy. Original readings remain
+auditable; low-confidence OCR, native/OCR disagreement and forged writer reviews are covered.
+Full OCR references can resolve a copied render hash only through a unique checked receipt
+whose remaining fields, artifact hash and exact word span all match.
+
+The isolated production gate/writer reconstruction has 45 populated of 69 requirements,
+restoring Q1, all ten Q2 choices plus the write-in, Q4, employee discipline and primary CRD.
+No populated answer from either the 40-answer v24 or 42-answer v21 run is lost. Affected rendered
+pages were inspected and outside-region changed pixels are zero. Fourteen unresolved,
+seven human-action and three conditional not-applicable requirements remain, including
+eligibility-proof/period review concerns. Original run artifacts and sources remain unchanged.
+This is saved-evidence reconstruction, not new autonomous-model coverage or held-out accuracy.
+No paid calls were made. Full offline validation: 1,278 passed, 33 skipped on Python 3.12 and
+3.13; Ruff lint/format, strict mypy for both targets and whitespace checks passed.
+Provenance is agent v25, historical context v7, answer groups v3 and checked-citation resolution
+v2, with stable legacy receipt hashes; institutional knowledge remains v2. A separately authorized
+fresh v25 live run is still needed before claiming autonomous recovery.
+
+**Historical-confirmation conflict cleanup (v24, domain knowledge v2):** removed the residual
+blanket historical-boolean exclusion for eligibility/disclosures. Checked historical reading
+and current-truth confirmation are explicitly distinct. Current-source inspection is attempted
+within budget but is not an acceptance prerequisite under `answer_first_review`; empty current
+checks and failed/unavailable current corroboration remain reviewer gaps, not contradictions.
+Grouped compound-condition instructions and native proposals preserve the same historical path.
+Existing deterministic gates were not weakened. Tests cover no-current-inspection eligibility,
+noncorroboration versus actual contradiction, and sensitive historical booleans in both policies.
+Full offline validation: 1,264 passed, 33 skipped on Python 3.12 and 3.13; Ruff and strict mypy
+for both targets passed. Four additional paid reasoning cases were added but not executed
+(0/4). The subsequent v24 live run exposed the extraction/reference failures described above;
+offline success was not a model-quality result.
+
+**Applied institutional knowledge (v23):** one packaged, versioned reference now owns curated
+document interpretation and sponsor policy, replacing the source-context business-rule dictionary
+and overlapping prompt blocks. Document routing metadata and verified source facts remain separate.
+Each entry records authority, applicability and limits. Both discovery and answering use it;
+the run records version/hash, and evidence handoff persists its snapshot. Recovery rejects
+reference changes. Per-answer IDs, reasons and hashes survive grouped staging into the internal
+audit/summary as model-reported use, not proof of reasoning or evidence approval.
+
+Historical eligibility without fresh per-condition corroboration still writes a flagged draft
+when the checked prior question/selection is applicable; real contradictions still block.
+BrokerCheck status dates alone do not prove uninterrupted registration or business operations.
+No new knowledge service, automatic learning, dependencies or weaker evidence gates were added.
+Offline validation: 1,255 passed, 29 skipped on both Python 3.12 and 3.13; Ruff and strict mypy
+for both targets passed. Wheel/resource loading was independently verified. Four new synthetic
+reasoning cases are opt-in and unexecuted (0/4); live v23 answer coverage remains unmeasured.
+
+**Bounded v22 completion repair:** local pixel inspection now supports an unboxed two-arm
+checkmark without classifying empty/ambiguous regions as unselected. Historical control labels
+can reconcile localized OCR control/bullet artifacts only when all substantive option words
+match and local mark inspection succeeds. Original readings remain in the audit. Instructions
+explicitly use checked, context-matched historical eligibility as draft evidence without
+demanding current re-certification of each condition; contradictions and incompatible conditions
+still block, and all current uncertainty is prominently retained for human review.
+
+The actual firm BrokerCheck body uses hundreds of vector paths with only native footer text,
+not a dominant bitmap. Sparse-native/vector-heavy pages now trigger the existing local OCR
+reader within its existing budget. Local reading of PDF pages 3, 12 and 13 produces substantive
+firm-profile/operations text. This is discovery text, not independent evidence approval.
+
+A separate local reconstruction from the latest saved run uses the rechecked historical Q1
+selection and unchanged Q2 proposal. Both pass the production gate and independent writer.
+The rendered PDF was inspected: regional dealer is selected and all ten instrument selections
+plus the Other write-in are present; zero pixels change outside allowed regions. There are
+43 written answers of 69 requirements overall; other blanks and signing deferrals remain.
+This is explicitly a local reconstruction, not a fresh model execution or a claim that the
+entire form is complete. Original run artifacts remain unchanged; no paid calls were made.
+Three opt-in synthetic eligibility interpretation cases were added but not executed.
+Validation: 1,249 passed, 25 skipped on Python 3.12 and 3.13; Ruff lint/format,
+strict mypy for both target runtimes and whitespace checks passed.
+
+**v21 live-run correction:** run `a130f735ae704cf98a3be2d9e5c7d408` proposed all ten Q2
+selections and the exact write-in, but its explicit write-in `additional_contexts` reference
+was rejected as an unsupported text-composition kind. The earlier synthetic tests and manual
+reconstruction omitted that legal-looking reference and therefore missed the producer/consumer
+contract mismatch. The shared gate/writer verifier now accepts these references only if they
+match independently verified choice-linked write-in receipts. It does not treat them as free
+text composition or waive selection/text/source checks. Tests cover with/without explicit
+contexts, unrelated contexts and forged positive reviews.
+
+The exact saved live request passes the updated gate and isolated production PDF writer,
+including the ten selections, native write-in text and zero outside-region changes. No
+model calls were made; original run artifacts remain unchanged. Q1 remains blank: this run
+did verify the page-8 capital threshold, but historical extraction still reports an unresolved
+control outline and option-text discrepancy; the model also requires confirmation of the
+remaining eligibility conditions. A local crop shows a visible checkmark. The Q2 contract
+correction is not a Q1 extraction/policy fix and must not be reported as one.
+Validation: 1,231 passed, 22 skipped on each of Python 3.12 and 3.13; Ruff lint/format,
+strict mypy for both target runtimes and whitespace checks passed. Paid evaluation was not run.
+
+**Historical complete-choice repair:** agent v21 / scan and historical-context v6 separate
+control, printed option label and entered write-in. Answering receives an explicit linked
+write-in citation instead of having to rediscover its relationship. Tight adjacent native text
+can recover omitted write-ins and corroborate an OCR token merged across the label/write-in
+boundary; original readings remain in the audit. No issuer, instrument or entered value is
+hardcoded. Missing/unsupported mandatory write-ins still withhold the whole choice question;
+the gate and writer independently verify source text, layout and the complete selected set.
+Legacy receipt hashes remain stable. Fresh execution is required for the new prompt version.
+Synthetic tests cover alternate wording, right-column and wrapped write-ins, missing/invented
+values, omitted selections and forged receipts/reviews, including rendered output. Three
+opt-in synthetic image-evaluation cases were added; paid evaluation is not run by default.
+This repair does not resolve Q1's separate undiscovered-evidence-page limitation.
+
+Offline validation: **1,201 passed, 22 skipped on each of Python 3.12 and 3.13**;
+Ruff lint/format, strict mypy for both target runtimes (40 application files) and whitespace
+checks passed. A read-only reconstruction of saved Q2 evidence passes the historical verifier
+with all ten selected options and the exact linked write-in. This is not a paid model run or
+a regenerated real packet. Synthetic writer tests verify complete rendering, whole-question
+withholding and zero outside-region changes, including attempts to bypass the gate with a
+forged positive review. Three new paid image-evaluation cases remain unexecuted (0/3).
+
+**November 3 complete evidence handoff and bounded follow-up:** approved increment implemented
+as agent v20 / answer workflow v2. Native/OCR observations and independent image transcriptions
+remain available to answering as untrusted candidates, with candidate OCR snapshots archived.
+Typed source/page/quote/subject verification requests are restricted to discovered pages; code
+returns checked citations to the affected group without reopening the discovery tool loop.
+At most two follow-up rounds fit within three group attempts, thirty group calls and existing
+image/tool/time limits; twenty verification requests are permitted per run. Successful groups
+and completed checks survive explicit recovery. Durable request markers distinguish interrupted,
+unknown paid work, which is reported rather than silently repeated.
+
+An explicit USD minimum supports deterministic `Decimal` comparison only after verifying the
+firm/subject and an exact same-row amount/field/line association. Scans require OCR/image row
+agreement and confidence checks on the relevant OCR words. One monetary condition does not
+establish continuous operation, regulatory compliance, banking applicability or overall eligibility.
+Checked monetary findings and verification failures are carried to the reviewer summary;
+additional exact-criterion status notes remain model assessments, not trusted reviewer approvals.
+The original source and ordinary independent gate/writer checks remain mandatory.
+
+Offline validation: 1,174 passed, 19 skipped on Python 3.12 and 3.13; Ruff lint/format,
+strict mypy (40 application files) and whitespace checks passed. The actual saved page-8
+OCR/image data passes the same-row and minimum-comparison helpers read-only in memory; this
+is not a regenerated application or a live coverage claim. Three added synthetic paid protocol/
+grounding evaluation cases were not run; model-quality metrics remain not applicable.
+README now contains a workflow and file-by-file artifact guide. Old v19/v1 archives remain
+unchanged and cannot be upgraded in place; use a fresh, explicitly authorized demo for v20/v2.
+Historical choice/control ambiguity (including Question 2) is not loosened by this increment.
+
+**November 2 scanned current-evidence checks:** run `cf72c5512c834f7eb27e0777bcc00dce`
+staged eleven answer groups; three failed because historical `current_checks` accepted only
+native citations while exact-receipt restoration correctly recovered checked OCR citations.
+Those checks now accept both citation types. Gate and writer independently verify scanned
+source/render/artifact integrity, subject/transcription agreement and confidence. Inspected
+but non-corroborating evidence does not become answer support or current confirmation.
+Contradictions, absent/mismatched receipts and changed artifacts still withhold the answer;
+completion recovery retains current-check-only scan receipts. Native historical contexts and
+checked historical relationships remain separate from scanned current checks.
+All three saved failing responses pass strict group validation offline. This verifies the
+reported intake failure, not live model quality or packet completeness. No paid calls were
+made and the failed run remains unchanged; explicit recovery retries its three unfinished
+groups, reusing eleven staged groups. Verification: 1,144 passed, 16 skipped on both Python
+3.12 and 3.13; Ruff lint/format, strict mypy (39 application files), four-call-site signature
+compatibility and whitespace checks passed.
+
+**November 2 evidence-led reading reconciliation:** agent v19 and gate/writer v14 remove the
+automatic image-transcription preference. A disputed answer has no preferred candidate.
+Discovery targets independent current identity/field evidence using existing bounded tools.
+The typed `reading_resolution` contract permits either scalar reading only with a checked
+historical Name relationship for the same role and a current contextual subject/field/value
+citation. Native source text or subject-aware verified scan evidence is rechecked by both gate
+and writer; raw OCR, majority voting, changed subjects/labels and guessed third values cannot
+resolve a conflict. Original readings remain in the audit. Unresolved fields explicitly say
+LEFT BLANK with a verification action; written resolved fields say FILLED AFTER RECONCILIATION.
+No published packet or run archive is modified and no paid execution is implied. Five added
+opt-in synthetic model cases test both winning directions and insufficient/wrong-context evidence;
+offline tests alone do not measure reconciliation model quality.
+Verification: 1,135 passed, 16 skipped on Python 3.12 and 3.13; Ruff lint/format,
+strict mypy (39 application files), six-call-site signature compatibility and whitespace checks
+passed. Synthetic gate/writer tests verify both winning readings, exact rendered identifiers,
+unchanged pixels outside allowed regions, absent scan receipts and forged-review rejection.
+The paid semantic cases were not run; real-document reconciliation remains unmeasured.
+
+**November 2 answer-group citation correction:** run `dbb0792d63094680972fc2577500eaaf`
+staged 13 of 14 groups; the remaining group represented a checked OCR quote as an invalid
+native offset span. No packet was published. Group intake now resolves source/page/exact-quote
+references to one unique checked receipt, preserving raw responses and recording resolution paths.
+Ambiguity, unknown quotes, additional fields and changed OCR hashes are not repaired. Ordinary
+source and relationship verification remains mandatory. The saved failing response passes the
+strict group schema after offline resolution; this is not a new live run or a completeness claim.
+Recovery still explicitly retries unfinished groups only, with unchanged paid-call limits.
+Validation: 1,126 passed, 11 skipped on each of Python 3.12 and 3.13; Ruff lint/format,
+strict mypy and whitespace checks passed. No new paid calls or run-artifact changes were made.
+
+**November 2 dated cross-municipality prefill and supporting-purpose increment:**
+agent v18, gate v13, scan v5 and source context v4 implement the approved draft policy.
+Same-municipality history is not required: question correspondence records the target wording,
+meaning, differences and uncertainty. Incompatible contexts still withhold. Tenure calculations
+use a source-cited signing date in the same packet and a fixed run date, not filename dates or
+unverified archive metadata. Python adds completed anniversaries, including a tested February 29
+rule. Headcount remains unchanged with qualifiers and current-review concerns. Financial values
+and reporting periods are never extrapolated; signatures and new personal acts stay human-only.
+Scanned signing metadata must have its own rechecked question/answer receipt without extraction
+disagreements, including a locally OCR-verified signing anchor. Ambiguous dates leave a review
+exception rather than authorizing guessed arithmetic.
+
+The approved supporting-data family allowlist now includes the specifically cataloged marketing,
+agency-performance, Bloomberg, bio and business-policy materials. Arbitrary folders and restricted
+financial sources remain inaccessible. Archived cover letters remain outside automatic inclusion.
+Purpose metadata carries conditional inclusion class, topics, entity/period matching and limits.
+The new bounded `plan_supporting_document` tool records requirement-linked selection rationale,
+exclusions and gaps, persisted in `attachment-manifest.json` and the internal reviewer summary.
+The writer allows up to 20 supporting attachments and 26 sources including historical references.
+Historical packets themselves remain prohibited submission attachments.
+
+Fresh runs may receive trusted `--requirement-assessments` input (including through the demo
+script), using the existing form/hash-bound reconciliation contract. It is not a model tool or
+automatic semantic approval; incompatible versions/wording fail explicitly, and assessments cannot
+discard proposed answers or suppress human acts. This exposes previously replay-only approved
+applicability/coverage decisions without hardcoding Broward applicability into the agent.
+
+The observed email failures were case-only differences between checked candidate and source
+transcription; text matching now tolerates capitalization, while identifiers remain case-sensitive.
+Exact text parts from one packet and role can be combined with separately rechecked receipts and
+a correspondence explanation; extra claims and mixed-role combinations still fail.
+Five pages with at most one schema-repair request each give a conservative **90 model-call**
+ceiling (60 orchestration/group attempts + 10 mapping + 20 independent image reads), not 85.
+Tool/time limits remain 240/60 minutes; no configured total-dollar cap.
+
+Validation uses offline synthetic contract and end-to-end cases. Six opt-in synthetic semantic
+evaluation cases cover rephrased cross-municipality questions, changed quantities/conditions,
+personal acts and period mismatches. No new paid run or model-quality result is implied by these
+tests; the fresh run's previous 40-populated/19-unresolved result is not replaced by a new coverage
+claim. Real signature-date extraction, document choice and semantic correspondence need a new
+authorized run and reviewer inspection.
+
+**Offline verification:** 1,115 passed, 11 skipped on each of Python 3.12 and 3.13;
+Ruff lint/format, strict mypy (39 application files), shell syntax and whitespace checks passed.
+Skipped paid/model cases are not a semantic-quality pass. No paid calls or deployment were made
+for this increment.
+
+**November 2 demo timeout correction:** the operator's first fresh run failed with
+`scan_verification_failed` because the independent historical-page image request timed out.
+The live demo had inherited the generic 60-second HTTP timeout. The demo now defaults to
+180 seconds per request, explicitly configurable within 1-600 seconds; no automatic retries
+or evidence-validation bypasses are introduced. Generic `agent-run` preserves its default.
+Start/completion events and failure codes stream to the console and persist in a timestamped
+content-free `progress.jsonl`, even when discovery fails before handoff. The request timeout
+is recorded in the run's component metadata. These changes do not establish that a new paid
+run will complete successfully; the corrected settings require live verification separately.
+
+**November 2 page-mapping resilience correction:** the operator's second run failed with
+`form_interpretation_failed` after mapping three pages: the model's page-4 reply contained a
+zero-area `instruction_box`, rejected by strict schema validation. Live and resumed runs now
+use the hash-keyed `outputs/page-map-cache/`, so validated page maps are reused only for an
+identical blank, rendered page, prompt, schema, endpoint and deployment. A schema-invalid
+page-map reply receives exactly one fresh request; timeout, connection, authentication and HTTP
+failures still are not retried. The final progress line includes the content-free failure reason.
+Live success after this correction remains unverified until a new paid run is performed.
+
+**November 2 run-visibility/demo increment:** `bd-packet broward-demo` and
+`scripts/run_broward_demo.sh` provide a repeatable, paid Broward execution using the checked-in
+blank and one explicitly allowlisted 2026 Broward reference. A preflight lists only source
+metadata and requires typing `RUN`; the existing `--allow-paid` guard remains mandatory.
+Tool progress streams phase/name/count without arguments or document text. Run ID, final state
+and readable output path are shown live and artifacts are exported on completion/failure.
+Repeated executions are new runs, not silent retries.
+
+The general `agent-run` CLI also streams content-free progress. Reviewed `draft` replays remain
+separate and do not call the model. The live demo requires Azure CLI inference access and can
+make up to 90 paid model calls after the mapping-repair allowance, 240 tool calls and 60 minutes;
+a total-dollar cap is not configured.
+Its default evidence root contains confidential business documents. This operator affordance
+improves reproducibility and visibility, not model accuracy or application completeness.
+
+**October 30 reviewed requirement/checklist reconciliation:** gate/writer v12 add generic
+`RequirementAssessment` contracts to trusted local review input, separate from model proposals.
+Assessments bind exact issuer wording and application hash, carry source-verified native/OCR
+citations and separate per-criterion sufficiency from physical inclusion. Dependency evaluation
+uses actual written/reconciled results, rejects cycles and cannot clear signing/personal acts.
+Reviewed optional/not-applicable dispositions cannot discard proposed answers.
+
+Attachment controls require an explicit reviewed control/label mapping; satisfied coverage without
+one is reported as placement unavailable, not missing evidence. Default form discovery does not
+automatically map attachment controls. Current criteria and applicability decisions are locally
+reviewed, not autonomous semantic judgments or authenticated production approvals. `validate_answers`
+can carry trusted typed assessments; the writer independently validates them before publication.
+
+**Measured result:** 49 populated, 4 conditional/not applicable, 1 reviewed FIT not applicable,
+1 optional Other not supplied, 1 evidence/checklist satisfied, 7 human-action and 5 unresolved
+requirements out of 68. All 49 prior answer records are unchanged. The FINRA/state-registration
+checklist is checked from explicit registration evidence. The historical electronic-access limitation
+is cited internally, never substituted for initials or current named-user confirmation.
+References are already inline; no separate attachment is required without explicit issuer wording.
+
+Remaining review actions are eligibility sufficiency/operating continuity, latest FOCUS period,
+disclosure baseline, actual questionnaire completion and reference qualification/recency. A printed
+reporting-period/catalog discrepancy is explicit; execution/filing date is not reporting period.
+The replay uses local OCR and cached evidence, no new paid model calls. It does not establish
+autonomous completeness, automatic criteria discovery or held-out quality.
+
+Validation: 1,045 passed and five skipped on each Python 3.12 and 3.13; Ruff lint/format, strict
+mypy and diff checks passed. Only form page 5 changes in the 70-page packet, with zero outside-region
+changed pixels. The marked page was visually inspected. All six supplement and 59 copied-evidence
+content streams match the previous packet.
+
+### Previous discrepancy-tolerant increment
+
+**October 30 discrepancy-tolerant completion increment:** `packet-agent-v17`, scan v4,
+historical context v5 and gate/writer v11 implement the approved candidate policy. Localized
+OCR/image discrepancies retain the actual OCR quotation plus the image candidate and exact
+review concern; conservative mode still withholds. Circular controls, labels before/after marks,
+duplicate-label column mapping and same-row selected write-ins are covered without issuer- or
+document-name-specific application logic. Source/version, role/geometry, contradiction,
+reporting-period and new-personal-act restrictions remain enforced.
+
+The writer reconciles narrowly explicit same-page If-yes explanation fields against their
+immediately preceding, actually written Yes/No parent. Withheld parents do not establish
+applicability. Historical No answers carry their historical limitation into the not-applicable
+disposition. Populated, conditional/not-applicable, human-action and unresolved counts are
+separate; stale parent-unanswered explanations are not emitted as the effective review result.
+
+**Measured result:** a 70-page known-form draft now has **49 populated, 4 conditional/not
+applicable, 7 human-action and 8 unresolved requirements out of 68**. This adds 10 populated
+answers, preserves all 39 prior populated requirements (38 proposals unchanged) and completes
+the existing instruments selection/write-in. Historical tenure/headcount are copied unchanged,
+never rolled forward or represented as current measurements. The outstanding eight are two
+platform fields, current eligibility proof and five attachment/checklist items. Included evidence
+is distinguished from missing evidence and unvalidated checklist placement. All remaining
+nonsigning requirements received an updated, specific review disposition.
+
+The benchmark reused saved independent readings and OCR plus one targeted historical-page
+reading, not an hour-long broad rerun. It uses explicit matching-form correspondences, not
+automatic question-equivalence discovery or a held-out evaluation. Full autonomous completion,
+generic conditional interpretation and current disclosure-event-baseline comparison remain open.
+
+Validation: 1,018 passed and five skipped on both Python 3.12 and 3.13. Ruff lint/format,
+strict mypy on both runtimes and diff checks passed. Five form pages and six supplement pages
+were visually inspected; all six supplement text checks passed. Outside-region changed pixels
+are zero. All 59 copied evidence page content streams match the approved originals.
+
+### Previous increment results
+
+**October 30 extraction-first / answer-first increment:** the sponsor approved historical
+response extraction independently of reuse policy, a known-form reproduction benchmark,
+and checked historical candidate prefills with reviewer concerns rather than continuity-only
+abstention. Chat/UI infrastructure is not part of this increment.
+
+`packet-agent-v16` / scan v3 / historical context v5 / gate and writer v10 now support
+pixel-verified rectangular controls, explicit raw selected/unselected/ambiguous observations,
+column-subheader context, durable extraction diagnostics and complete selected-group receipt
+rechecking at publication. Existing v4 receipt identities are preserved across the new schema.
+The trusted `answer_first_review` policy propagates through live intake, run manifests,
+handoff and draft requests; legacy defaults remain conservative. The CLI enables the new
+policy by default. Disclosure candidates get explicit historical/legal-baseline warnings,
+without claiming current-event comparison is implemented. No new signatures, dates or
+personal acts, conflicting values or financial-period roll-forward are permitted.
+
+**Measured result, not full acceptance:** two approved historical pages produced 37 observed
+controls and 20 verified associations, including 18 selected controls. Known-form benchmark
+correspondences produced a 68-page **39/68 populated** candidate packet (33 retained unchanged,
+six newly populated, one of those partial). The instruments Other/write-in, circular
+eligibility extraction and net-capital question OCR still need repair. The two changed form
+pages were visually inspected and outside-region changed pixels are zero. The earlier 40/68
+target is not met; no autonomous full-run improvement or held-out model-quality claim is made.
+All six reference packets remain reference inputs, not evaluation holdouts.
+Known-form selected-control reproduction is 17/20 (excluding a personal acknowledgment),
+with zero false selected marks on the inspected pages. All 59 copied evidence page streams
+match their originals. Full offline validation: 996 passed, five skipped on both supported
+Python versions; Ruff lint/format, strict mypy, syntax and diff checks passed.
+
+**October 30 historical-first completion increment (acceptance pending):** source navigation
+now supports source-specific, hash-bound native page previews across approved municipalities,
+with image/textless warnings rather than unsupported absence claims. This is a navigational
+index, not a verified semantic document summary. `packet-agent-v15` persists the index into
+answering; `historical-page-context-v4` / `answer-gate-v9` permit explicit checked historical
+answer labels to map exactly to target single-/multi-select options for eligible firm-wide
+descriptions/capabilities. Graphical checkbox selection extraction remains unimplemented.
+The sponsor authorized the two Carrollton, Princeton and New Mexico completed PDFs for
+historical reference and the existing Foundry destination, in addition to the two Broward
+references; none of those six PDFs is held out for evaluation.
+
+Completion recovery now has a code-controlled entry point that revalidates the original
+request/review and blank, preserves selected supported answers, reopens evidence discovery,
+and assigns only remaining requirements to answering groups. It records baseline lineage
+and replays retained proposals after restart. Tests cover exact-label mismatches, multi-select,
+cross-issuer firm-wide reuse, sensitive exclusions, writer revalidation, bounded navigation
+and baseline-recovery mismatches. Acceptance remains a measured real-document gain with no
+loss of existing answers, not these deterministic tests alone. Automated question equivalence,
+graphical checkbox extraction, disclosure-event baseline comparison and fully automatic
+per-requirement evidence-recovery planning remain open.
+
+**Measured acceptance failure:** recovery `98f224e87f3244fbb7a0a05312959ff0` used all six
+approved historical references for navigation and inspected 17 pages, including 11 OCR pages
+and seven independent image readings. The result is **33/68**, one added BOOM Discount Notes
+choice, zero lost answers, and all 32 retained proposals unchanged. The proposed 40/68 target
+was not met. Thirty-five remaining blanks comprise 27 missing-evidence dispositions, one
+unsupported selection path, five signing/personal-act deferrals and two rejected attachment
+proposals. Missing-evidence labels remain model dispositions, not proven absence of facts.
+The handoff still lacks checked primary-title/account-opening associations despite indexed
+leads; it does not support most graphical selections or establish disclosure-event continuity.
+Two checklist proposals still fail quote/placement checks. Broader reference permission did
+not fix these extraction/representation gaps. Do not launch an unchanged retry or present this
+as broad-completion acceptance.
+
+The 68-page local packet restores Public Funds collateral and includes historical page 96's
+native 2025 league table; it does **not** restore page 104's terminal screenshot. The new choice
+and both appended pages were visually inspected. All appended source content streams match
+their originals, retained proposals are identical, and outside-region changed pixels are zero.
+The packet remains incomplete, unsigned and local-only; the choice does not resolve its
+upstream Bloomberg-execution question. Full deterministic checks: 949 passed, five skipped
+on Python 3.12/3.13, Ruff lint/format, strict mypy and diff checks passed. Held-out model-quality
+denominator is not applicable because all six historical packets were reference inputs.
+
+**October 30 targeted-coverage clarification:** `packet-agent-v13` exposes a versioned `source-context-v1` map in source discovery and the durable answering handoff, covering document sections, firm/person scope, explicit disclosure summaries versus absence of search results, financial-period limits and historical supplemental-answer pointers. The source map is navigation/policy, never factual evidence. The sponsor's Broward rule resolves Qualified Representative to the designated Primary Representative for printed personalization only; other issuers and conflicting assignments do not gain that default. Checked explicit historical Yes/No firm-description/capability answers may be prefilled with historical warnings, but unchecked boxes, financial/disclosure/personal-act reuse and unverified relationships remain excluded. Long text fields can use readable, cross-referenced supplements instead of being silently stranded by a one-line region. Focused failing regressions preceded these changes.
+
+Historical disclosure continuity needs prior/current event-baseline comparison, not a blanket copy of No or automatic reclassification of a disclosed event. The sponsor's interpretation is recorded in scope and source guidance; a machine-verified event-comparison contract is not yet implemented. Interactive reviewer fields/signing compatibility remain a separate usability increment; current output stays unsigned and personal acknowledgments remain blank.
+
+**Targeted-coverage acceptance measured:** run `ed3767401ff445b58f83971efbda6f3c` collected 80 checked historical candidates. One malformed citation span required an explicit recovery that reused 12 saved groups and regenerated only the unfinished group; the Blob result published 31/68 written requirements. The final audit exposed an overly strict historical gate requiring every contextual quote to repeat the proposed value. After a failing regression and surgical correction, deterministic `answer-gate-v7` / `reviewed-draft-overlay-v7` revalidation of the exact saved proposals produced a local [66-page corrected draft](../outputs/broward-agent-20261030/attempt-17-revalidated/packet.pdf) and [field audit](../outputs/broward-agent-20261030/attempt-17-revalidated/field-audit.json) with **32/68 written**, up from 28/68, retaining every previously populated requirement. No additional inference was used for this correction; the immutable 31/68 cloud result is unchanged.
+
+New draft content covers the backup title, historical references, Florida-office presence and printed primary/qualified-representative name. The title in the execution block is still incomplete and reference qualification remains unconfirmed; written-field counts must not be reported as complete requirement satisfaction. Remaining gaps include four unsupported historical-choice paths, unsuccessful current disclosure-evidence verification, primary-title/account-opening extraction and two withheld attachment answers. Disclosure-event comparison and digital review fields remain unimplemented. All nine form/supplement renders were inspected, outside-region changed pixels are zero, appended evidence page-content streams match the originals and historical/internal archives remain excluded. Final offline checks: **922 passed, five skipped** on both supported runtimes, Ruff lint/format, strict mypy and diff checks passed. Full-coverage acceptance remains open.
+
+**October 30 completion-workflow correction:** the sponsor approved code-controlled requirement groups, durable proposal/validation diagnostics and targeted recovery. `packet-agent-v12` / `answer-groups-v1` now keep model-driven evidence discovery, then stop that tool loop at a saved evidence handoff. Code assigns at most five non-signing requirements per structured answer request, requires exact group coverage, and records immutable request/response checkpoints before advancing. Staged groups are not evidence approvals; the combined gate/writer still decides what can be written. Each execution attempts unfinished groups once; explicit local or Blob recovery rechecks inputs/configuration and reuses successful groups, with at most three attempts per group and a cumulative 30-call group ceiling. Discovery has a separate conservative 30-call allowance, preserving the existing 85-call total including mapping/images. Answer calls have a 180-second ceiling and at most 8,192 output tokens. Recovery does not repeat discovery or OCR/image model calls. Old failed runs without a saved handoff cannot be recovered retroactively. Real coverage, rendering and remaining-blank acceptance must still be measured independently.
+
+**October 30 measured grouped result:** the second recovery of run `20a132a2955840049b10e11c098cce93` published a [75-page incomplete Broward packet](../outputs/broward-agent-20261030/attempt-16-r2/packet.pdf), separate [reviewer summary](../outputs/broward-agent-20261030/attempt-16-r2/reviewer-summary.txt) and private [field audit](../outputs/broward-agent-20261030/attempt-16-r2/field-audit.json). Coverage increased from **6/68 to 28/68 requirements**, comprising two current-evidence answers and 26 historical-continuity-unconfirmed prefills. All 13 groups completed; only three of 31 proposed answers were prevented from writing (two gate-withheld attachment answers and one readable-font fit failure). Most remaining blanks arise before writing: 31 model-reported evidence gaps, one unsupported historical-choice path, four signing deferrals and one unresolved signer. Do not interpret those evidence-gap labels as an independent absence check. Broad/near-complete questionnaire acceptance remains unmet.
+
+The original grouped execution and first recovery were operator-stopped and archived as failed. Durable responses exposed a specific wire-contract defect: proposed answers had null confidence, allowed by the old JSON schema but rejected by local semantic validation. Outcome-specific response branches now require numeric confidence and citations for proposals; supplying the strict schema as a mapping preserves raw responses before SDK-side parsing can hide them. Three consecutive technical failures stop execution. The successful recovery repeated no evidence/mapping/image model calls. Initial Blob publication failed with `ServiceResponseError`; an immutable publication-only replay succeeded with no further inference, followed by hash-verified download. Form/supplement renders were inspected, outside-allowed-region changed pixels are zero, signing fields remain blank and historical originals/private diagnostics remain outside the packet.
+
+Next completion work should target referenced historical supplements and missing checked title associations, evaluate eligible historical boolean/choice support, and correct the observed attachment/fit failures. Preserve current financial-period, disclosure and personal-act exclusions; avoid another unchanged full run or treating every abstention as missing business input. Deterministic validation is **909 passed, five skipped** on both Python 3.12 and 3.13, with Ruff lint/format, strict mypy and diff checks passing. These tests are regression evidence, not held-out answer-quality or zero-hallucination acceptance.
+
 **October 29 priority clarification (supersedes hosted-first PoC sequencing below):** the immediate working PoC may execute locally using the authorized developer identity, with external Foundry inference and Azure Blob inputs/results. A deployed agent identity and Copilot publication are future deployment acceptance, not blockers to demonstrating the PoC. The ultimate workstation-independent Foundry/Copilot architecture remains the target. Prioritize a substantial real-document application-run attempt over additional tiny synthetic demonstrations; keep focused offline tests as regression safeguards.
 
 **October 29 historical-evidence policy update:** the sponsor approved consulting explicitly permitted prior packets as historical business evidence during discovery, not just as wording references after answering. Eligible context-matched answers may be prefilled in incomplete drafts when continuity is unconfirmed, with prominent historical status/provenance and confirmation needs in the separate reviewer summary. Current contradictions leave the affected answer unresolved; financial periods, disclosure-scope review, personal-act/signing prohibitions and evaluation isolation remain mandatory. This supersedes wording-only sequencing below. **Bounded runtime historical prefill is now implemented** in agent v6/gate v5/writer v5; existing packets/runs do not gain historical support retroactively. Real coverage acceptance is recorded separately from offline contract tests below.
@@ -218,11 +642,27 @@ Acceptance:
 
 ### Next local PoC slice - Historical business evidence
 
-Implementation status: the existing partition manifest now gates the historical discovery family; immutable Blob/run inputs retain issuer and historical approval metadata. Typed historical context and current-source checks flow through the gate, writer, private archive and prominent reviewer-summary flags. Historical originals cannot be submission attachments. Eligible native text/identifier/narrative and machine-cross-checked scalar OCR reuse are supported; scanned narratives, historical financial/disclosure/personal-act reuse and current-period reference qualification are not enabled. Exact provenance and risk guards are deterministic; semantic applicability/continuity are not proven by code or model category labels. Offline contracts include end-to-end rendering and writer rechecks, source mutation, contradiction, issuer/role, current-period, disclosure/personal-act and exact-hash evaluation exclusion. Real-run coverage is a separate acceptance item.
+Implementation status: the existing partition manifest now gates the historical discovery family; immutable Blob/run inputs retain issuer and historical approval metadata. Typed historical context and current-source checks flow through the gate, writer, private archive and prominent reviewer-summary flags. Historical originals cannot be submission attachments. Eligible native text/identifier/narrative and machine-cross-checked scalar OCR reuse are supported. The new `read_historical_page` tool connects whole-page OCR and the blind image reader for mixed native/image completed forms, including verbatim scanned narratives. It validates question/role OCR, answer text and local geometry, retaining hash-bound receipts and per-field failures in private artifacts. Oversized image boxes cannot substitute for local text geometry. The live full-questionnaire profile now shares 20 OCR/image-page allowances between historical and current sources; expanded blind output is capped at 16,384 tokens without retries. Historical financial/disclosure/personal-act reuse and current-period reference qualification remain excluded. Exact provenance and risk guards are deterministic; semantic applicability/continuity are not proven by code or model category labels. Offline contracts include end-to-end rendering and independent writer rechecks, missing/forged receipts, artifact mutation, repeated roles/cross-section swaps, partial-word answers, OCR-only answers, budget exhaustion and existing historical business exclusions. Real-run coverage remains a separate acceptance item.
 
 Real verification: the initial historical run (`505abdcfbcdf448da004b9b8129c6100`, request suffix `-8`) exposed repeated cached quote lookups exhausting the 25-page budget. Failing regressions preceded distinct-source/page accounting and role-navigation handling for repeated labels. The corrected run (`e06f8dc37f8d4b038c660ba2fa70eb21`, suffix `-9`) published a 64-page incomplete packet with **4/68 written requirements: two current-evidence answers and two historical-unconfirmed narratives**; a historical reference proposal was withheld for missing placement. There were no currently corroborated historical answers. Download hashes passed; form/supplement and cited-source spot inspection matched the historical wording; render checks reported zero changed pixels outside allowed regions. Offline validation: **855 passed, 5 skipped** on both Python 3.12 and 3.13, Ruff lint/format and strict mypy passed.
 
 **Coverage acceptance remains unmet.** The corrected run is not a net field-count gain over the prior five-answer run. Among 59 missing-evidence outcomes, 25 explanations mention same-page historical question/role context and 16 mention scan/OCR limitations (overlapping, model-reported categories). Native filled values over scanned form backgrounds are not yet a reliable question/role evidence path. Address that mixed-representation context gap before concluding these are business-data gaps, loosening financial/disclosure safeguards or spending on another unchanged full run. Current results verify historical-prefill mechanics, not substantial questionnaire completion or independent model accuracy.
+
+The subsequent mixed-page integration run (`c2fead356fe24d4989ea7aac0d42d205`, request suffix `-10`) returned 29 historical associations. An initial recheck accepted 19 and withheld 10. Rendered-source inspection traced those ten false abstentions to a left-hand section header legitimately covering right-column fields. Failing regressions preceded the whole-row section fix; **29/29 now pass local-geometry/provenance rechecks**, while competing-column and swapped-role tests reject wrong associations. These are associations, not necessarily eligible prefills; historical choices/disclosures remain excluded.
+
+The run failed in the model step after evidence collection, before writing any packet (`model_call_failed` / `ChatClientException`). The 180.08-second interval matches its configured timeout, but the underlying cause was not retained and is not asserted. Safe exception-type/status diagnostics are now retained, without response/document payloads. A new controlled run uses the existing explicit timeout ceiling of 600 seconds. Offline regression validation is **875 passed, 5 skipped** on both Python 3.12 and 3.13, with Ruff lint/format and strict mypy green. Association counts are not useful-coverage acceptance or model accuracy.
+
+The 600-second run (`a716f73b38ed4e8c8fc85f8c0766d031`, request suffix `-11`) published a hash-verified 64-page incomplete packet with **6/68 filled requirements**: two current-evidence answers and four historical-unconfirmed answers. Primary/backup representative names are newly supported by machine-checked question/role/answer associations; the two prior narratives remain flagged. Seven answers were proposed; only the reference narrative failed the final gate for missing placement. The remaining blanks are 57 missing-evidence outcomes, three signing deferrals and one unresolved signer. Form/supplement inspection and zero-outside-region pixel checks passed. All six accepted answers passed an independent final-code gate recheck unchanged.
+
+The run issued 28 associations from five prior pages before the whole-row header fix. Replaying those exact retained blind readings against the unchanged source/OCR snapshots under the corrected rules yields **38 associations**. This replay used no manually supplied mappings or new model answers. It is not a new answering/publication run: the linked packet still contains six answers. The next coverage check should exercise answer generation with the additional associations and address the reference placement gap, not mistake available-but-unconsumed evidence for missing business input or relax financial/disclosure/signing restrictions. Coverage and held-out accuracy acceptance remain unmet.
+
+**Completion-focused correction:** `packet-agent-v9` explicitly requires eligible checked historical prefills even when continuity is unconfirmed, and the evidence-completion handoff reoffers all checked candidates alongside every requirement for a second completion pass. The live/Blob and local CLI paths share an explicit profile of 60 orchestration + five mapping + 20 image readings (85 model calls), 240 agent tool calls, 3,600 seconds, 200 evidence calls, 80 distinct evidence pages, 20 OCR pages and 500,000 returned evidence characters. Effective limits/usage are retained privately. The 25-page/five-image defaults remain for direct developer tool instances. Native anchors now handle question numbers joined to the first word while retaining exact source quotations; small edge overlaps may be trimmed only within the proposed region while retaining at least 90% of its area and passing downstream native-ink checks. Unchanged cached Broward maps now yield 55 placements, versus 50; three placement exceptions remain. These changes do not establish useful output coverage until a new full run is inspected.
+
+The subsequent v9 run (`539ee13ff05f467582a457bdd3433178`, suffix `-13`) retained a second confirmed 600-second `APITimeoutError`/`ReadTimeout`, this time after evidence collection and two accepted answer batches. No packet was produced. Reading used 13 distinct pages, seven OCR pages and five independent historical images, below the expanded limits. `packet-agent-v10` now uses SDK-supported deterministic phase compaction to keep the checked evidence handoff, current quote citations, source metadata, staged/remaining IDs and latest complete tool exchange without replaying all raw reads and prior batches. It does not add model calls or claim that context size is a proven timeout cause. `historical-page-context-v3` additionally handles joined question-number spacing in prior-form captions; direct comparison of the actual OCR/image text reproduced that reference-question failure. Exact numbers/words, answer confidence and gate/writer safeguards remain intact. Full offline validation is **892 passed, 5 skipped** on both Python 3.12 and 3.13, Ruff lint/format and strict mypy passed. Neither these checks nor failed runs establish useful packet completion.
+
+Attempt `-14` (`61284870290c400d84e14930880c9cc9`) collected evidence but entered repeated answer-batch rejections interleaved with successful status calls. It was explicitly failed closed (`repeated_answer_batch_rejections`) without publishing a packet. The exact rejected payload was not retained. Investigation nevertheless reproduced three contract defects: a 500-item advertised schema versus a ten-item runtime limit, rejection feedback lost across status/compaction, and status queries resetting consecutive-error accounting. `packet-agent-v11` fixes those defects with a ten-item typed tool schema, retained validation feedback and non-progress-aware error accounting. A separate failing regression also prevents native anchoring from ignoring an explicitly wrong glued question number. Full deterministic validation is **895 passed, 5 skipped** on both Python 3.12 and 3.13, with Ruff lint/format and strict mypy green; useful-coverage acceptance still requires the real-run result.
+
+Attempt `-15` (`9fd7f6deb9524b158909e6eabdf3e71d`) exercised v11 with context v3. It completed evidence collection, accepted one answer batch, rejected four with `invalid_arguments`, then failed with the retained `ChatClientException -> APITimeoutError -> ReadTimeout -> ReadTimeout` chain. No packet was published; in-memory staging is not recoverable. The downloaded private diagnostics passed hash verification and include 65 historical associations, not an answered-field count. The rejected field details were not archived, so their exact cause remains unresolved. **The latest published packet remains attempt `-11`, 6/68 written requirements; useful-coverage acceptance is still unmet.** Stop unchanged full reruns. The next completion correction should bound answering by small requirement groups and durably retain proposal/validation diagnostics, while preserving evidence, gate and signing rules. A complete remaining-blank audit cannot be claimed for an unpublished run.
 
 Implement before another OCR-only optimization cycle:
 
@@ -412,7 +852,7 @@ Validation: 14 new tests in [test_draft.py](../tests/integration/test_draft.py) 
 
 **Scanned-evidence increment (machine-cross-checked drafts explicitly approved):** [scan.py](../src/bd_packet_builder/scan.py) adds a bounded blind Foundry page-image reading, which receives no OCR text, candidate quote, proposed answer or expected subject. Code compares OCR word spans against the independently returned text/record subject, requires at least 90 OCR confidence for quote and subject words, retains source/page/render hashes, and checks requested/claimed periods. Runtime-issued check receipts can support text/identifier draft answers only; scanned narratives, choices, attestations, personal-act inference and signer-role answers remain blocked. The answer gate and writer revalidate the evidence without setting human visual-approval flags. A catalog/filename versus printed-period discrepancy is reported internally. This is transcription agreement, not semantic proof or a zero-hallucination guarantee; business review remains mandatory. The prior human-reviewed OCR path remains intact.
 
-The live cap is now **30 orchestration + up to five mapping + up to five independent scan readings = 40 model calls**, with no automatic retries. Repeated quotes on an already transcribed exact source/page/render reuse the in-memory reading, not a cross-run approval cache. The existing approved Foundry deployment/local Tesseract are reused; no dependencies, Azure resources or deployment changes are needed. Internal receipts, OCR snapshots and content-free tool traces are retained separately from the packet. Attempt 6 exposed a subject-capitalization lookup bug and uncitable-attachment omission (three answers, zero successful scan checks); both have targeted fixes and the failed result is retained. See [scanned-evidence usage/results](../README.md#machine-cross-checked-scanned-evidence).
+The original scan increment used **30 orchestration + up to five mapping + up to five independent scan readings = 40 model calls**, with no automatic retries. The later completion-focused correction above supersedes this profile with an explicit 85-call ceiling and a larger bounded evidence allowance. Repeated quotes on an already transcribed exact source/page/render reuse the in-memory reading, not a cross-run approval cache. The existing approved Foundry deployment/local Tesseract are reused; no dependencies, Azure resources or deployment changes are needed. Internal receipts, OCR snapshots and content-free tool traces are retained separately from the packet. Attempt 6 exposed a subject-capitalization lookup bug and uncitable-attachment omission (three answers, zero successful scan checks); both have targeted fixes and the failed result is retained. See [scanned-evidence usage/results](../README.md#machine-cross-checked-scanned-evidence).
 
 **Attempt 7 real verification:** run `b68bf0214d3443038ba658888f7aacc7` published a 64-page incomplete packet with five written answers and 63 of 68 interpreted requirements blank. One written answer, firm CRD, uses independently cross-checked scanned evidence; instrument specialization is an additional native-evidence narrative. Of four scan-quote tool attempts, one passed, one failed OCR-confidence checks and two returned unreadable-page abstentions; these are tool outcomes, not held-out answer-accuracy metrics. Four relevant supporting PDFs are appended (58 evidence pages), including partial FOCUS/FINRA candidates with explicit adequacy/period exceptions, plus five form pages and one supplemental-answer page. Downloaded hashes and render-difference checks passed. Form pages 1, 2, 4 and 5, the supplement, and the accepted scanned source were inspected; the one promoted scanned value matched its source image (one case only). Signatures/dates/checklist marks were untouched. Do not equate this narrow success with satisfactory overall packet coverage, exhaustive narrative grounding or business approval. Remaining blockers include FOCUS scan readability/confidence and genuinely unestablished representative roles, acknowledgments and disclosures.
 

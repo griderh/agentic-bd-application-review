@@ -20,7 +20,8 @@ from uuid import uuid4
 from pydantic import AwareDatetime, Field, StringConstraints, ValidationError, model_validator
 
 from bd_packet_builder.contracts import Contract, Identifier, Sha256
-from bd_packet_builder.history import ArchiveManifest
+from bd_packet_builder.history import ArchiveManifest, HistoricalReusePolicy
+from bd_packet_builder.reconciliation import RequirementAssessment
 
 RunStatus = Literal[
     "created",
@@ -83,6 +84,10 @@ class RunRequest(Contract):
     as_of: date | None = None
     issuer: Label | None = None
     historical_archive: ArchiveManifest | None = None
+    historical_policy: HistoricalReusePolicy = "conservative"
+    requirement_assessments: Annotated[
+        tuple[RequirementAssessment, ...], Field(max_length=100)
+    ] = ()
 
 
 class EvidenceItem(Contract):
@@ -117,9 +122,9 @@ class EvidenceSnapshot(Contract):
     def verify(self, path: str, data: bytes) -> EvidenceItem:
         item = next((i for i in self.items if i.path == path), None)
         if item is None:
-            raise RunInputError("Evidence is not part of this run's snapshot")
+            raise RunInputError(f"Evidence is not part of this run's snapshot: {path}")
         if len(data) != item.size_bytes or hashlib.sha256(data).hexdigest() != item.sha256:
-            raise RunInputError("Evidence changed after the run snapshot")
+            raise RunInputError(f"Evidence changed after the run snapshot: {path}")
         return item
 
 
@@ -243,6 +248,10 @@ class RunStore(Protocol):
 
     def read_artifact(self, run_id: str, name: str) -> bytes: ...
 
+    def checkpoint(self, run_id: str, *, name: str, data: bytes) -> RunManifest: ...
+
+    def resume_answers(self, run_id: str) -> RunManifest: ...
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -310,7 +319,7 @@ class FileRunStore:
             status="created",
         )
         staging = self.root / f".staging-{uuid4().hex}"
-        staging.mkdir()
+        staging.mkdir(mode=0o700)
         try:
             (staging / "input").mkdir()
             (staging / "artifacts").mkdir()
@@ -325,6 +334,47 @@ class FileRunStore:
     def load(self, run_id: str) -> RunManifest:
         return self._load(self._run_dir(run_id))
 
+    def restore_answers(
+        self, manifest: RunManifest, blank: bytes, artifacts: Mapping[str, bytes]
+    ) -> None:
+        """Restore a hash-verified failed answer run into a new isolated store."""
+        if (
+            manifest.status != "failed"
+            or manifest.failure is None
+            or manifest.failure.code != "answer_groups_incomplete"
+            or manifest.failure.during_status != "evidence_collected"
+        ):
+            raise RunTransitionError("Only a checkpointed answer-group failure can be restored")
+        if (
+            len(blank) != manifest.blank_size_bytes
+            or hashlib.sha256(blank).hexdigest() != manifest.blank_sha256
+        ):
+            raise RunInputError("Restored blank does not match the run snapshot")
+        if set(artifacts) != {a.name for a in manifest.artifacts}:
+            raise RunInputError("Restored artifacts do not match the manifest")
+        for artifact in manifest.artifacts:
+            data = artifacts[artifact.name]
+            if (
+                len(data) != artifact.size_bytes
+                or hashlib.sha256(data).hexdigest() != artifact.sha256
+            ):
+                raise RunInputError("Restored artifact hash does not match")
+        if (self.root / manifest.run_id).exists():
+            raise RunConflictError("Run already exists in this store")
+        staging = self.root / f".staging-{uuid4().hex}"
+        staging.mkdir(mode=0o700)
+        try:
+            (staging / "input").mkdir()
+            (staging / "artifacts").mkdir()
+            _write_new(staging / "input" / "blank.pdf", blank)
+            for data in artifacts.values():
+                _write_blob(staging / "artifacts", data)
+            _write_manifest(staging, manifest)
+            staging.rename(self.root / manifest.run_id)
+        except BaseException:
+            _remove_tree(staging)
+            raise
+
     def advance(
         self,
         run_id: str,
@@ -335,6 +385,7 @@ class FileRunStore:
         artifacts: Mapping[str, bytes] | None = None,
         exceptions: tuple[ReviewException, ...] = (),
         outcome: RunOutcome | None = None,
+        _checkpoint: bool = False,
     ) -> RunManifest:
         artifacts = artifacts or {}
         for name, data in artifacts.items():
@@ -367,7 +418,10 @@ class FileRunStore:
                 raise RunTransitionError("Run has already ended")
             if manifest.status != expected_status:
                 raise RunTransitionError("Run is not in the expected status")
-            if _NEXT.get(expected_status) != to_status:
+            if _checkpoint:
+                if expected_status != "evidence_collected" or to_status != expected_status:
+                    raise RunTransitionError("Checkpoints are restricted to the answer phase")
+            elif _NEXT.get(expected_status) != to_status:
                 raise RunTransitionError("Requested transition is not allowed")
             if to_status == "packet_assembled" and outcome is None:
                 raise RunTransitionError("An assembled packet requires an explicit outcome")
@@ -379,7 +433,11 @@ class FileRunStore:
             if existing & artifacts.keys():
                 raise RunConflictError("Recorded artifacts cannot be replaced")
             now = self._now()
-            elapsed = (now - manifest.created_at).total_seconds()
+            started = next(
+                (s.completed_at for s in reversed(manifest.steps) if s.step == "answer_resume"),
+                manifest.created_at,
+            )
+            elapsed = (now - started).total_seconds()
             if elapsed > manifest.limits.max_elapsed_seconds:
                 self._write_failure(
                     run_dir, manifest, "elapsed_limit_exceeded", "Run elapsed-time limit exceeded."
@@ -408,6 +466,50 @@ class FileRunStore:
             )
             for data in artifacts.values():
                 _write_blob(run_dir / "artifacts", data)
+            _write_manifest(run_dir, updated)
+            return updated
+
+    def checkpoint(self, run_id: str, *, name: str, data: bytes) -> RunManifest:
+        """Append an immutable private answer event without advancing validation status."""
+        return self.advance(
+            run_id,
+            step="answer_checkpoint_" + hashlib.sha256(name.encode()).hexdigest()[:16],
+            expected_status="evidence_collected",
+            to_status="evidence_collected",
+            artifacts={name: data},
+            _checkpoint=True,
+        )
+
+    def resume_answers(self, run_id: str) -> RunManifest:
+        """Explicit recovery only; callers must recheck sources and component compatibility."""
+        run_dir = self._run_dir(run_id)
+        with _locked(run_dir):
+            manifest = self._load(run_dir)
+            if (
+                manifest.status != "failed"
+                or manifest.failure is None
+                or manifest.failure.code != "answer_groups_incomplete"
+                or manifest.failure.during_status != "evidence_collected"
+            ):
+                raise RunTransitionError("Only a checkpointed answer-group failure can resume")
+            if len(manifest.steps) >= manifest.limits.max_steps:
+                raise RunLimitError("Run step limit exceeded")
+            now = self._now()
+            updated = _rebuild(
+                manifest,
+                status="evidence_collected",
+                failure=None,
+                updated_at=now,
+                steps=(
+                    *manifest.steps,
+                    StepRecord(
+                        step="answer_resume",
+                        from_status="failed",
+                        to_status="evidence_collected",
+                        completed_at=now,
+                    ),
+                ),
+            )
             _write_manifest(run_dir, updated)
             return updated
 

@@ -13,6 +13,7 @@ from bd_packet_builder.retrieval import (
     SourceCatalog,
     default_catalog,
     retrieve_evidence,
+    source_context,
 )
 
 
@@ -164,6 +165,70 @@ def test_catalog_has_purposes_not_business_facts() -> None:
     data = default_catalog().model_dump(mode="json")
     assert any(f["folder"] == "FINRA_Certification" for f in data["families"])
     assert "001234" not in json.dumps(data)
+
+
+def test_purpose_catalog_exposes_only_approved_supporting_families() -> None:
+    data = default_catalog().model_dump(mode="json")
+    documents = {item["folder"]: item for item in data["supporting_documents"]}
+    expected_folders = {
+        "Insperex_Public_Funds",
+        "fi_market_highlight",
+        "US_agencies_snapshot",
+        "corporate_agency_overview",
+        "Bloomberg_League_Tables",
+        "bios",
+        "FINRA_Certification",
+        "Audited_Financials",
+        "Focus_Reports",
+        "SIPC_list",
+        "settlement_delivery_instructions",
+        "Business Continuity Statement",
+        "AML_Certification",
+        "Delivery_Instructions",
+        "Sustainable_Finance_Statement",
+        "Cover_Letters",
+    }
+    assert expected_folders <= documents.keys()
+    assert {family["folder"] for family in data["families"]} == expected_folders - {"Cover_Letters"}
+    for folder in expected_folders:
+        item = documents[folder]
+        assert item["supported_topics"]
+        assert item["inclusion_class"] in {
+            "issuer-required",
+            "business-required",
+            "relevant-supporting",
+        }
+        assert item["inclusion_conditions"]
+        assert item["identity_matching"]
+        assert item["period_matching"]
+        assert item["limitations"]
+
+    assert documents["Bloomberg_League_Tables"]["routing"] == "retrieval-allowlisted"
+    assert documents["bios"]["routing"] == "retrieval-allowlisted"
+    assert documents["Cover_Letters"]["routing"] == "navigation-only"
+    cover = documents["Cover_Letters"]
+    assert "unsigned" in " ".join(cover["inclusion_conditions"]).lower()
+    assert "signed" in " ".join(cover["limitations"]).lower()
+    assert "generate" in " ".join(cover["inclusion_conditions"]).lower()
+    assert "filename" in documents["Bloomberg_League_Tables"]["period_matching"]
+    assert (
+        documents["Focus_Reports"]["period_matching"]
+        != documents["Audited_Financials"]["period_matching"]
+    )
+
+    guidance = source_context()
+    assert guidance["supporting_documents"] == data["supporting_documents"]
+    from bd_packet_builder.knowledge import knowledge_context
+
+    reference = knowledge_context()
+    assert guidance["domain_knowledge"]["sha256"] == reference["sha256"]
+    assert "business_rules" not in guidance
+    entries = {e["entry_id"]: e for e in reference["entries"]}
+    assert "other municipalities" in " ".join(entries["historical-reuse"]["guidance"])
+    tenure = " ".join(entries["historical-tenure-headcount"]["guidance"])
+    assert "completed calendar anniversaries" in tenure
+    assert "verified signing date" in tenure
+    assert "separate reporting periods" in " ".join(entries["financial-periods"]["guidance"])
 
 
 def test_requested_financial_period_mismatch_is_not_used_for_answer(tmp_path: Path) -> None:
@@ -365,6 +430,40 @@ def test_local_ocr_is_scoped_to_selected_source_and_never_promoted(
     assert "ocr_text_unverified_not_native_citations" in data["needs"][0]["issues"]
     assert data["needs"][0]["answer_evidence_usable"] is False
     assert data["proposals"] is None
+
+
+def test_outlined_body_with_native_footer_requires_local_ocr(tmp_path, monkeypatch):
+    import bd_packet_builder.retrieval as module
+    from bd_packet_builder.inventory import build_inventory
+
+    source = tmp_path / "bd_agreements/supporting_data/FINRA_Certification/outlined.pdf"
+    source.parent.mkdir(parents=True)
+    canvas = Canvas(str(source), invariant=True)
+    canvas.drawString(40, 30, "Report about Fictional Securities. " * 3)
+    for row in range(10):
+        for col in range(20):
+            canvas.rect(40 + col * 15, 400 + row * 15, 7, 9)
+    canvas.save()
+    inventory = build_inventory(tmp_path)
+
+    def fake_ocr(root, path, page, **kwargs):
+        output = root / "outputs/local-ocr"
+        output.mkdir(parents=True)
+        (output / "ocr.json").write_text(
+            json.dumps(
+                {
+                    "text": "Firm Operations: Approved since 2000. Fictional data.",
+                    "render_sha256": "a" * 64,
+                }
+            )
+        )
+        return output
+
+    monkeypatch.setattr(module, "run_ocr", fake_ocr)
+    result = module.read_page(tmp_path, inventory, inventory.sources[0], 1, True)
+    assert result.mode == "ocr"
+    assert "Firm Operations" in result.text
+    assert "ocr_text_unverified_not_native_citations" in result.issues
 
 
 def test_native_period_mismatch_blocks_proposals_even_if_filename_matches(tmp_path: Path) -> None:

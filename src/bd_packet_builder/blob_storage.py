@@ -19,7 +19,7 @@ from bd_packet_builder.history import ArchiveManifest, with_historical_sources
 from bd_packet_builder.inventory import build_inventory
 from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.retrieval import default_catalog
-from bd_packet_builder.run import RunManifest, RunStore
+from bd_packet_builder.run import FileRunStore, RunManifest, RunStore
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_BUNDLE_BYTES = 512 * 1024 * 1024
@@ -281,6 +281,37 @@ class PacketBlobStorage:
             raise BlobStorageError(
                 "Request already claimed; inspect its result before retrying with a new ID"
             )
+
+    def recovery_inputs(self, request_id: str) -> tuple[str, str]:
+        claim = json.loads(
+            self.blobs.read(REVIEWS, f"requests/{_id(request_id)}.json", 2 * 1024 * 1024)
+        )
+        return _id(claim["blank_id"]), _id(claim["evidence_set_id"])
+
+    def restore_answers(self, request_id: str, store: FileRunStore) -> RunManifest:
+        result = json.loads(
+            self.blobs.read(REVIEWS, f"requests/{_id(request_id)}-result.json", 2 * 1024 * 1024)
+        )
+        prefix = f"runs/{_id(request_id)}/{_id(result['run_id'])}/"
+        manifest = RunManifest.model_validate_json(
+            self.blobs.read(REVIEWS, prefix + "manifest.json", 16 * 1024 * 1024)
+        )
+        if manifest.run_id != result["run_id"]:
+            raise BlobStorageError("Recovery result does not match the stored run")
+        if (
+            manifest.status != "failed"
+            or manifest.failure is None
+            or manifest.failure.code != "answer_groups_incomplete"
+            or manifest.failure.during_status != "evidence_collected"
+        ):
+            raise BlobStorageError("Only a checkpointed answer-group failure can be recovered")
+        artifacts = {
+            a.name: self.blobs.read(REVIEWS, prefix + a.name, a.size_bytes)
+            for a in manifest.artifacts
+        }
+        blank = self.blobs.read(REVIEWS, prefix + "blank.pdf", manifest.blank_size_bytes)
+        store.restore_answers(manifest, blank, artifacts)
+        return manifest
 
     def publish(self, request_id: str, store: RunStore, manifest: RunManifest) -> dict[str, str]:
         prefix = f"runs/{_id(request_id)}/{_id(manifest.run_id)}/"

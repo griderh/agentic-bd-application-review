@@ -124,7 +124,108 @@ Financial reporting beyond the FOCUS report and audited financials sits outside 
 
 Prior representative assignments, contact details, firm descriptions, trading-capability descriptions, account-opening requirements and reference candidates can inform draft proposals under these rules. A prior assignment supports only that same role/context; a registered person's presence in a report does not establish an assignment. Historical references must not be presented as meeting a current recency or qualification requirement without support. Preserve explicit dates/qualifiers in historical claims.
 
+**Cross-municipality clarification (October 30, 2026):** consult approved completed
+applications from other municipalities as first-class sources for comparable questions,
+candidate answers, supporting-document relationships and prior business interpretation.
+Firm-wide information can transfer when the question's meaning, entity, scope and period
+are applicable; prior acceptance by another municipality is not itself evidence of
+equivalence or current accuracy. Municipality-specific assignments and personal acts do
+not transfer automatically. Maintain source-specific navigation and inspect the underlying
+question, answer and support rather than treating a summary as factual authority. The sponsor
+authorized both Carrollton PDFs, the Princeton PDF and the New Mexico PDF under Completed
+for reference use and relevant text/images at the existing configured Foundry destination,
+in addition to the two authorized Broward PDFs. All six are reference inputs, not held-out
+evaluation examples; this does not authorize submission, other services or restricted tiers.
+
 Financial quantities must use evidence for the applicable reporting period; historical values are not rolled forward. Historical disclosures require explicit question/scope/period review and applicable supporting evidence, not automatic reuse of an old negative response. Never carry forward signatures, signature dates or personal acknowledgments as new acts. Unresolved signer authority remains flagged even if a historical assignment is prefilled.
+
+**Answer-first draft clarification (sponsor approved October 30, 2026):** separate historical
+extraction, current reuse eligibility and reviewer approval. Extract historical text and graphical
+selections, including sensitive responses, before applying reuse policy. Failure to associate a
+question with a mark is an extraction failure, not evidence that the underlying fact is missing.
+Under the explicitly recorded `answer_first_review` policy, write applicable, checked historical
+answers as conspicuous historical candidates instead of withholding solely for unconfirmed
+current continuity. This includes explicit prior disclosure responses and their prior business
+interpretation; the summary must request current-event/baseline comparison and must not imply
+that legal interpretation or continuity has been independently re-approved. Missing current
+corroboration is a review concern, not proof of a negative or an automatic blank.
+
+This supersedes the conservative disclosure withholding rule for that draft mode only.
+Contradictions, incompatible issuer/role contexts, explicit reporting-period mismatches and
+unlocalized or invalid question/answer relationships remain actionable exceptions. Never invent a fact,
+extrapolate a historical financial value, apply a signature/date, or represent a prior
+acknowledgment as a newly performed personal act. Every requirement must have an explicit
+answer/candidate or actionable exception in the internal summary; "answer first" does not
+authorize fabricated placeholders. Faithful historical reproduction is tested separately from
+whether an answer is suitable for a current application. Chat is not a prerequisite for this
+increment; a later batch review-and-resolve experience remains the intended low-interaction path.
+
+**Dated historical-prefill clarification (sponsor approved November 2, 2026):**
+same-municipality history is not required. Approved packets from other municipalities may
+ground comparable firm-wide answers, including when questions are worded differently.
+Compare entity, quantity, definitions, conditions, role and period; record the original
+question, target question, interpretation, differences and uncertainty in the internal review.
+Applicable uncertain answers may be draft candidates under `answer_first_review`; material
+incompatibilities, contradictions and municipality-specific personal acts do not transfer.
+
+For firm years established and a representative's years with the firm, a verified prior
+signature date in that same packet may anchor a deterministic adjustment by completed calendar
+anniversaries. February 29 anniversaries use February 28 in non-leap years. Use the fixed run
+as-of date, or run-creation UTC date when none is supplied. Preserve the prior value and its
+qualifiers, signing-date evidence, calculation and continuity concern. Missing, ambiguous,
+conflicting or future signing dates prohibit an increment, not a faithful unchanged historical
+candidate. A prior signing date is readable historical metadata, never a new signing act.
+Historical employee counts may be copied unchanged with their approximation qualifiers and
+an explicit current-headcount review flag. Never extrapolate financial values or claim old
+evidence satisfies a new reporting period.
+
+A checked prior dealer-category selection may be prefilled with applicable FOCUS and audited
+financial support attached when available. Record missing or insufficient support and unmet
+criteria; historical selection and physical attachment do not establish current eligibility.
+Supporting-document selection should use document purpose and the issuer's underlying question,
+not only explicit filenames. Marketing/performance exhibits, representative materials and
+financial corroboration need entity/role/period matching, inclusion rationale and limitations.
+Do not copy an old signed cover letter; flag a needed unsigned/human-obtained component.
+
+**Extraction-discrepancy clarification (sponsor approved October 30, 2026):** an independently
+readable historical candidate localized to its source question/role/option may be prefilled
+despite low OCR confidence, OCR/image wording differences or unresolved local mark inspection.
+Preserve the actual OCR quotation; never rewrite it to manufacture agreement. Record both
+readings, the selected candidate, discrepancy and selection rationale in the internal summary.
+This is a candidate for review, not independently verified agreement or current truth.
+Invalid source/version, role/column relationships, contradictions and explicit period
+restrictions still block reuse. Unchanged historical tenure/headcount may be a flagged candidate,
+never a recalculated or silently current measurement.
+
+Recompute conditional follow-ups from the answers actually written. A clear No makes its
+explicit If-yes explanation not applicable; a withheld parent does not. Historical applicability
+inherits the historical warning. Report populated answers, conditional/not-applicable items,
+human actions and unresolved items separately; reclassification is not a newly filled answer.
+
+**Requirement/checklist clarification (sponsor approved October 30, 2026):** distinguish physical
+inclusion from satisfaction of every applicable issuer condition. Record criterion-level evidence,
+period/version discrepancies, missing coverage and exact reviewer actions; attaching a report alone
+must not imply that it proves all requested conditions. Only mark an attachment checklist control
+when its reviewed coverage, actual packet inclusion and required-item dependencies are satisfied
+and its placement is validated. A completed-questionnaire assertion depends on actual required-item
+completion, including outstanding personal acts, not a model's completion claim.
+
+Reviewed unused-platform and optional Other entries are not missing answers. For the inspected
+application, the sponsor agrees unchecked historical FIT choices should not count as a missed
+answer and no additional Other platform is supplied. Treat FIT as not applicable for this draft's
+completeness accounting, not as confirmation that the firm never trades on FIT; do not infer a new
+negative business representation solely from unchecked historical boxes.
+References supplied within the questionnaire do not require a separate attachment unless issuer
+wording explicitly requires one; qualification and recency still require support or reviewer action.
+The historical electronic-access write-in describes an operational limitation, not initials or a
+current confirmation of access for named users. Retain the limitation internally and leave those
+personal actions to humans. Prior completed forms are not automatically correctly completed ground truth.
+
+**Sponsor clarification (October 30, 2026):** maintain versioned source-context guidance describing likely document sections, subject coverage and limitations, rather than asking the model to search every document without context. BrokerCheck disclosure summaries and event details are relevant regulatory evidence. An explicit no-reported-events statement can support a negative within the report's stated coverage; an unsuccessful search or absent details section alone cannot. Public-report coverage may omit confidential matters, so do not equate public silence with absence of all investigations. The sponsor explains that Broward's prior investigation answer reflects the business's interpretation of previously disclosed events, not concealment. Carrying that interpretation forward requires linking the prior answer to the relevant event baseline and checking current records for additional or materially changed events; an unknown baseline remains a reviewer exception. The model must not independently invent a legal determination.
+
+For **Broward County**, the sponsor establishes that the **Qualified Representative defaults to the designated Primary Representative**, including the printed identity in the execution block. Apply this issuer-specific rule unless explicit evidence conflicts; do not infer a new person from registration alone. This is permission to personalize printed fields, not to apply a signature, signature date, initial or personal acknowledgment. Supported title information is still required; report a missing title separately rather than treating the assignment itself as unknown.
+
+Personal acknowledgments remain blank where the required act is not evidenced. Digital review must not be made dependent on printing and rescanning: interactive PDF review fields and compatible electronic signing are the intended usability direction, with viewer compatibility and signing-service selection still to be verified. This clarification does not authorize pre-asserting personal acts or represent interactive fields as already implemented.
 
 Never overwrite contradictory current evidence with history. A historical difference is a reviewer flag, not proof of an error; identical wording is not an accuracy pass. Completed or signed packets are not automatically ground truth. Keep evaluation-only packets, copies and answer-bearing derivatives out of retrieval, prompts, examples and fact extraction. A packet used as historical input cannot also be an independent held-out answer for that evaluation. Partition assignment and storage permissions are controlled by the technical/evaluation custodian, not the model. Historical packets remain internal evidence; do not append prior signed packets to a submission merely because their answers were consulted.
 

@@ -32,7 +32,12 @@ def make_pdf(path: Path, lines: list[tuple[float, float, str]], *, radio: bool =
 
 
 def prepare(
-    root: Path, *, long: bool = False, single: bool = False, registered: bool | None = None
+    root: Path,
+    *,
+    long: bool = False,
+    single: bool = False,
+    registered: bool | None = None,
+    conditional: bool = False,
 ) -> tuple[Path, Path, dict]:
     source = Path("bd_agreements/Blank/form.pdf")
     make_pdf(
@@ -40,7 +45,7 @@ def prepare(
         [
             (40, 740, "Firm CRD:" if registered is None else "Is the firm registered?"),
             (40, 660, "Choose instruments."),
-            (40, 510, "Describe services."),
+            (40, 510, "If yes, please explain:" if conditional else "Describe services."),
             (40, 320, "Missing tax ID:"),
             (40, 200, "Authorized signature:"),
             (340, 200, "Signature date:"),
@@ -84,7 +89,11 @@ def prepare(
     definitions = [
         ("crd", "Firm CRD:", "identifier"),
         ("instruments", "Choose instruments.", "single_select" if single else "multi_select"),
-        ("services", "Describe services.", "narrative"),
+        (
+            "services",
+            "If yes, please explain:" if conditional else "Describe services.",
+            "narrative",
+        ),
         ("missing", "Missing tax ID:", "identifier"),
         ("sign", "Authorized signature:", "signature"),
         ("date", "Signature date:", "signature_date"),
@@ -181,6 +190,8 @@ def prepare(
             value=dict(kind="boolean", value=registered),
             citations=[citation(f"Registered: {'Yes' if registered else 'No'}")],
         )
+    if conditional:
+        reqs[:] = [reqs[0], reqs[2], reqs[1], *reqs[3:]]
     request = root / "outputs/request.json"
     request.parent.mkdir()
     request.write_text(json.dumps(data))
@@ -213,6 +224,99 @@ def write_review(request: Path, review: Path, *, approve: bool = True) -> None:
             )
         )
     )
+
+
+@pytest.mark.parametrize(
+    "registered,withhold_parent,proposed_child",
+    [
+        (False, False, False),
+        (False, False, True),
+        (True, False, False),
+        (False, True, True),
+    ],
+)
+def test_conditional_completion_uses_effective_written_answer(
+    tmp_path, registered, withhold_parent, proposed_child
+):
+    request, review, data = prepare(tmp_path, registered=registered, conditional=True)
+    if not proposed_child:
+        data["proposals"]["proposals"][2] = {
+            "requirement_id": "services",
+            "outcome": "missing_evidence",
+            "explanation": "STALE: parent was not answered",
+        }
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    reviewed = json.loads(review.read_bytes())
+    if withhold_parent:
+        reviewed["decisions"][0]["decision"] = "withhold"
+    review.write_text(json.dumps(reviewed))
+    output = run_draft(tmp_path, Path("outputs/request.json"), Path("outputs/review.json"))
+    report = json.loads((output / "draft.json").read_bytes())
+    child = next(a for a in report["answers"] if a["requirement_id"] == "services")
+    if withhold_parent:
+        assert child["status"] == "blank"
+        assert child["issues"] == ["conditional_parent_unresolved"]
+    elif not registered:
+        assert child["status"] == "not_applicable"
+        assert "services" not in report["written_requirements"]
+        assert report["completion"]["conditional_not_applicable"] == 1
+    else:
+        assert child["status"] == "blank"
+        assert "is Yes" in child["review_reason"]
+    assert sum(report["completion"].values()) == 6
+    summary = (output / "reviewer-summary.txt").read_text()
+    assert "STALE: parent was not answered" not in summary
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+
+
+def test_reviewer_summary_includes_specific_unanswered_explanation(tmp_path):
+    request, review, data = prepare(tmp_path)
+    explanation = "Synthetic evidence is attached; requested reporting period remains unconfirmed."
+    data["proposals"]["proposals"][3]["explanation"] = explanation
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    output = run_draft(tmp_path, Path("outputs/request.json"), Path("outputs/review.json"))
+    assert explanation in (output / "reviewer-summary.txt").read_text()
+
+
+def test_supplement_text_verification_preserves_line_ending_hyphens(tmp_path):
+    request, review, data = prepare(tmp_path)
+    data["requirements"]["requirements"][0]["kind"] = "text"
+    data["layout"]["responses"][0]["requirement"] = data["requirements"]["requirements"][0]
+    data["proposals"]["proposals"][0]["value"] = {
+        "kind": "text",
+        "value": "Synthetic Heading-\nContinued text",
+    }
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    output = run_draft(tmp_path, Path("outputs/request.json"), Path("outputs/review.json"))
+    report = json.loads((output / "draft.json").read_bytes())
+    assert "crd" in report["written_requirements"]
+    assert report["placements"]["crd"]["mode"] == "supplement"
+    assert report["render_checks"]["supplement_pages_rendered_and_text_checked"] == 1
+
+
+def test_long_text_uses_readable_supplement_instead_of_being_left_blank(tmp_path: Path) -> None:
+    request, review, data = prepare(tmp_path)
+    region = data["layout"]["responses"][0]["text_region"]
+    region.update(right=280.0)
+    data["requirements"]["requirements"][0]["kind"] = "text"
+    data["layout"]["responses"][0]["requirement"] = data["requirements"]["requirements"][0]
+    value = "Managing Director of Institutional Fixed Income Sales and Public Funds"
+    data["proposals"]["proposals"][0]["value"] = {"kind": "text", "value": value}
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    output = run_draft(tmp_path, Path("outputs/request.json"), Path("outputs/review.json"))
+    report = json.loads((output / "draft.json").read_text())
+    assert "crd" in report["written_requirements"]
+    assert report["placements"]["crd"]["mode"] == "supplement"
+    from pypdf import PdfReader
+
+    packet = PdfReader(output / "draft-packet.pdf")
+    assert "See packet page 2." in packet.pages[0].extract_text()
+    assert value in packet.pages[1].extract_text().replace("\n", " ")
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
 
 
 def add_ocr_citation(

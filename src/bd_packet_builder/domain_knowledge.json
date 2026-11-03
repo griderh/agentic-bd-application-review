@@ -1,0 +1,130 @@
+{
+  "version": "domain-knowledge-v2",
+  "entries": [
+    {
+      "entry_id": "brokercheck-registration",
+      "authority": "Project-approved interpretation limits; not an authoritative FINRA completeness ruling.",
+      "applies_to": "Firm/individual BrokerCheck identifiers, operating history and conditional entity classifications.",
+      "guidance": [
+        "Distinguish firm and individual reports by their printed subject. Inspect Firm Profile, Firm Operations, registration/status, organization and employment sections for the specific requested fact.",
+        "Read substantive page content, not merely native headers/footers. Scanned or vector-outlined bodies require the existing local OCR reader and independent quote verification before use as checked evidence.",
+        "Record regulator, status and effective date with source/hash/page. Distinguish membership/ownership position dates, registration dates and business-operation continuity.",
+        "Evaluate conditional banking clauses using positively evidenced entity identity and business classification; explain non-applicability when supported rather than demanding an infinite list of things the firm is not."
+      ],
+      "limitations": [
+        "A membership start date or single approval entry alone does not prove uninterrupted registration or business operations. An exhaustive status-history interpretation has NOT been verified.",
+        "Do not infer continuity, absence of lapses or non-applicability from missing entries or model background knowledge alone."
+      ]
+    },
+    {
+      "entry_id": "brokercheck-disclosures",
+      "authority": "Phase 1 scope: evidence grounding and historical business evidence policy.",
+      "applies_to": "Firm or individual disclosure questions, with exact entity/scope/period comparison.",
+      "guidance": [
+        "Locate Disclosure Events and Disclosure Event Details; read event type, allegations, status, dates and disposition together.",
+        "Use an explicit disclosure summary and its coverage language for negative answers, not an unsuccessful search. Follow historical-reuse for approved prior disclosure interpretations."
+      ],
+      "limitations": [
+        "Public reports can exclude confidential/nonreportable matters. A firm report does not establish every employee's history; an individual report does not establish firm-wide history.",
+        "An event does not automatically answer every issuer question affirmatively. Do not invent legal characterizations, infer innocence from disposition, or equate silence with No."
+      ]
+    },
+    {
+      "entry_id": "historical-reuse",
+      "authority": "Sponsor-approved Phase 1 scope: October 29 historical policy, October 30 answer-first clarification, November 2 dated-prefill clarification.",
+      "applies_to": "Approved reference packets only; historical_policy in the trusted run controls whether answer_first_review is enabled.",
+      "guidance": [
+        "Inspect approved packets from other municipalities as first-class sources. Compare question meaning, entity, definitions, conditions, role and period, not exact wording or municipality alone.",
+        "Under answer_first_review propose applicable checked prior answers, including explicit disclosures, as historical continuity-unconfirmed candidates. Missing current corroboration alone is a reviewer concern, not conflicting_evidence or an automatic blank.",
+        "Current-source inspection is not a prerequisite for an otherwise eligible checked historical draft under answer_first_review. Attempt relevant current reading within budget to discover contradictions and corroboration; unavailable sources, unread pages, failed current checks and missing matching quotes are not themselves contradictions. Record those gaps in reviewer_confirmation. current_checks may be empty; never invent a citation to fill it.",
+        "Separate source-reading verification from current-truth confirmation. Verify the prior question, full answer/selection and required write-ins using the existing native or independent OCR/image checks. This verifies what the historical source said, not whether it remains true. A genuine unresolved substantive reading conflict still blocks the affected whole question; missing current confirmation does not.",
+        "Preserve dates, qualifiers and prior business interpretation. For disclosures request comparison of current events against the prior baseline, not a claim that the interpretation is re-approved.",
+        "Follow supplemental-answer and reference pointers to the actual answer, preserving its full question and same-role context."
+      ],
+      "limitations": [
+        "Current contradictions, material condition/period mismatches and invalid source/role/relationship geometry still block. Another municipality's acceptance is not evidence of equivalence or current accuracy.",
+        "Conservative policy does not inherit answer-first permissions; financial periods, signatures and new personal acts remain protected in every mode. Never roll financial values forward, carry signatures/signature dates, or present a historical acknowledgment as a new personal act.",
+        "Municipality-specific assignments and personal acts do not transfer automatically. Unsupported fields require actionable exceptions, not invented placeholders."
+      ]
+    },
+    {
+      "entry_id": "historical-eligibility",
+      "authority": "Sponsor-approved answer-first scope and eligibility clarification: prior applicable eligibility representation supports a flagged draft.",
+      "applies_to": "historical_policy=answer_first_review; checked prior eligibility selection with applicable question and conditions.",
+      "guidance": [
+        "Use the checked historical eligibility selection as sufficient evidence for a historical draft candidate. Do not require fresh proof of every condition before proposing it.",
+        "Record missing current confirmation, recency and each unconfirmed condition in reviewer_confirmation. Distinguish unconfirmed continuity from contradiction.",
+        "If no applicable historical answer exists, evaluate each condition against inspected current support, recording the evidence and interpretation used."
+      ],
+      "limitations": [
+        "This is not present compliance approval. Actual contradictions, materially different conditions or unresolved substantive readings still block.",
+        "A capital amount alone does not certify full regulatory compliance; an attached report alone does not prove every criterion."
+      ]
+    },
+    {
+      "entry_id": "financial-periods",
+      "authority": "Phase 1 scope: financial evidence selection and period/version requirements.",
+      "applies_to": "FOCUS reports, audited financials and financial eligibility supporting documents.",
+      "guidance": [
+        "Locate the printed reporting period, net capital lines and relevant schedules. Use the existing page/OCR/verification tools when native search cannot read the report.",
+        "Consider applicable monthly FOCUS and annual audited financial statements as distinct corroborating sources when requested. Preserve separate reporting periods; locate the audit opinion and requested statement lines.",
+        "For a minimum capital question, verify exact entity, amount, unit, line/row and threshold before code compares it. Filename dates guide discovery, not period verification."
+      ],
+      "limitations": [
+        "Do not roll historical financial quantities into a different period or treat monthly and annual reports as interchangeable.",
+        "One verified threshold does not establish every eligibility condition. Flag date/value discrepancies rather than reconciling by assumption."
+      ]
+    },
+    {
+      "entry_id": "historical-tenure-headcount",
+      "authority": "Sponsor-approved November 2 dated historical-prefill clarification.",
+      "applies_to": "answer_first_review; historical firm headcount, firm years established and a named person's years with the firm.",
+      "guidance": [
+        "Copy historical headcount unchanged WITH approximation qualifiers; flag current count as unconfirmed.",
+        "Prefer explicit current tenure. Otherwise code may add completed calendar anniversaries from a verified signing date in that SAME historical packet. February 29 uses February 28 in non-leap years.",
+        "Preserve baseline qualifiers and request operating/employment continuity review. Missing/ambiguous/future/conflicting signing dates forbid an increment, not a faithful unchanged candidate."
+      ],
+      "limitations": [
+        "A filename or archive completed_on is not a verified signing date. A historical signing date never authorizes a new signing act.",
+        "Never extrapolate finances, headcount, reporting periods or acknowledgments."
+      ]
+    },
+    {
+      "entry_id": "supporting-documents",
+      "authority": "Phase 1 scope and existing approved supporting-document catalog.",
+      "applies_to": "Selection of supporting materials, narratives, exhibits and confidential operational documents.",
+      "guidance": [
+        "Use source_context.supporting_documents to plan by purpose and inclusion conditions, not just exact issuer document names. Inspect public-funds product/service narratives, agency performance, league tables, sustainable-finance materials, representative bios and applicable BrokerCheck evidence.",
+        "Follow named tables/exhibits in historical answers. Prefer suitable standalone documents; otherwise select bounded approved historical exhibits with exact checked titles and explicit date/category/scope limitations.",
+        "Record inclusion/exclusion/gaps using plan_supporting_document. Missing financial corroboration and unsigned cover letters are explicit gaps/human components.",
+        "Settlement/delivery instructions are necessary confidential evidence: inspect legal identity, clearing/DTC identifiers and delivery instructions. SIPC evidence supports exact member identity and source date."
+      ],
+      "limitations": [
+        "Never append completed forms or signed historical cover letters. Prior rankings are not current performance confirmation. Catalog inclusion is conditional, not an unconditional issuer requirement.",
+        "Marketing does not establish personal acts, regulatory absence or signing authority. Settlement instructions do not establish account-opening requirements unless explicit; SIPC membership does not establish current capital or regulatory history."
+      ]
+    },
+    {
+      "entry_id": "broward-qualified-representative",
+      "authority": "Existing sponsor-approved Broward-only printed-role rule, enforced independently in history.py.",
+      "applies_to": "Broward / Broward County Qualified Representative printed identity only.",
+      "guidance": [
+        "Qualified Representative maps to Primary Representative; use checked same-role printed identity."
+      ],
+      "limitations": [
+        "Never a signature or personal acknowledgment; never generalize to other municipalities. Conflicting assignments remain unresolved."
+      ]
+    },
+    {
+      "entry_id": "broward-investigation-interpretation",
+      "authority": "Existing sponsor explanation recorded in source-context guidance; historical interpretation only.",
+      "applies_to": "Broward investigation wording with an approved prior answer and comparable prior/current event records.",
+      "guidance": [
+        "The sponsor describes the prior No as the business interpretation of previously disclosed events, not concealment. Retrieve the actual prior answer and compare prior/current event records under historical-reuse."
+      ],
+      "limitations": [
+        "Do not assert no additional events without a supported baseline and current coverage. Flag unverifiable baselines or material changes; do not make a new legal approval."
+      ]
+    }
+  ]
+}

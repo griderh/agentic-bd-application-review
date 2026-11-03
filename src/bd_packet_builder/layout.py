@@ -47,10 +47,24 @@ class MappedResponse(Contract):
     options: Annotated[tuple[OptionPlacement, ...], Field(max_length=100)] = ()
     narrative_region: NarrativeRegion | None = None
     text_region: NarrativeRegion | None = None
+    checklist_box: PageBox | None = None
+    checklist_label_box: PageBox | None = None
 
     @model_validator(mode="after")
     def relationships(self) -> Self:
         req = self.requirement
+        if self.checklist_box is not None or self.checklist_label_box is not None:
+            if (
+                req.kind != "attachment"
+                or self.checklist_box is None
+                or self.checklist_label_box is None
+                or self.options
+                or self.text_region
+                or self.narrative_region
+            ):
+                raise ValueError("Attachment checklist needs only a control and label region")
+        elif req.kind == "attachment":
+            raise ValueError("Attachment mapping requires a checklist control")
         if req.choices is not None:
             if self.narrative_region is not None or self.text_region is not None:
                 raise ValueError("Choice groups cannot use a narrative answer region")
@@ -72,7 +86,7 @@ class MappedResponse(Contract):
         elif req.kind in ("text", "identifier", "money", "date", "boolean"):
             if self.text_region is None or self.narrative_region is not None:
                 raise ValueError("Mapped scalar requires only a text writable region")
-        else:
+        elif req.kind != "attachment":
             raise ValueError("This response kind cannot have a writable mapping")
         boxes = [b for o in self.options for b in (o.box, o.label_box)]
         regions = [o.write_in_region for o in self.options if o.write_in_region is not None]
@@ -81,6 +95,7 @@ class MappedResponse(Contract):
         if self.text_region is not None:
             regions.append(self.text_region)
         all_regions: list[PageBox | NarrativeRegion] = [*boxes, *regions]
+        all_regions.extend(b for b in (self.checklist_box, self.checklist_label_box) if b)
         if any(b.page != req.page for b in all_regions):
             raise ValueError("Response placements must remain on the requirement page")
         return self
@@ -132,8 +147,30 @@ def validate_layout(root: Path, source: Path, layout: ResponseLayout) -> None:
                     if response.text_region:
                         regions.append(response.text_region)
                     all_regions: list[PageBox | NarrativeRegion] = [*boxes, *regions]
+                    all_regions.extend(
+                        b for b in (response.checklist_box, response.checklist_label_box) if b
+                    )
                     if any(b.right > width or b.top > height for b in all_regions):
                         raise LayoutError("Mapped response region is outside the page")
+                    if response.checklist_box is not None:
+                        box, label_box = response.checklist_box, response.checklist_label_box
+                        assert label_box is not None
+                        label = text.get_text_bounded(
+                            left=label_box.left,
+                            bottom=label_box.bottom,
+                            right=label_box.right,
+                            top=label_box.top,
+                            errors="strict",
+                        )
+                        if (
+                            " ".join(response.requirement.instruction.split())
+                            not in " ".join(label.split())
+                            or not 0 <= label_box.left - box.right <= 40
+                            or min(box.top, label_box.top) <= max(box.bottom, label_box.bottom)
+                        ):
+                            raise LayoutError(
+                                "Checklist control is not adjacent to its issuer label"
+                            )
                     for option in response.options:
                         if response.requirement.choices is None:
                             raise LayoutError("Choice metadata is missing")
