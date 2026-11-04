@@ -45,7 +45,12 @@ from bd_packet_builder.exhibits import (
     audit_support,
     extract_exhibit,
 )
-from bd_packet_builder.historical_context import HistoricalContextCheck, control_option_id
+from bd_packet_builder.historical_context import (
+    HistoricalContextCheck,
+    control_option_id,
+    question_reconciliation,
+    verified_question_requirements,
+)
 from bd_packet_builder.history import (
     ArchiveManifest,
     HistoricalReusePolicy,
@@ -473,6 +478,8 @@ def verify_historical_context(
     allow_disagreements: bool = False,
     mapping: MappedResponse | None = None,
     scan_checks: tuple[ScanCheck, ...] = (),
+    *,
+    question_requirements: tuple[Requirement, ...] = (),
 ) -> tuple[tuple[str, ...], tuple[tuple[OcrCitation, bytes], ...]]:
     basis = proposal.historical_basis
     if basis is None:
@@ -668,6 +675,18 @@ def verify_historical_context(
                 if any(c not in linked_contexts for c in basis.additional_contexts):
                     return ("historical_write_in_relationship_unresolved",), ()
     for checked in receipts:
+        if checked.field.control is not None and any(
+            d.part == "question" and normalized(d.image_reading) != normalized(d.ocr_reading)
+            for d in checked.discrepancies
+        ):
+            reconciled = question_reconciliation(checked, question_requirements)
+            if (
+                requirement is None
+                or reconciled is None
+                or requirement not in question_requirements
+                or requirement.requirement_id not in reconciled.target_requirement_ids
+            ):
+                return ("historical_question_reading_unresolved",), ()
         current: list[tuple[OcrCitation, bytes]] = []
         for citation in checked.ocr_citations:
             issue, raw, _ = verify_ocr_citation(root, inventory, citation, render_hashes)
@@ -1114,6 +1133,9 @@ def publish_draft(
     )
     validate_layout(root, Path(request.source), request.layout)
     reader = _validate_pdf(original, blank=True)
+    question_requirements = verified_question_requirements(
+        original, request.requirements.requirements
+    )
     additional_forms_data: list[tuple[DraftAdditionalForm, bytes, PdfReader]] = []
     additional_form_snapshots: dict[Path, bytes] = {}
     for form in request.additional_forms:
@@ -1385,6 +1407,7 @@ def publish_draft(
             request.historical_policy == "answer_first_review",
             mapped,
             review.scan_checks,
+            question_requirements=question_requirements,
         )
         answer_citations = historical_answer_citations(proposal, context_snapshots)
         context_verified = bool(answer_citations) and not context_issues
@@ -1436,6 +1459,20 @@ def publish_draft(
                 )
                 else "extraction_discrepancy_unresolved"
             )
+            reconciled_questions = [
+                reconciliation.model_dump(mode="json")
+                for c in review.historical_context_checks
+                if (c.supports(proposal, req) or c.answer in proposal.citations)
+                and (reconciliation := question_reconciliation(c, question_requirements))
+                is not None
+                and identity in reconciliation.target_requirement_ids
+            ]
+            if reconciled_questions:
+                result["historical_question_reconciliation"] = reconciled_questions
+                if context_verified:
+                    result["historical_candidate_status"] = (
+                        "question_reconciled_against_native_blank"
+                    )
         ocr_citations = tuple(c for c in proposal.citations if isinstance(c, OcrCitation))
         ocr_evidence: list[dict[str, object]] = []
         ocr_valid = True
@@ -2033,15 +2070,32 @@ def publish_draft(
         summary.extend(["", "REVIEWER ACTION LIST (internal only):"])
         for item in results:
             identity = str(item["requirement_id"])
+            extraction_details = item.get("historical_extraction_discrepancies")
+            extraction_parts = (
+                tuple(
+                    dict.fromkeys(str(d["part"]) for d in extraction_details if isinstance(d, dict))
+                )
+                if isinstance(extraction_details, list)
+                else ()
+            )
             if item["status"] in ("blank", "requirement_satisfied") or identity in assessments:
                 assessment = assessments.get(identity)
                 summary.append(
                     f"- Form page {requirements[identity].page}, {identity}: "
                     f"{'LEFT BLANK' if item['status'] == 'blank' else item['status']}; "
                     + (
-                        "Conflicting readings were not resolved with verified evidence "
+                        "Historical question transcription was reconciled against the native "
+                        "blank, but the answer was not written; see validation details."
+                        if item.get("historical_question_reconciliation")
+                        else "Historical extraction differs in: "
+                        + ", ".join(extraction_parts)
+                        + ". Question wording, answer text and selected marks are checked "
+                        "separately; a question-reading problem does not mean the checkbox "
+                        "could not be read."
+                        if "question" in extraction_parts
+                        else "Conflicting readings were not resolved with verified evidence "
                         "linking the same subject, field and value."
-                        if item.get("historical_extraction_discrepancies")
+                        if extraction_parts
                         else str(item.get("effective_explanation") or item["review_reason"])
                     )
                 )
@@ -2052,7 +2106,11 @@ def publish_draft(
                     )
                 if item.get("historical_extraction_discrepancies"):
                     summary.append(
-                        "  Conflicting extraction readings: "
+                        (
+                            "  Original extraction readings (question transcription reconciled): "
+                            if item.get("historical_question_reconciliation")
+                            else "  Conflicting extraction readings (originals): "
+                        )
                         + json.dumps(item["historical_extraction_discrepancies"])
                     )
                 if assessment is not None:
@@ -2103,7 +2161,16 @@ def publish_draft(
                         )
                 elif item["status"] == "blank":
                     summary.append(
-                        "  ACTION: Verify the conflicting readings against an independent "
+                        "  ACTION: Question transcription is already resolved. Review the "
+                        "remaining validation issues or regenerate the answer proposal; do not "
+                        "request new business evidence solely for this OCR defect."
+                        if item.get("historical_question_reconciliation")
+                        else "  ACTION: Inspect the original historical question and its selected "
+                        "answer together. Resolve the specific question wording difference; "
+                        "current business evidence is not required merely to repair transcription."
+                        if "question" in extraction_parts
+                        and not item.get("historical_question_reconciliation")
+                        else "  ACTION: Verify the conflicting readings against an independent "
                         "source for the same subject and field; enter the supported value "
                         "only after verification."
                         if item.get("historical_extraction_discrepancies")
@@ -2134,6 +2201,34 @@ def publish_draft(
                         "OCR agree within the historical answer region. Original readings: "
                         + json.dumps(item.get("historical_extraction_discrepancies", []))
                     )
+                elif item.get("historical_question_reconciliation"):
+                    summary.append(
+                        f"- Form page {requirements[identity].page}, {identity}: "
+                        "FILLED AFTER QUESTION-TEXT RECONCILIATION; the historical image question "
+                        "matches the native blank, and bounded OCR alignment passed. "
+                        "The selected answer was checked separately. Historical continuity "
+                        "remains unconfirmed."
+                    )
+                    summary.append(
+                        "  Historical selected answer: "
+                        + "; ".join(
+                            c.field.answer.text
+                            for c in review.historical_context_checks
+                            if c.supports(proposal, requirements[identity])
+                        )
+                    )
+                    if isinstance(extraction_details, list):
+                        for difference in extraction_details:
+                            if (
+                                isinstance(difference, dict)
+                                and difference.get("part") == "question"
+                            ):
+                                summary.extend(
+                                    [
+                                        "  Image question: " + str(difference["image_reading"]),
+                                        "  OCR question: " + str(difference["ocr_reading"]),
+                                    ]
+                                )
         summary.extend(["", "Supporting-document completeness (not semantic approval):"])
         for audit in audit_support(
             tuple(accepted), inventory, tuple(attachment_ids), approved_exhibits

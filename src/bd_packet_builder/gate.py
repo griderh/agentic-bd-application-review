@@ -31,15 +31,18 @@ from bd_packet_builder.draft import (
     verify_ocr_citation,
 )
 from bd_packet_builder.exhibits import ExhibitError, audit_support, extract_exhibit
-from bd_packet_builder.historical_context import HistoricalContextCheck
+from bd_packet_builder.historical_context import (
+    HistoricalContextCheck,
+    verified_question_requirements,
+)
 from bd_packet_builder.historical_time import prior_tenure_proposal
 from bd_packet_builder.history import historical_issues, primary_representative_rule
 from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.reconciliation import RequirementAssessment
 from bd_packet_builder.scan import ExhibitImageCheck, ScanCheck
 
-GATE_VERSION = "answer-gate-v14"
-GATE_REVIEWER = "application_validation_gate_v14"
+GATE_VERSION = "answer-gate-v15"
+GATE_REVIEWER = "application_validation_gate_v15"
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
@@ -57,6 +60,7 @@ def validate_answers(
     historical_context_checks: tuple[HistoricalContextCheck, ...] = (),
     exhibit_image_checks: tuple[ExhibitImageCheck, ...] = (),
     requirement_assessments: tuple[RequirementAssessment, ...] = (),
+    blank: bytes | None = None,
 ) -> DraftReview:
     """Return one decision per proposal; per-answer failures become withheld decisions.
 
@@ -107,6 +111,10 @@ def validate_answers(
                 write_in_receipt
                 or same_control_group
                 or (
+                    historical_receipt.answer in proposal.citations
+                    and any(d.part == "question" for d in historical_receipt.discrepancies)
+                )
+                or (
                     basis is not None
                     and (
                         basis.prior_question == historical_receipt.context_citation
@@ -133,6 +141,21 @@ def validate_answers(
                 needed[historical_receipt.context_citation.check_sha256] = historical_receipt
                 break
     historical_context_checks = tuple(needed.values())
+    question_requirements = (
+        verified_question_requirements(
+            blank
+            if blank is not None
+            else read_local_input(
+                root, Path(request.source), Path("bd_agreements/Blank"), 64 * 1024 * 1024
+            ),
+            request.requirements.requirements,
+        )
+        if any(
+            c.field.control is not None and any(d.part == "question" for d in c.discrepancies)
+            for c in historical_context_checks
+        )
+        else ()
+    )
     decisions: list[DraftDecision] = []
     supporting: list[str] = list(selected_attachment_source_ids)
     render_hashes: dict[tuple[str, int], str] = {}
@@ -156,6 +179,7 @@ def validate_answers(
                 request.historical_policy == "answer_first_review",
                 mappings.get(proposal.requirement_id),
                 scan_checks,
+                question_requirements=question_requirements,
             )
             answer_citations = historical_answer_citations(proposal, context_snapshots)
             context_verified = bool(answer_citations) and not context_issues

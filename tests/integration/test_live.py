@@ -283,8 +283,9 @@ def test_prepare_snapshots_evidence_and_records_agent_and_model_versions(
         "bd_agreements/supporting_data/Firm/Firm profile.pdf"
     ]
     versions = {v.name: v.version for v in manifest.versions}
-    assert versions["agent"] == "packet-agent-v25"
+    assert versions["agent"] == "packet-agent-v26"
     assert versions["historical-context"] == "historical-page-context-v7"
+    assert versions["question-reading"] == "question-reading-v1"
     assert versions["domain-knowledge"] == "domain-knowledge-v2"
     assert len(versions["domain-knowledge-sha256"]) == 64
     assert versions["reading-budget"] == "full-questionnaire-v1"

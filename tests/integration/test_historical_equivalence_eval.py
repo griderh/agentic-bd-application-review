@@ -161,6 +161,63 @@ class KnowledgeDecision(ReadingDecision):
 
 @pytest.mark.skipif(
     os.environ.get("BD_RUN_HISTORICAL_EVAL") != "1",
+    reason="Opt in with BD_RUN_HISTORICAL_EVAL=1; paid synthetic question-reading evaluation",
+)
+@pytest.mark.parametrize(
+    ("ocr_word", "reconciled", "contradiction", "expected"),
+    [
+        ("emp", True, False, "No"),
+        ("never temporarily", False, False, None),
+        ("permanently", False, False, None),
+        ("emp", True, True, None),
+    ],
+)
+def test_model_distinguishes_question_reconciliation_from_answer_and_current_truth(
+    ocr_word, reconciled, contradiction, expected
+):
+    question = (
+        "Has your firm ever been temporarily closed or prohibited from trading "
+        "due to net capital inadequacy?"
+    )
+    result = request_structured(
+        FoundryConfig(
+            endpoint=os.environ["BD_FOUNDRY_ENDPOINT"],
+            deployment=os.environ["BD_FOUNDRY_DEPLOYMENT"],
+            timeout_seconds=180,
+        ),
+        allow_paid=True,
+        instructions=AGENT_INSTRUCTIONS
+        + "\nEvaluation only: no tools. Select No for an eligible checked historical draft; "
+        "otherwise null. Preserve unresolved question meaning and actual contradictions. "
+        "A reconciled question is not an unresolved answer conflict or proof of current truth.",
+        input_json=json.dumps(
+            {
+                "historical_policy": "answer_first_review",
+                "target_question": question,
+                "image_question": question,
+                "ocr_question": question.replace("temporarily", ocr_word),
+                "checked_selected_answer": "No",
+                "control_pixel_checked": True,
+                "question_reconciliation": {
+                    "status": "reconciled_against_native_blank",
+                    "target_requirement_ids": ["q6"],
+                }
+                if reconciled
+                else None,
+                "requirement_id": "q6",
+                "current_evidence": "Verified source explicitly records a trading prohibition."
+                if contradiction
+                else "No current corroboration supplied; continuity unconfirmed.",
+            }
+        ),
+        response_type=ReadingDecision,
+        max_output_tokens=2048,
+    )
+    assert result.value.selected_value == expected
+
+
+@pytest.mark.skipif(
+    os.environ.get("BD_RUN_HISTORICAL_EVAL") != "1",
     reason="Opt in with BD_RUN_HISTORICAL_EVAL=1; paid synthetic knowledge-application evaluation",
 )
 @pytest.mark.parametrize(

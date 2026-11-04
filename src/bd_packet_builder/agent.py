@@ -67,7 +67,10 @@ from bd_packet_builder.followup import (
 from bd_packet_builder.form_layout import FormInterpretation, FormLayoutError, build_form_layout
 from bd_packet_builder.foundry import FoundryError
 from bd_packet_builder.gate import validate_answers
-from bd_packet_builder.historical_context import HistoricalContextCheck
+from bd_packet_builder.historical_context import (
+    HistoricalContextCheck,
+    verified_question_requirements,
+)
 from bd_packet_builder.history import with_historical_sources
 from bd_packet_builder.inventory import Inventory, InventoryError, build_inventory
 from bd_packet_builder.knowledge import knowledge_context, knowledge_instructions
@@ -94,7 +97,7 @@ from bd_packet_builder.scan import (
 )
 from bd_packet_builder.visual import VisualPage
 
-AGENT_VERSION = "packet-agent-v25"
+AGENT_VERSION = "packet-agent-v26"
 AGENT_INSTRUCTIONS = """You complete one broker-dealer application packet by calling tools.
 You have no other capabilities: no shell, files, browsing, email or submission.
 
@@ -204,7 +207,15 @@ AGENT_INSTRUCTIONS += """
   Never select a write-in option without its entered text. Missing/disputed selections or
   mandatory write-ins mean leave the whole question blank; never publish a partial subset.
   Under answer_first_review, associations with discrepancies are historical CANDIDATES, not
-  verified agreement. Neither vision nor OCR wins automatically. Before finish_evidence, target
+  verified agreement. Neither vision nor OCR wins automatically.
+  question_reconciliation.status=reconciled_against_native_blank resolves ONLY question
+  transcription for its target_requirement_ids: the image wording matches the native blank
+  and bounded local OCR alignment passes protected-word/value checks. Do not withhold that
+  checked selection solely for the recorded question OCR fragment; retain historical continuity
+  warnings. It does not resolve answer, role or control disputes. For an unresolved question,
+  explain which word differs and that the question, not necessarily its selected answer,
+  needs inspection. Do not ask for current business evidence to repair question transcription.
+  For other discrepancies, before finish_evidence target
   disputed scalar fields: read the same historical subject/Name field and inspect an independent
   current approved document for that subject, field label and value. Use locate_quote for native
   evidence or verify_scan_quote with the subject and a contextual subject/label/value quote for
@@ -1060,6 +1071,14 @@ class PacketAgentTools:
     def _read_historical_page(self, _m: RunManifest, args: Contract) -> object:
         assert isinstance(args, _Read)
         _, tools = self._context()
+        if tools.historical_context is not None:
+            interpretation = self._interpretation()
+            tools.historical_context.question_requirements = verified_question_requirements(
+                self._store.read_blank(self._run_id),
+                interpretation.requirements.requirements
+                if interpretation.requirements is not None
+                else (),
+            )
         return tools.read_historical_page(args.source_id, args.page).model_dump(mode="json")
 
     def _select_historical_exhibit(self, _m: RunManifest, args: Contract) -> object:
@@ -1275,6 +1294,10 @@ class PacketAgentTools:
                 "Never roll forward finances or apply new personal acts or signing. "
                 "Use the exact answer_citation and context_citation from the candidates."
                 " For discrepancy-backed candidates use candidate_answer, not repaired OCR. "
+                "A question_reconciliation with status reconciled_against_native_blank resolves "
+                "only question transcription for its target_requirement_ids; it is not an "
+                "unresolved conflict or current-truth confirmation. Use the separately checked "
+                "selection unless another actual conflict or policy prohibition blocks it. "
                 "Keep source/role/column context for duplicate labels and selected write-ins. "
                 "Reconcile conditional explanations against their final accepted parents."
             ),
@@ -1763,6 +1786,7 @@ class PacketAgentTools:
                 historical_context_checks=historical_checks,
                 exhibit_image_checks=self._saved_exhibit_checks(),
                 requirement_assessments=self.manifest().request.requirement_assessments,
+                blank=self._store.read_blank(self._run_id),
             )
         except (DraftError, InventoryError, LocalInputError) as error:
             raise _Failed("answer_validation_failed", _short(str(error))) from None

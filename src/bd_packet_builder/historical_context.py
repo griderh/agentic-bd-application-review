@@ -5,6 +5,7 @@ import json
 import math
 import re
 from contextlib import closing
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -46,6 +47,134 @@ from bd_packet_builder.scan import (
 from bd_packet_builder.visual import NormalizedBox
 
 CONTEXT_VERSION = "historical-page-context-v7"
+QUESTION_READING_VERSION = "question-reading-v1"
+
+_QUESTION_PROTECTED = re.compile(
+    r"no|not|never|ever|neither|nor|without|except|unless|only|all|any|each|every|and|or|"
+    r"before|after|since|until|within|during|last|past|current|prior|most|recent|"
+    r"day|days|month|months|year|years|january|february|march|april|may|june|july|august|"
+    r"september|october|november|december|zero|one|two|three|four|five|six|seven|eight|nine|"
+    r"ten|eleven|twelve|hundred|thousand|million|billion|percent|minimum|maximum|at|least|more|less|than"
+)
+
+
+def _question_tokens(text: str) -> list[str]:
+    text = re.sub(r"^\s*\d{1,3}[.)]\s*", "", text)
+    return re.findall(r"[a-z0-9]+", normalized(text))
+
+
+def question_text_agrees(image: str, ocr: str, target: str) -> bool:
+    """Align a localized question, never an answer or a changed substantive condition."""
+    expected, observed = _question_tokens(image), _question_tokens(ocr)
+    if expected != _question_tokens(target) or not expected:
+        return False
+    value_pattern = r"[<>\u2264\u2265=\u00b1%$\u20ac\u00a3]|(?<!\w)[+-]?\d+(?:[.,]\d+)*"
+    values = [
+        re.findall(value_pattern, re.sub(r"^\s*\d{1,3}[.)]\s*", "", text))
+        for text in (image, ocr, target)
+    ]
+    if values[0] != values[1] or values[0] != values[2]:
+        return False
+
+    def protected(tokens: list[str]) -> list[str]:
+        return [
+            token
+            for token in tokens
+            if _QUESTION_PROTECTED.fullmatch(token) or any(c.isdigit() for c in token)
+        ]
+
+    if protected(expected) != protected(observed):
+        return False
+    if "".join(expected) == "".join(observed):
+        return True
+    if len(expected) < 12 or len(expected) != len(observed):
+        return False
+    changed = [
+        i for i, pair in enumerate(zip(expected, observed, strict=True)) if pair[0] != pair[1]
+    ]
+    if len(changed) != 1:
+        return False
+    index = changed[0]
+    whole, fragment = expected[index], observed[index]
+    # A truncated lowercase word can be corroborated, not freely spell-corrected. In
+    # particular, do not turn an entity, negation prefix or a different word into agreement.
+    original_words = re.findall(r"[A-Za-z0-9]+", re.sub(r"^\s*\d{1,3}[.)]\s*", "", image))
+    return (
+        len(original_words) == len(expected)
+        and original_words[index].islower()
+        and not whole.startswith(("un", "non", "dis"))
+        and len(whole) >= 8
+        and 3 <= len(fragment) <= len(whole) * 0.6
+        and fragment in whole
+        and SequenceMatcher(None, " ".join(expected), " ".join(observed), autojunk=False).ratio()
+        >= 0.94
+    )
+
+
+def verified_question_requirements(
+    blank: bytes, requirements: tuple[Requirement, ...]
+) -> tuple[Requirement, ...]:
+    """Return only unique native questions from this exact blank, not model assertions."""
+    digest = hashlib.sha256(blank).hexdigest()
+    result: list[Requirement] = []
+    with pdfium.PdfDocument(blank) as document:
+        pages: dict[int, str] = {}
+        for requirement in requirements:
+            if requirement.application_sha256 != digest or requirement.page > len(document):
+                continue
+            if requirement.page not in pages:
+                with (
+                    closing(document[requirement.page - 1]) as page,
+                    closing(page.get_textpage()) as text,
+                ):
+                    pages[requirement.page] = normalized(text.get_text_bounded(errors="strict"))
+            wanted = normalized(requirement.instruction)
+            if (
+                wanted
+                and len(
+                    re.findall(r"(?<!\w)" + re.escape(wanted) + r"(?!\w)", pages[requirement.page])
+                )
+                == 1
+            ):
+                result.append(requirement)
+    return tuple(result)
+
+
+class QuestionReconciliation(Contract):
+    version: str = QUESTION_READING_VERSION
+    target_requirement_ids: tuple[str, ...]
+    status: Literal["reconciled_against_native_blank"] = "reconciled_against_native_blank"
+    explanation: str = (
+        "The historical image question matches a unique native question in the exact blank. "
+        "Localized OCR differs only in spacing/punctuation or one bounded lowercase word "
+        "fragment; protected wording and values are unchanged. The selected answer is checked "
+        "separately. This resolves question transcription, not current business truth."
+    )
+
+
+def question_reconciliation(
+    check: "HistoricalContextCheck", targets: tuple[Requirement, ...]
+) -> QuestionReconciliation | None:
+    differences = [d for d in check.discrepancies if d.part == "question"]
+    if (
+        not differences
+        or check.field.control is None
+        or check.field.control.state != "selected"
+        or any(d.part == "control" for d in check.discrepancies)
+        or any(
+            d.code not in ("historical_text_or_region_disagrees", "historical_low_word_confidence")
+            or d.image_reading != check.field.question.text
+            or d.ocr_reading != check.question.quote
+            for d in differences
+        )
+    ):
+        return None
+    identities = tuple(
+        target.requirement_id
+        for target in targets
+        if question_text_agrees(check.field.question.text, check.question.quote, target.instruction)
+    )
+    return QuestionReconciliation(target_requirement_ids=identities) if identities else None
 
 
 def option_label(text: str) -> str:
@@ -1007,6 +1136,7 @@ class HistoricalAssociation(Contract):
     discrepancies: tuple[ExtractionDiscrepancy, ...] = ()
     candidate_answer: str | None = None
     write_in: HistoricalWriteInEvidence | None = None
+    question_reconciliation: QuestionReconciliation | None = None
 
 
 class HistoricalPageIssue(Contract):
@@ -1033,9 +1163,16 @@ class HistoricalPageReading(Contract):
 
 
 class HistoricalContextEvidence:
-    def __init__(self, scans: ScanEvidence, *, allow_disagreements: bool = False) -> None:
+    def __init__(
+        self,
+        scans: ScanEvidence,
+        *,
+        allow_disagreements: bool = False,
+        question_requirements: tuple[Requirement, ...] = (),
+    ) -> None:
         self.scans = scans
         self.allow_disagreements = allow_disagreements
+        self.question_requirements = question_requirements
         self.checks: list[HistoricalContextCheck] = []
         self.readings: list[HistoricalPageReading] = []
         self._cache: dict[tuple[str, int, str], HistoricalPageResult] = {}
@@ -1089,6 +1226,9 @@ class HistoricalContextEvidence:
                             question=field.question.text,
                             role=check.context_role.quote if check.context_role else None,
                             discrepancies=check.discrepancies,
+                            question_reconciliation=question_reconciliation(
+                                check, self.question_requirements
+                            ),
                             candidate_answer=(
                                 None
                                 if check.answer_disputed

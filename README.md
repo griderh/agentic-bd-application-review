@@ -9,6 +9,42 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
+### Bounded question-reading reconciliation (agent v26)
+
+Question wording, answer labels and selected marks are checked separately. For selected
+historical controls under `answer_first_review`, discovery and answering now receive an
+explicit question-reconciliation result tied to target requirement IDs. The historical image
+question must match a unique native question in the exact hashed blank. Spacing/punctuation
+can normalize; a single lowercase OCR word fragment can align only in a question of at least
+12 tokens, with an original word of at least 8 characters, a fragment of 3 to 60% of its length,
+and character similarity of at least 94%. Similarity alone never authorizes reuse.
+Negation, logical operators, numbers/signs, periods and protected conditions must remain
+unchanged; changed words, deleted conditions, multiple defects, capitalized entity fragments
+and interleaved question text do not qualify. This is not unrestricted spelling correction
+or fuzzy matching of answers, identifiers or financial values.
+
+The gate and independent writer recompute alignment against the actual blank and recheck
+the original historical receipts, geometry and selected mark. Existing contradictions,
+personal-act prohibitions and conservative-mode restrictions still apply. Original readings
+remain in the internal audit. Reviewer notes now identify the affected extraction part,
+distinguish a question-reading failure from an unreadable selection, and report a resolved
+question separately from any remaining answer/proposal problem. Reconciliation does not
+silently promote an abstained model proposal.
+
+Using saved live-run evidence, a separate local reconstruction fills page 3 Q6 as **No**:
+**46 populated of 69 requirements**, versus 45, with no populated answers lost.
+The conditional explanation is not applicable; 12 unresolved, 7 human-action and 4 conditional
+not-applicable requirements remain. The rendered page was inspected and outside-region changed
+pixels are zero. The internal summary explicitly preserves historical continuity uncertainty.
+Original runs and source documents remain unchanged. This is local saved-evidence reconstruction,
+**not a fresh autonomous model run or held-out accuracy result**; no paid calls were made.
+
+Validation: **1,316 passed, 37 skipped on each of Python 3.12 and 3.13**; Ruff lint/format,
+strict mypy for both targets and whitespace checks passed. Four opt-in synthetic model-reasoning
+cases were added; **0/4 executed**. Provenance is agent v26, question-reading v1 and gate v15;
+historical context remains v7 and domain knowledge v2. A separately authorized live test must
+start a fresh v26 run after restarting long-running processes.
+
 ### Saved-run coverage repair (agent v25)
 
 The v24 paid run exposed extraction/reference failures that the earlier prompt-policy tests

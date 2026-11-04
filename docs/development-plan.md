@@ -2,6 +2,34 @@
 
 Status: implementation roadmap, rebaselined October 28, 2026.
 
+**Bounded question-reading reconciliation (v26):** separate question transcription from answer
+text and selected-control verification. Discovery and grouped answering receive target-bound
+reconciliation metadata only when the image question matches unique native text in the exact
+hashed blank and bounded local OCR alignment passes. Normalize spacing/punctuation; allow one
+lowercase truncated word in a sufficiently long question, not arbitrary spelling correction.
+Protected negation, operators, numbers/signs, periods and conditions cannot change. Require at
+least 12 tokens, an original word of at least 8 characters, a 3-character minimum fragment no
+longer than 60% of the word, and at least 94% character similarity; none is sufficient alone.
+Entity fragments, deleted/changed conditions, multiple defects and interleaving still withhold.
+Do not fuzz answer values, identifiers or financial figures.
+
+Gate v15 and the independent writer rederive alignment against the actual blank and recheck
+original source receipts and selected marks. Historical context v7 receipt hashes remain
+unchanged. Conservative policy, contradictions and personal-act safeguards remain. Reviewer
+notes distinguish question versus answer/control disputes and show the final reconciliation,
+the original question readings and the historical selected answer. An already reconciled
+question does not authorize filling an abstained proposal or requesting unnecessary new
+business evidence just to repair OCR.
+
+An isolated saved-evidence reconstruction fills Q6 No and retains all 45 prior populated answers:
+46 populated of 69, 4 conditional not-applicable, 7 human-action and 12 unresolved. The affected
+rendered page was inspected; outside-region changed pixels are zero. Original run/source
+artifacts are unchanged. This is not a new autonomous model run or an independent accuracy
+evaluation; no paid calls or new dependencies. Full offline validation: 1,316 passed,
+37 skipped on Python 3.12 and 3.13; Ruff lint/format, strict mypy for both targets and whitespace
+checks passed. Four new opt-in synthetic reasoning cases remain unexecuted (0/4).
+A separately authorized fresh v26 run is needed to measure live model behavior.
+
 **Saved-run extraction/reference repair (v25):** the v24 live run still left eligibility and
 instrument choices blank and regressed three previously populated answers. Padded control hints
 now resolve against actual bounded outlines; unboxed check arms are measured against the mark,

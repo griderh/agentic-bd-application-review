@@ -32,7 +32,7 @@ from bd_packet_builder.foundry import (
     write_private_json,
 )
 from bd_packet_builder.grouped import GROUP_VERSION, run_grouped_packet_agent
-from bd_packet_builder.historical_context import CONTEXT_VERSION
+from bd_packet_builder.historical_context import CONTEXT_VERSION, QUESTION_READING_VERSION
 from bd_packet_builder.history import (
     ArchiveManifest,
     HistoricalReusePolicy,
@@ -244,6 +244,7 @@ def prepare_live_run(
             ComponentVersion(name="mapping-prompt", version=PROMPT_VERSION),
             ComponentVersion(name="scan-prompt", version=SCAN_VERSION),
             ComponentVersion(name="historical-context", version=CONTEXT_VERSION),
+            ComponentVersion(name="question-reading", version=QUESTION_READING_VERSION),
             ComponentVersion(name="reading-budget", version="full-questionnaire-v1"),
             ComponentVersion(name="answer-workflow", version=GROUP_VERSION),
             ComponentVersion(name="source-context", version=SOURCE_CONTEXT_VERSION),

@@ -14,7 +14,14 @@ from typing import Annotated, Literal
 import pypdfium2 as pdfium
 from pydantic import Field
 
-from bd_packet_builder.contracts import Contract, Identifier, Nonblank, OcrCitation, Sha256
+from bd_packet_builder.contracts import (
+    Contract,
+    Identifier,
+    Nonblank,
+    OcrCitation,
+    Requirement,
+    Sha256,
+)
 from bd_packet_builder.evidence import EvidenceError, TextCitation, resolve_quote
 from bd_packet_builder.historical_context import HistoricalContextEvidence, HistoricalPageResult
 from bd_packet_builder.history import ArchiveManifest, historical_inventory
@@ -174,6 +181,7 @@ class EvidenceTools:
         scan_evidence: ScanEvidence | None = None,
         historical_archive: ArchiveManifest | None = None,
         allow_historical_disagreements: bool = False,
+        question_requirements: tuple[Requirement, ...] = (),
     ) -> None:
         history = historical_inventory(root, historical_archive) if historical_archive else None
         allowed_history = {s.source_id for s in history.sources} if history else set()
@@ -215,7 +223,9 @@ class EvidenceTools:
         self._scan_evidence = scan_evidence
         self.historical_context = (
             HistoricalContextEvidence(
-                scan_evidence, allow_disagreements=allow_historical_disagreements
+                scan_evidence,
+                allow_disagreements=allow_historical_disagreements,
+                question_requirements=question_requirements,
             )
             if scan_evidence
             else None
