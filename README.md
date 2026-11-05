@@ -9,6 +9,120 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
+Evidence-phase model failures report a bounded exception-type chain and any HTTP status,
+not just the framework's `ChatClientException` wrapper. Error bodies, request payloads and
+credentials are excluded. This improves diagnosis; it does not automatically retry calls
+or recover causes already discarded by older runs.
+
+### Historical-control pixel stability and label grounding (agent v30)
+
+Rectangle, circular-outline and connected-check evidence are now evaluated together, rather
+than letting the first small rectangle suppress the complete checkmark. The model box bounds
+a search neighborhood; pixel components anchor intact circular outlines and check geometry.
+Check-arm endpoints use supported portions of the component instead of one antialiased edge
+column, and arm-fit tolerance follows measured component height rather than hint padding.
+Overlapping fits on the same outline are grouped. A small contained loop can be discounted
+only when its ink belongs to the independently verified connected check. Separate neighboring
+controls/marks still require review; sparse interior ink remains ambiguous, not selected.
+
+Offline inspection of saved run `7b846f9e…` now recognizes Q1 with both recorded model boxes.
+All **81/81** combinations of three recorded boxes, small shifts/padding changes and three
+image resolutions select the same physical mark, with identical detected bounds within each
+resolution. All **24** previously matching controls among the saved run's **28** control
+receipts still match; two previously mismatching receipts now match. This is pixel-verification
+evidence, **not** a fresh autonomous run or a claim that saved abstentions were filled.
+Synthetic gate/writer cases also retain the answer across hint variations, with no changed
+pixels outside allowed output regions. Q2's write-in issue and Q3's narrative-wording issue
+are intentionally unchanged.
+
+Control-to-label relationships are now page-grounded. The model's control and label boxes
+remain hints only: the check uses the pixel-located mark and the cited label's OCR word or
+native text bounds. The mark must precede (or follow) the label on the same line, judged by
+the mark's base because check strokes can rise above the box. It must be within 100/1000 page
+widths, or 200 when only blank space separates them, with no other control wholly between
+them. If pixels cannot locate the mark, the model box is used for the relationship and the
+pixel failure still requires review. Saved run `0b42eb8b…` failed Q1 only because the model's
+box ran past the start of "Regional" by 2/1000 of the page; Q1 now passes there and in
+`f608235d…`. Across all saved runs, 449 control decisions are unchanged and 20 unselected
+controls stay rejected under a relationship code. Four older p2 "Yes" controls, where OCR
+merged "Yes/No" across an unresolved box, are now rejected rather than review-accepted:
+the page cannot ground which option was marked. Validation: **1,442 passed, 42 skipped on
+each of Python 3.12 and 3.13** (28 new relationship cases); Ruff, mypy and diff checks pass.
+
+Provenance is agent v30, gate v19 and `historical-control-pixels-v3`; historical context v8 and
+its receipt hashes remain unchanged. No paid calls, new dependencies or source/run mutations.
+Use a fresh v30 run for any separately authorized live test; do not resume an older run.
+
+Validation: **1,414 passed, 42 skipped on each of Python 3.12 and 3.13**, including 79 new
+synthetic regression cases. Ruff lint/format, strict mypy on both targets and whitespace
+checks passed. No model-quality or held-out accuracy evaluation was performed.
+
+### Targeted printed-wording resolution (agent v28)
+
+For selected historical controls under `answer_first_review`, a disagreement in printed
+question/option wording no longer automatically vetoes a readable selection. Historical
+context v8 first checks exact source-native text located in the original historical region.
+If that does not corroborate OCR, it attempts one blind image transcription of that region,
+cached by crop hash and charged against the existing independent-image allowance. The reread
+receives no OCR alternatives, expected answer or target question. It must agree exactly with
+localized OCR (whitespace/case and printed bullet normalization only); disputed OCR tokens
+must have confidence at least 90. Lower-confidence words can remain only where the original
+image transcription also agrees. Digits, negation, conditions and substantive words are not
+fuzzy-matched. Unreadable/disagreeing rereads or exhausted allowance remain explicit exceptions;
+no repeated-until-agreement loop or new dependencies.
+
+The original transcript and discrepancy remain immutable within the receipt. Discovery and
+answering receive resolved wording plus its native citation or focused transcript/crop hash.
+Gate v17 and the independent writer rederive the resolution against source/OCR snapshots,
+recheck the actual selected mark, and validate target-question correspondence separately.
+Printed-wording resolution never establishes current truth, overrides contradictory evidence,
+changes a mark, repairs entered financial/identifier values, or applies signatures/personal acts.
+Reviewer summaries distinguish the wording check, its method/status and historical continuity.
+Legacy receipt hashes remain stable. Version provenance is agent v28, historical context v8,
+question-reading v2 and gate v17; source snapshots remain read-only.
+
+The v27 live Q1/Q7 failures were image transcription errors in printed wording, not
+unreadable selections. Those historical page regions have **no native text**, so resolving
+them automatically requires a successful focused reread in a separately authorized fresh run.
+No paid calls were made for this increment, and no claim is made that the saved abstentions
+were autonomously recovered. Offline revalidation retains all **44** accepted saved-run answers;
+Q2's write-in metadata failure is intentionally unchanged. Native/focused synthetic cases pass
+the production gate and independent writer; wrong target wording, uncertain rereads, low
+confidence, exhausted budgets, tampered records and unverified marks still withhold.
+
+Validation: **1,335 passed, 42 skipped on each of Python 3.12 and 3.13**; Ruff lint/format,
+strict mypy for both targets and whitespace checks passed.
+Five new opt-in synthetic model-quality cases (two repeated-transcription cases and three
+resolution/contradiction reasoning cases) remain unexecuted (**0/5**). These are not held-out
+business-answer accuracy results. That increment required a fresh run; saved abstentions
+were not automatically promoted.
+
+### Supplemental-answer pointers as question links (agent v27)
+
+A historical main-form answer that only points elsewhere (for example "Please see Supplemental
+Answers page") is navigation, not answer text. `HistoricalBasis.question_links` now carries
+such pointers separately from `prior_question`/`additional_contexts`, which remain the only
+answer pieces joined and compared to the proposed answer. Gate v16 and the independent writer
+recheck each link's text and geometry and require a checked receipt from the same packet and
+role with no selection control, a short undisputed pointer phrase (see/refer … supplement,
+attachment, addendum, exhibit or continuation), and a question whose normalized words prefix-match
+the answered question. A link can never be an answer piece, is not counted as answer evidence
+and cannot substitute for a checked answer. Reviewer summaries add plain-language reasons for
+composition and link failures. Existing name/title compositions, write-ins, question
+reconciliation, conservative policy and personal-act safeguards are unchanged.
+
+Run `90c316ca610a453598da60b9c49ba08d` withheld page 4 Q10 because the model listed the page-5
+pointer as a fifth answer piece. Replaying that saved proposal with only the pointer moved to
+`question_links`, through the production gate and writer, fills Q10 with the introduction and
+three references on a supplemental page: **46 populated of 69**, versus 45, with none lost
+(12 unresolved, 7 human-action, 4 conditional not-applicable). This is a local saved-evidence
+reconstruction, **not a fresh autonomous model run**; no paid calls were made. A live test must
+start a fresh v27 run after restarting long-running processes.
+
+Validation: **1,323 passed, 37 skipped on each of Python 3.12 and 3.13** (7 new link/composition
+regression cases); Ruff lint/format, strict mypy for both targets and whitespace checks passed.
+Provenance is agent v27 and gate v16; historical context remains v7 and domain knowledge v2.
+
 ### Bounded question-reading reconciliation (agent v26)
 
 Question wording, answer labels and selected marks are checked separately. For selected

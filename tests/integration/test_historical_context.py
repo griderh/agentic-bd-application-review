@@ -133,6 +133,114 @@ def test_composed_printed_identity_requires_exact_same_role_parts(
     assert (not issues and bool(snapshots)) == (change == "none")
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "pointer_as_answer_fragment",
+        "not_a_pointer",
+        "different_question",
+        "different_role",
+        "missing_receipt",
+        "link_repeats_answer",
+    ],
+)
+def test_supplement_pointer_is_a_question_link_not_answer_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    from bd_packet_builder.contracts import (
+        AnswerProposal,
+        HistoricalBasis,
+        HistoricalCorrespondence,
+    )
+    from bd_packet_builder.draft import historical_answer_citations, verify_historical_context
+    from bd_packet_builder.history import with_historical_sources
+    from bd_packet_builder.inventory import build_inventory
+
+    setup, tools, _, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_answer="Blair Example" if change == "not_a_pointer" else "See supplement",
+        secondary_question="Title" if change == "different_question" else "Name",
+        secondary_role="Backup representative"
+        if change == "different_role"
+        else "Primary representative",
+    )
+    call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    call(tools, "finish_evidence")
+    checks = tuple(
+        HistoricalContextCheck.model_validate_json(json.dumps(c))
+        for c in json.loads(setup.artifact("historical_context_checks.json"))["checks"]
+    )
+    assert len(checks) == 2
+    pointer, answer = checks
+    links = (
+        (answer.context_citation,)
+        if change == "link_repeats_answer"
+        else ()
+        if change == "pointer_as_answer_fragment"
+        else (pointer.context_citation,)
+    )
+    proposal = AnswerProposal(
+        requirement_id="references",
+        outcome="proposed",
+        confidence=0.9,
+        value=TextValue(kind="text", value="Blair Example"),
+        citations=(answer.answer,),
+        historical_basis=HistoricalBasis(
+            category="reference",
+            context="issuer_specific",
+            role="Backup representative"
+            if change == "different_role"
+            else "Primary representative",
+            prior_question=answer.context_citation,
+            additional_contexts=(
+                (pointer.context_citation,) if change == "pointer_as_answer_fragment" else ()
+            ),
+            question_links=links,
+            current_checks=(),
+            reviewer_confirmation="Confirm the references are current.",
+            correspondence=HistoricalCorrespondence(
+                target_question="References",
+                assessment="applicable",
+                differences="The prior main form pointed to its supplemental answer.",
+                reason="Same issuer question answered on the supplement.",
+            ),
+        ),
+    )
+    inventory = with_historical_sources(
+        setup.evidence_root,
+        build_inventory(setup.evidence_root),
+        setup.store.load(setup.manifest.run_id).request.historical_archive,
+    )
+    issues, snapshots = verify_historical_context(
+        setup.evidence_root,
+        inventory,
+        proposal,
+        (answer,) if change == "missing_receipt" else checks,
+        {},
+    )
+    assert (not issues and bool(snapshots)) == (change == "none")
+    if change == "none":
+        # The pointer is navigation only; it never becomes answer evidence.
+        answer_citations = historical_answer_citations(proposal, snapshots)
+        assert answer_citations
+        assert all(c.quote != "See supplement" for c in answer_citations)
+    else:
+        assert issues == (
+            {
+                "pointer_as_answer_fragment": "historical_composition_has_unsupported_text",
+                "not_a_pointer": "historical_question_link_not_a_pointer",
+                "different_question": "historical_question_link_question_mismatch",
+                "different_role": "historical_question_link_context_mismatch",
+                "missing_receipt": "historical_question_link_receipt_missing",
+                "link_repeats_answer": "historical_question_link_repeats_answer",
+            }[change],
+        )
+
+
 @pytest.mark.parametrize("change", ["none", "invented_anchor", "conflicting_dates", "discrepancy"])
 def test_native_tenure_with_image_date_requires_independently_rechecked_signing_metadata(
     tmp_path: Path,
@@ -260,6 +368,7 @@ def setup_page(
     primary_write_in: str | None = None,
     primary_x_offset: int = 0,
     unboxed_control: bool = False,
+    check_rise: int = 21,
 ):
     setup = Setup(tmp_path, blank_pdf(), evidence_text=evidence_text, scanned=scanned_current)
     target = setup.evidence_root / PRIOR
@@ -284,7 +393,7 @@ def setup_page(
             if unboxed_control:
                 canvas.setLineWidth(2)
                 canvas.line(x, 715, x + 5, 709)
-                canvas.line(x + 5, 709, x + 17, 730)
+                canvas.line(x + 5, 709, x + 17, 709 + check_rise)
                 canvas.setLineWidth(1)
             else:
                 canvas.line(x + 2, 710, x + 10, 718)
@@ -527,6 +636,129 @@ def test_selected_control_can_follow_its_option_label(tmp_path, monkeypatch):
     assert any(a["answer_citation"]["quote"] == "Yes" for a in result["associations"]), result[
         "issues"
     ]
+
+
+def test_tall_check_stroke_stays_associated_with_its_label_line(tmp_path, monkeypatch):
+    _, tools, reader, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        control_state="selected",
+        unboxed_control=True,
+        check_rise=34,
+    )
+    raw = json.loads(reader.transcribe.return_value.model_dump_json())
+    raw["historical_fields"][0]["control"]["box"] = box(263, 80, 292, 115)
+    reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(raw))
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert any(a["answer_citation"]["quote"] == NAME for a in result["associations"]), result[
+        "issues"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("other_control", "accepted"),
+    [((266, 90, 290, 104), True), ((286, 100, 298, 112), False)],
+    ids=["same-column-neighbour", "between-mark-and-label"],
+)
+def test_only_controls_between_mark_and_label_intervene(
+    tmp_path, monkeypatch, other_control, accepted
+):
+    _, tools, reader, prior, _ = setup_page(tmp_path, monkeypatch, control_state="selected")
+    raw = json.loads(reader.transcribe.return_value.model_dump_json())
+    raw["historical_fields"][1]["control"] = {"box": box(*other_control), "state": "unselected"}
+    reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(raw))
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert any(a["answer_citation"]["quote"] == NAME for a in result["associations"]) == accepted
+    assert (
+        {"field_index": 0, "code": "historical_control_label_geometry_disagrees", "part": "control"}
+        in result["issues"]
+    ) != accepted, result["issues"]
+
+
+def test_distant_trailing_control_cannot_skip_over_other_words(tmp_path, monkeypatch):
+    _, tools, _, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_answer="Yes",
+        control_state="selected",
+        control_on_right=True,
+        primary_write_in="Other option",
+    )
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert "Yes" not in [a["answer_citation"]["quote"] for a in result["associations"]]
+    assert any(
+        i["code"] == "historical_control_label_geometry_disagrees" for i in result["issues"]
+    ), result["issues"]
+
+
+@pytest.mark.parametrize("scanned_answer", [False, True])
+@pytest.mark.parametrize("unboxed_control", [False, True])
+@pytest.mark.parametrize(
+    ("control_box", "label_left"),
+    [
+        ((263, 100, 284, 115), 290),
+        ((263, 98, 292, 118), 266),
+        ((262, 96, 290, 116), 270),
+        ((264, 100, 283, 114), 250),
+    ],
+)
+def test_control_label_relationship_uses_page_geometry_not_model_box_edges(
+    tmp_path, monkeypatch, scanned_answer, unboxed_control, control_box, label_left
+):
+    _, tools, reader, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        control_state="selected",
+        scanned_answer=scanned_answer,
+        unboxed_control=unboxed_control,
+    )
+    raw = json.loads(reader.transcribe.return_value.model_dump_json())
+    raw["historical_fields"][0]["control"]["box"] = box(*control_box)
+    raw["historical_fields"][0]["answer"]["box"]["left"] = label_left
+    reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(raw))
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert any(
+        " ".join(a["answer_citation"]["quote"].split()) == NAME for a in result["associations"]
+    ), result["issues"]
+    assert not [i for i in result["issues"] if i["field_index"] == 0]
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_mark_cannot_select_a_label_on_another_line(tmp_path, monkeypatch, allow):
+    _, tools, reader, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        control_state="selected",
+        historical_policy="answer_first_review" if allow else "conservative",
+    )
+    raw = json.loads(reader.transcribe.return_value.model_dump_json())
+    field = raw["historical_fields"][0]
+    field["answer"] = {"text": "Blair Example", "box": box(290, 140, 480, 300)}
+    reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(raw))
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert not [
+        a
+        for a in result["associations"]
+        if a["answer_citation"]["quote"] == "Blair Example"
+        and " ".join(a["role"].split()) == "Primary representative"
+    ]
+    assert any(i["field_index"] == 0 for i in result["issues"]), result
+
+
+def test_marks_cannot_be_reassigned_to_other_option_labels(tmp_path, monkeypatch):
+    _, tools, reader, prior, _ = setup_page(
+        tmp_path, monkeypatch, primary_answer="Yes", control_state="selected", second_control=True
+    )
+    raw = json.loads(reader.transcribe.return_value.model_dump_json())
+    # The model assigns the first mark to the farther "No" label.
+    raw["historical_fields"][1]["control"]["box"] = box(263, 100, 284, 115)
+    raw["historical_fields"][0]["control"]["box"] = box(463, 100, 484, 115)
+    reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(raw))
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert "No" not in [a["answer_citation"]["quote"] for a in result["associations"]]
+    assert any(
+        i["code"] == "historical_control_label_geometry_disagrees" for i in result["issues"]
+    ), result["issues"]
 
 
 @pytest.mark.parametrize("extra", ["e", "not", "100"])
@@ -1084,7 +1316,12 @@ def test_ocr_artifact_mutation_is_not_accepted(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "version",
-    ["historical-page-context-v4", "historical-page-context-v5", "historical-page-context-v6"],
+    [
+        "historical-page-context-v4",
+        "historical-page-context-v5",
+        "historical-page-context-v6",
+        "historical-page-context-v7",
+    ],
 )
 def test_legacy_relationship_identity_does_not_change_when_control_fields_are_added(
     tmp_path,
@@ -1097,12 +1334,13 @@ def test_legacy_relationship_identity_does_not_change_when_control_fields_are_ad
     raw["version"] = version
     raw["prompt_version"] = "scan-cross-check-v2"
     raw.pop("discrepancies")
-    if version != "historical-page-context-v6":
+    raw.pop("printed_readings")
+    if version not in ("historical-page-context-v6", "historical-page-context-v7"):
         raw["field"].pop("write_in")
     if version == "historical-page-context-v4":
         raw["field"].pop("control")
     for field in raw["transcript"]["historical_fields"]:
-        if version != "historical-page-context-v6":
+        if version not in ("historical-page-context-v6", "historical-page-context-v7"):
             field.pop("write_in")
         if version == "historical-page-context-v4":
             field.pop("control")
@@ -1388,6 +1626,42 @@ def test_model_cannot_claim_an_empty_historical_box_is_selected(tmp_path, monkey
     result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
     assert "Yes" not in [a["answer_citation"]["quote"] for a in result["associations"]]
     assert any(i["code"] == "historical_control_mark_disagrees" for i in result["issues"])
+
+
+@pytest.mark.parametrize("shift,padding", [(-1, -1), (0, 0), (1, 1)])
+def test_checkmark_hint_variations_survive_gate_and_independent_writer(
+    tmp_path, monkeypatch, shift, padding
+):
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path, monkeypatch, control_state="selected", unboxed_control=True
+    )
+    raw = json.loads(reader.transcribe.return_value.model_dump_json())
+    bounds = raw["historical_fields"][0]["control"]["box"]
+    bounds["left"] += shift - padding
+    bounds["top"] += shift - padding
+    bounds["right"] += shift + padding
+    bounds["bottom"] += shift + padding
+    reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(raw))
+    request, review = validated_page(setup, tools, prior, current)
+    assert review.decisions[0].decision == "draft_verified"
+    blank = setup.evidence_root / request.source
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    blank.write_bytes(setup.blank)
+    request_path = Path("outputs/checkmark-request.json")
+    request_raw = request.model_dump_json().encode()
+    (setup.evidence_root / request_path).write_bytes(request_raw)
+    output = publish_draft(
+        setup.evidence_root,
+        request_path,
+        request_raw,
+        request,
+        review,
+        review.model_dump_json().encode(),
+        None,
+    )
+    report = json.loads((output / "draft.json").read_bytes())
+    assert report["written_requirements"] == ["p1.name"]
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
 
 
 def test_control_subsection_header_may_follow_its_governing_question(tmp_path, monkeypatch):

@@ -112,6 +112,52 @@ CASES = (
 
 @pytest.mark.skipif(
     os.environ.get("BD_RUN_HISTORICAL_EVAL") != "1",
+    reason="Opt in with BD_RUN_HISTORICAL_EVAL=1; paid synthetic printed-wording evaluation",
+)
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Minimum capital on line 3750 or line 3760 of the report.",
+        "Has the firm been investigated for disputable or unfair activities?",
+    ],
+)
+def test_focused_transcription_is_literal_and_repeatable(text):
+    from contextlib import closing
+    from io import BytesIO
+
+    import pypdfium2 as pdfium
+    from reportlab.pdfgen.canvas import Canvas
+
+    from bd_packet_builder.scan import FoundryScanReader, normalized
+
+    data = BytesIO()
+    canvas = Canvas(data, pagesize=(600, 60), invariant=True)
+    canvas.setFont("Helvetica", 12)
+    canvas.drawString(10, 25, text)
+    canvas.save()
+    reader = FoundryScanReader(
+        FoundryConfig(
+            endpoint=os.environ["BD_FOUNDRY_ENDPOINT"],
+            deployment=os.environ["BD_FOUNDRY_DEPLOYMENT"],
+            timeout_seconds=180,
+        ),
+        allow_paid=True,
+    )
+    with (
+        pdfium.PdfDocument(data.getvalue()) as pdf,
+        closing(pdf[0]) as page,
+        closing(page.render(scale=3)) as bitmap,
+        closing(bitmap.to_pil()) as image,
+        BytesIO() as output,
+    ):
+        image.save(output, format="PNG")
+        for _ in range(2):
+            transcript = reader.transcribe(output.getvalue())
+            assert transcript.readable and normalized(transcript.text) == normalized(text)
+
+
+@pytest.mark.skipif(
+    os.environ.get("BD_RUN_HISTORICAL_EVAL") != "1",
     reason="Opt in with BD_RUN_HISTORICAL_EVAL=1; paid synthetic semantic evaluation",
 )
 @pytest.mark.parametrize(("prior_question", "answer", "target", "expected"), CASES)
@@ -153,6 +199,56 @@ Different wording or municipality alone is not incompatibility for firm-wide bus
 class ReadingDecision(Contract):
     selected_value: str | None
     reason: Nonblank
+
+
+@pytest.mark.skipif(
+    os.environ.get("BD_RUN_HISTORICAL_EVAL") != "1",
+    reason="Opt in with BD_RUN_HISTORICAL_EVAL=1; paid printed-resolution reasoning evaluation",
+)
+@pytest.mark.parametrize(
+    "resolved,contradiction,expected",
+    [(True, False, "No"), (False, False, None), (True, True, None)],
+)
+def test_model_uses_resolved_source_wording_without_overriding_contradictions(
+    resolved, contradiction, expected
+):
+    question = "Has the firm been investigated for disputable or unfair activities?"
+    result = request_structured(
+        FoundryConfig(
+            endpoint=os.environ["BD_FOUNDRY_ENDPOINT"],
+            deployment=os.environ["BD_FOUNDRY_DEPLOYMENT"],
+            timeout_seconds=180,
+        ),
+        allow_paid=True,
+        instructions=AGENT_INSTRUCTIONS + "\nEvaluation only: no tools. Select No for an "
+        "eligible checked historical draft; otherwise null. Return ReadingDecision.",
+        input_json=json.dumps(
+            {
+                "historical_policy": "answer_first_review",
+                "category": "disclosure",
+                "target_question": question,
+                "original_image_question": question.replace("disputable", "deceptive"),
+                "question": question,
+                "checked_selected_answer": "No",
+                "control_pixel_checked": True,
+                "printed_resolutions": [
+                    {
+                        "part": "question",
+                        "status": "resolved",
+                        "method": "blind focused reread agrees exactly with OCR",
+                    }
+                ]
+                if resolved
+                else [],
+                "current_evidence": "Verified source explicitly contradicts the historical No."
+                if contradiction
+                else "No current corroboration; continuity unconfirmed.",
+            }
+        ),
+        response_type=ReadingDecision,
+        max_output_tokens=2048,
+    )
+    assert result.value.selected_value == expected
 
 
 class KnowledgeDecision(ReadingDecision):

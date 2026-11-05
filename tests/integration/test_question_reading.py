@@ -12,6 +12,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 
 from bd_packet_builder.draft import DraftDecision, DraftRequest, DraftReview, publish_draft
+from bd_packet_builder.evidence_tools import EvidenceLimits
 from bd_packet_builder.foundry import FoundryConfig
 from bd_packet_builder.gate import validate_answers
 from bd_packet_builder.history import ArchiveEntry, ArchiveManifest
@@ -23,13 +24,28 @@ from tests.integration.test_historical_prefill import call
 from tests.unit.test_question_reading import QUESTION
 
 
-def question_run(tmp_path, monkeypatch, ocr_question, *, mark=True, interleaved=False):
+def question_run(
+    tmp_path,
+    monkeypatch,
+    ocr_question,
+    *,
+    mark=True,
+    interleaved=False,
+    image_question=QUESTION,
+    native=False,
+    focused=None,
+    answer_label="No",
+    image_answer=None,
+    image_budget=5,
+    confidence=96,
+    focused_readable=True,
+):
     def form(selected):
         data = BytesIO()
         canvas = Canvas(data, pagesize=(612, 792), invariant=True)
         canvas.setFont("Helvetica", 9)
         canvas.drawString(40, 740, QUESTION)
-        for x, label in ((40, "Yes"), (140, "No")):
+        for x, label in ((40, "Yes"), (140, answer_label)):
             canvas.rect(x, 698, 10, 10)
             canvas.drawString(x + 20, 700, label)
         if selected:
@@ -56,15 +72,17 @@ def question_run(tmp_path, monkeypatch, ocr_question, *, mark=True, interleaved=
                             "instruction_box": nbox(35, 40, 580, 65),
                             "options": [
                                 {
-                                    "option_id": label.lower(),
+                                    "option_id": "yes" if x == 40 else "no",
                                     "label": label,
                                     "instruction": label,
                                     "control": "checkbox",
                                     "write_in_region": None,
                                     "box": nbox(x, 84, x + 10, 94),
-                                    "label_box": nbox(x + 20, 81, x + 40, 96),
+                                    "label_box": nbox(
+                                        x + 20, 81, x + 20 + stringWidth(label, "Helvetica", 9), 96
+                                    ),
                                 }
-                                for x, label in ((40, "Yes"), (140, "No"))
+                                for x, label in ((40, "Yes"), (140, answer_label))
                             ],
                         }
                     ],
@@ -79,15 +97,18 @@ def question_run(tmp_path, monkeypatch, ocr_question, *, mark=True, interleaved=
     relative = "bd_agreements/Completed/Synthetic/prior.pdf"
     path = setup.evidence_root / relative
     path.parent.mkdir(parents=True)
-    with (
-        pdfium.PdfDocument(prior) as document,
-        closing(document[0]) as page,
-        closing(page.render(scale=2)) as bitmap,
-        closing(bitmap.to_pil()) as image,
-    ):
-        canvas = Canvas(str(path), pagesize=(612, 792), invariant=True)
-        canvas.drawImage(ImageReader(image), 0, 0, 612, 792)
-        canvas.save()
+    if native:
+        path.write_bytes(prior)
+    else:
+        with (
+            pdfium.PdfDocument(prior) as document,
+            closing(document[0]) as page,
+            closing(page.render(scale=2)) as bitmap,
+            closing(bitmap.to_pil()) as image,
+        ):
+            canvas = Canvas(str(path), pagesize=(612, 792), invariant=True)
+            canvas.drawImage(ImageReader(image), 0, 0, 612, 792)
+            canvas.save()
     setup.manifest = prepare_live_run(
         setup.store,
         LiveRunRequest(
@@ -121,15 +142,30 @@ def question_run(tmp_path, monkeypatch, ocr_question, *, mark=True, interleaved=
                 "text": QUESTION + "\nNo",
                 "historical_fields": [
                     {
-                        "question": {"text": QUESTION, "box": nbox(35, 40, 580, 65)},
+                        "question": {"text": image_question, "box": nbox(35, 40, 580, 65)},
                         "role": None,
-                        "answer": {"text": "No", "box": nbox(160, 81, 185, 96)},
+                        "answer": {
+                            "text": image_answer or answer_label,
+                            "box": nbox(
+                                148 if image_answer else 160,
+                                81,
+                                300 if image_answer else 185,
+                                96,
+                            ),
+                        },
                         "control": {"state": "selected", "box": nbox(140, 84, 150, 94)},
                     }
                 ],
             }
         )
     )
+    if focused is not None:
+        reader.transcribe.side_effect = [
+            reader.transcribe.return_value,
+            ScanTranscript(
+                readable=focused_readable, subject=None, reporting_period=None, text=focused
+            ),
+        ]
     header = (
         "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
         "left\ttop\twidth\theight\tconf\ttext\n"
@@ -140,13 +176,18 @@ def question_run(tmp_path, monkeypatch, ocr_question, *, mark=True, interleaved=
         width = stringWidth(word, "Helvetica", 9)
         words.append((word, x, 44, width, 1))
         x += width + stringWidth(" ", "Helvetica", 9)
-    words.extend([("Yes", 60, 83, 16, 2), ("No", 160, 83, 14, 2)])
+    words.append(("Yes", 60, 83, 16, 2))
+    x = 160.0
+    for word in answer_label.split():
+        width = stringWidth(word, "Helvetica", 9)
+        words.append((word, x, 83, width, 2))
+        x += width + stringWidth(" ", "Helvetica", 9)
     if interleaved:
         words.insert(5, ("unrelated", 595, 44, 10, 3))
     scale = 300 / 72
     tsv = header + "".join(
         f"5\t1\t1\t1\t{line}\t{i + 1}\t{round(x * scale)}\t{round(y * scale)}\t"
-        f"{max(1, round(width * scale))}\t38\t96\t{word}\n"
+        f"{max(1, round(width * scale))}\t38\t{confidence}\t{word}\n"
         for i, (word, x, y, width, line) in enumerate(words)
     )
     monkeypatch.setattr("bd_packet_builder.ocr.shutil.which", lambda _: "/local/tesseract")
@@ -154,13 +195,188 @@ def question_run(tmp_path, monkeypatch, ocr_question, *, mark=True, interleaved=
         "bd_packet_builder.ocr._execute",
         lambda command, *_: "tesseract 5.5.0\n" if "--version" in command else tsv,
     )
-    tools = setup.tools(scan_reader=reader)
+    tools = setup.tools(
+        scan_reader=reader, evidence_limits=EvidenceLimits(max_ocr_pages=image_budget)
+    )
     call(tools, "interpret_form")
     sources = call(tools, "list_sources")["sources"]
     source = next(s for s in sources if s["family"] == "historical_reference")
     result = call(tools, "read_historical_page", {"source_id": source["source_id"], "page": 1})
     call(tools, "finish_evidence")
     return setup, tools, result
+
+
+@pytest.mark.parametrize("part", ["question", "option"])
+@pytest.mark.parametrize("method", ["native", "focused", "unresolved"])
+def test_printed_wording_resolution_preserves_selection(tmp_path, monkeypatch, part, method):
+    wrong_question = QUESTION.replace("temporarily", "permanently")
+    label = "Regional 3760" if part == "option" else "No"
+    setup, tools, result = question_run(
+        tmp_path,
+        monkeypatch,
+        QUESTION,
+        image_question=wrong_question if part == "question" else QUESTION,
+        native=method == "native",
+        focused=(QUESTION if part == "question" else label)
+        if method == "focused"
+        else "unresolved wording",
+        answer_label=label,
+        image_answer="Regional 3670" if part == "option" else None,
+    )
+    candidate = result["associations"][0]
+    assert bool(candidate.get("printed_resolutions")) == (method != "unresolved")
+    if method != "unresolved":
+        assert candidate["question"] == QUESTION
+        assert candidate["candidate_answer"] == label
+        if part == "question":
+            assert candidate["question_reconciliation"]["status"] == (
+                "resolved_against_historical_source"
+            )
+        assert candidate["discrepancies"]  # Original readings must remain auditable.
+        assert (
+            json.loads(setup.artifact("answer_handoff.json"))["historical_candidates"][0][
+                "printed_resolutions"
+            ]
+            == candidate["printed_resolutions"]
+        )
+    call(
+        tools,
+        "submit_answers",
+        {
+            "proposals": [
+                {
+                    "requirement_id": "p1.q6",
+                    "outcome": "proposed",
+                    "confidence": 0.9,
+                    "value": {"kind": "single_select", "selected": ["no"]},
+                    "citations": [candidate["answer_citation"]],
+                    "historical_basis": {
+                        "category": "disclosure",
+                        "context": "firm_wide",
+                        "prior_question": candidate["context_citation"],
+                        "current_checks": [],
+                        "reviewer_confirmation": "Confirm historical continuity.",
+                    },
+                }
+            ]
+        },
+    )
+    request = DraftRequest.model_validate_json(setup.artifact("draft_request.json"))
+    review = DraftReview.model_validate_json(setup.artifact("answer_review.json"))
+    assert (review.decisions[0].decision == "draft_verified") == (method != "unresolved"), (
+        review.decisions[0].reason
+    )
+    if method != "unresolved":
+        conservative = validate_answers(
+            setup.evidence_root,
+            request.model_copy(update={"historical_policy": "conservative"}),
+            "a" * 64,
+            historical_context_checks=review.historical_context_checks,
+        )
+        assert conservative.decisions[0].decision == "withhold"
+    # Even a positive review cannot bypass unresolved or tampered printed wording.
+    raw = request.model_dump_json().encode()
+    (setup.evidence_root / "outputs/printed-request.json").write_bytes(raw)
+    forged = review.model_copy(
+        update={
+            "request_sha256": hashlib.sha256(raw).hexdigest(),
+            "decisions": (
+                DraftDecision(
+                    requirement_id="p1.q6",
+                    decision="draft_verified",
+                    reason="Test review",
+                    evidence_status="historical_continuity_unconfirmed",
+                    evidence_support_confirmed=True,
+                    source_approved=True,
+                    placement_confirmed=True,
+                ),
+            ),
+        }
+    )
+    output = publish_draft(
+        setup.evidence_root,
+        Path("outputs/printed-request.json"),
+        raw,
+        request,
+        forged,
+        forged.model_dump_json().encode(),
+        None,
+    )
+    report = json.loads((output / "draft.json").read_bytes())
+    assert bool(report["written_requirements"]) == (method != "unresolved")
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+    summary = (output / "reviewer-summary.txt").read_text()
+    assert "PRINTED-WORDING CHECK" in summary
+    usage = json.loads(setup.artifact("answer_handoff.json"))["reading_usage"]
+    assert usage["independent_image_pages"] == (1 if method == "native" else 2)
+    if method != "unresolved":
+        from bd_packet_builder.draft import selected_inventory
+
+        check = review.historical_context_checks[0]
+        assert check.printed_readings
+        reading = check.printed_readings[0]
+        forged_reading = reading.model_copy(
+            update={
+                "native": reading.native.model_copy(update={"quote": "not the source"})
+                if reading.native
+                else None,
+                "crop_sha256": "f" * 64 if reading.focused else None,
+            }
+        )
+        tampered = check.model_copy(update={"printed_readings": (forged_reading,)})
+        citation = check.question
+        raw_ocr = setup.store.read_artifact(
+            setup.manifest.run_id, f"ocr-{citation.artifact_sha256}.json"
+        )
+        assert not tampered.recheck(
+            setup.evidence_root,
+            selected_inventory(setup.evidence_root, request),
+            raw_ocr,
+            allow_disagreements=True,
+        )
+
+
+@pytest.mark.parametrize("change", ["budget", "unreadable", "low_confidence", "no_mark", "target"])
+def test_focused_reading_does_not_override_remaining_constraints(tmp_path, monkeypatch, change):
+    observed = QUESTION.replace("temporarily", "permanently") if change == "target" else QUESTION
+    setup, tools, result = question_run(
+        tmp_path,
+        monkeypatch,
+        observed,
+        image_question=QUESTION.replace("temporarily", "uncertain"),
+        focused=observed,
+        focused_readable=change != "unreadable",
+        image_budget=1 if change == "budget" else 5,
+        confidence=80 if change == "low_confidence" else 96,
+        mark=change != "no_mark",
+    )
+    candidate = result["associations"][0]
+    assert not candidate["question_reconciliation"]
+    assert bool(candidate["printed_resolutions"]) == (change == "target")
+    call(
+        tools,
+        "submit_answers",
+        {
+            "proposals": [
+                {
+                    "requirement_id": "p1.q6",
+                    "outcome": "proposed",
+                    "confidence": 0.9,
+                    "value": {"kind": "single_select", "selected": ["no"]},
+                    "citations": [candidate["answer_citation"]],
+                    "historical_basis": {
+                        "category": "disclosure",
+                        "context": "firm_wide",
+                        "prior_question": candidate["context_citation"],
+                        "current_checks": [],
+                        "reviewer_confirmation": "Confirm continuity.",
+                    },
+                }
+            ]
+        },
+    )
+    review = DraftReview.model_validate_json(setup.artifact("answer_review.json"))
+    assert review.decisions[0].decision == "withhold"
 
 
 @pytest.mark.parametrize(

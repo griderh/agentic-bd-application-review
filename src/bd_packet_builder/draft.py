@@ -25,6 +25,7 @@ from bd_packet_builder.contracts import (
     BooleanValue,
     Contract,
     EvidenceStatus,
+    HistoricalBasis,
     HistoricalContextCitation,
     Identifier,
     IdentifierValue,
@@ -510,6 +511,8 @@ def verify_historical_context(
             return ("historical_current_scan_requires_machine_verification",), ()
         current_snapshots.append((citation, raw))
     if not isinstance(basis.prior_question, HistoricalContextCitation):
+        if basis.question_links:
+            return ("historical_question_link_requires_checked_answer",), ()
         issues, date_snapshots = _verify_signature_metadata(
             root, inventory, proposal, checks, render_hashes
         )
@@ -595,7 +598,10 @@ def verify_historical_context(
             covered: set[str] = set()
             for checked in receipts:
                 option_id = control_option_id(
-                    checked.field, checked.transcript.historical_fields, requirement, mapping
+                    checked.effective_field,
+                    checked.transcript.historical_fields,
+                    requirement,
+                    mapping,
                 )
                 if option_id is not None:
                     covered.add(option_id)
@@ -611,8 +617,9 @@ def verify_historical_context(
                     != (normalized(main_role.text) if main_role else None)
                 ):
                     continue
+                effective = next((c.effective_field for c in receipts if c.field == field), field)
                 option_id = control_option_id(
-                    field, receipt.transcript.historical_fields, requirement, mapping
+                    effective, receipt.transcript.historical_fields, requirement, mapping
                 )
                 if field.control.state == "ambiguous" or option_id is None:
                     return ("historical_selected_controls_incomplete_or_ambiguous",), ()
@@ -634,7 +641,10 @@ def verify_historical_context(
                             c
                             for c in receipts
                             if control_option_id(
-                                c.field, c.transcript.historical_fields, requirement, mapping
+                                c.effective_field,
+                                c.transcript.historical_fields,
+                                requirement,
+                                mapping,
                             )
                             == write_in.option_id
                         ),
@@ -698,12 +708,102 @@ def verify_historical_context(
         ):
             return ("historical_relationship_text_or_geometry_disagrees",), ()
         snapshots.extend(current)
+    link_issue = _verify_question_links(
+        root, inventory, basis, receipt, receipts, checks, render_hashes, allow_disagreements
+    )
+    if link_issue:
+        return (link_issue,), ()
     date_issues, date_snapshots = _verify_signature_metadata(
         root, inventory, proposal, checks, render_hashes
     )
     if date_issues:
         return date_issues, ()
     return (), tuple(snapshots) + date_snapshots
+
+
+_POINTER = re.compile(
+    r"\b(see|refer\w*)\b.*\b(supplement\w*|attach\w*|addend\w*|exhibit\w*|continu\w*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+_PLAIN_HISTORICAL_REASONS = {
+    "historical_composition_has_unsupported_text": (
+        "The proposed answer does not exactly equal the cited historical answer pieces joined "
+        "in order. A 'see supplement' pointer cited as an answer piece causes this."
+    ),
+    "historical_question_link_not_a_pointer": (
+        "A record cited as a 'see supplement' link does not read as a short pointer."
+    ),
+    "historical_question_link_question_mismatch": (
+        "The 'see supplement' link belongs to a different question than the cited answer."
+    ),
+    "historical_question_link_context_mismatch": (
+        "The 'see supplement' link is from a different packet, section or answer type."
+    ),
+    "historical_question_link_receipt_missing": (
+        "The 'see supplement' link has no checked page-reading record."
+    ),
+    "historical_question_link_repeats_answer": (
+        "The same record was cited as both an answer piece and a 'see supplement' link."
+    ),
+    "historical_question_link_text_or_geometry_disagrees": (
+        "The 'see supplement' link no longer matches the page text or position on recheck."
+    ),
+}
+
+
+def _question_tokens(text: str) -> list[str]:
+    return re.sub(r"[^0-9a-z]+", " ", text.casefold()).split()
+
+
+def _verify_question_links(
+    root: Path,
+    inventory: Inventory,
+    basis: HistoricalBasis,
+    receipt: HistoricalContextCheck,
+    receipts: list[HistoricalContextCheck],
+    checks: tuple[HistoricalContextCheck, ...],
+    render_hashes: dict[tuple[str, int], str],
+    allow_disagreements: bool,
+) -> str | None:
+    """Check navigation pointers separately; they never contribute answer text or evidence."""
+    answer_contexts = {c.context_citation for c in receipts} | set(basis.additional_contexts)
+    answer_tokens = _question_tokens(receipt.question.quote)
+    role = normalized(receipt.role.quote) if receipt.role else None
+    for index, link in enumerate(basis.question_links):
+        if link in answer_contexts or link in basis.question_links[:index]:
+            return "historical_question_link_repeats_answer"
+        checked = next((c for c in checks if c.context_citation == link), None)
+        if checked is None:
+            return "historical_question_link_receipt_missing"
+        if (
+            checked.field.control is not None
+            or checked.answer.source_id != receipt.answer.source_id
+            or (normalized(checked.role.quote) if checked.role else None) != role
+        ):
+            return "historical_question_link_context_mismatch"
+        if (
+            any(d.part == "answer" for d in checked.discrepancies)
+            or len(checked.answer.quote.split()) > 20
+            or not _POINTER.search(checked.answer.quote)
+        ):
+            return "historical_question_link_not_a_pointer"
+        link_tokens = _question_tokens(checked.question.quote)
+        shorter, longer = sorted((link_tokens, answer_tokens), key=len)
+        if not shorter or longer[: len(shorter)] != shorter:
+            return "historical_question_link_question_mismatch"
+        current: list[bytes] = []
+        for citation in checked.ocr_citations:
+            issue, raw, _ = verify_ocr_citation(root, inventory, citation, render_hashes)
+            if issue or raw is None:
+                return issue or "historical_relationship_artifact_unavailable"
+            current.append(raw)
+        if not current or not checked.recheck(
+            root, inventory, current[0], allow_disagreements=allow_disagreements
+        ):
+            return "historical_question_link_text_or_geometry_disagrees"
+    return None
 
 
 def _verify_reading_resolution(
@@ -1473,6 +1573,16 @@ def publish_draft(
                     result["historical_candidate_status"] = (
                         "question_reconciled_against_native_blank"
                     )
+        printed_readings = [
+            reading.model_dump(mode="json")
+            for c in review.historical_context_checks
+            if c.supports(proposal, req) or c.answer in proposal.citations
+            for reading in c.printed_readings
+        ]
+        if printed_readings:
+            result["historical_printed_readings"] = printed_readings
+            if context_verified and any(r["status"] == "resolved" for r in printed_readings):
+                result["historical_candidate_status"] = "printed_wording_resolved"
         ocr_citations = tuple(c for c in proposal.citations if isinstance(c, OcrCitation))
         ocr_evidence: list[dict[str, object]] = []
         ocr_valid = True
@@ -2070,6 +2180,29 @@ def publish_draft(
         summary.extend(["", "REVIEWER ACTION LIST (internal only):"])
         for item in results:
             identity = str(item["requirement_id"])
+            printed_details = item.get("historical_printed_readings")
+            printed_records = (
+                [r for r in printed_details if isinstance(r, dict)]
+                if isinstance(printed_details, list)
+                else []
+            )
+            resolved_printed = any(r.get("status") == "resolved" for r in printed_records)
+            if printed_records:
+                for reading in printed_records:
+                    summary.append(
+                        f"- Form page {requirements[identity].page}, {identity}: "
+                        f"PRINTED-WORDING CHECK: {reading['part']}; "
+                        f"status={reading['status']}; method="
+                        + (
+                            "localized source-native text"
+                            if reading["native"]
+                            else "blind focused image reread"
+                            if reading["focused"]
+                            else "reread budget exhausted"
+                        )
+                        + ". Original readings remain below; this does not establish "
+                        "current business truth or approve a selection."
+                    )
             extraction_details = item.get("historical_extraction_discrepancies")
             extraction_parts = (
                 tuple(
@@ -2084,8 +2217,8 @@ def publish_draft(
                     f"- Form page {requirements[identity].page}, {identity}: "
                     f"{'LEFT BLANK' if item['status'] == 'blank' else item['status']}; "
                     + (
-                        "Historical question transcription was reconciled against the native "
-                        "blank, but the answer was not written; see validation details."
+                        "Historical question transcription was reconciled against source "
+                        "evidence, but the answer was not written; see validation details."
                         if item.get("historical_question_reconciliation")
                         else "Historical extraction differs in: "
                         + ", ".join(extraction_parts)
@@ -2103,6 +2236,12 @@ def publish_draft(
                     summary.append(
                         f"  Validation details: {item['review_reason']}; "
                         f"writer checks: {item['issues']}"
+                    )
+                    codes = f"{item['review_reason']} {item['issues']}"
+                    summary.extend(
+                        f"  Plain-language reason: {text}"
+                        for code, text in _PLAIN_HISTORICAL_REASONS.items()
+                        if code in codes
                     )
                 if item.get("historical_extraction_discrepancies"):
                     summary.append(
@@ -2200,6 +2339,13 @@ def publish_draft(
                         "FILLED AFTER RECONCILIATION; exact native digits and high-confidence "
                         "OCR agree within the historical answer region. Original readings: "
                         + json.dumps(item.get("historical_extraction_discrepancies", []))
+                    )
+                elif resolved_printed:
+                    summary.append(
+                        f"- Form page {requirements[identity].page}, {identity}: "
+                        "FILLED AFTER PRINTED-WORDING RESOLUTION. Local source evidence resolved "
+                        "the transcription difference; the selected answer was checked separately. "
+                        "Historical continuity remains unconfirmed."
                     )
                 elif item.get("historical_question_reconciliation"):
                     summary.append(

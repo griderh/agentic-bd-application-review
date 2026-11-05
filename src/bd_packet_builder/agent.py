@@ -97,7 +97,7 @@ from bd_packet_builder.scan import (
 )
 from bd_packet_builder.visual import VisualPage
 
-AGENT_VERSION = "packet-agent-v26"
+AGENT_VERSION = "packet-agent-v30"
 AGENT_INSTRUCTIONS = """You complete one broker-dealer application packet by calling tools.
 You have no other capabilities: no shell, files, browsing, email or submission.
 
@@ -215,6 +215,11 @@ AGENT_INSTRUCTIONS += """
   warnings. It does not resolve answer, role or control disputes. For an unresolved question,
   explain which word differs and that the question, not necessarily its selected answer,
   needs inspection. Do not ask for current business evidence to repair question transcription.
+  printed_resolutions with status=resolved establishes printed question/option wording from
+  localized source-native text or a blind focused image reread agreeing with OCR. Use that
+  candidate's resolved question/candidate_answer, not the erroneous original image transcription.
+  Keep the original discrepancy for review; do not treat it as an unresolved reading conflict.
+  This does not resolve a selection dispute, changed question meaning or current continuity.
   For other discrepancies, before finish_evidence target
   disputed scalar fields: read the same historical subject/Name field and inspect an independent
   current approved document for that subject, field label and value. Use locate_quote for native
@@ -289,6 +294,10 @@ AGENT_INSTRUCTIONS += """
   These must be from the same packet and role. Concatenate their exact answers in that order
   using only whitespace/punctuation separators; no invented labels, paraphrases or extra claims.
   Supply a correspondence explaining the combination; never combine different representatives.
+  A main-form answer that only points elsewhere (for example "Please see Supplemental Answers
+  page") is navigation, not answer text: put its context citation in
+  historical_basis.question_links (never additional_contexts or citations) and compose the
+  answer only from the supplement's checked answer parts.
 - Use category=disclosure, headcount, tenure or eligibility for those historical cases.
   For tenure inspect the prior signature page using read_historical_page.
   Set historical_basis.tenure to prior_value (exact prior tenure), signed_on, date_citation and
@@ -1299,7 +1308,15 @@ class PacketAgentTools:
                 "unresolved conflict or current-truth confirmation. Use the separately checked "
                 "selection unless another actual conflict or policy prohibition blocks it. "
                 "Keep source/role/column context for duplicate labels and selected write-ins. "
-                "Reconcile conditional explanations against their final accepted parents."
+                "Reconcile conditional explanations against their final accepted parents. "
+                "A resolved printed_resolutions entry establishes printed wording from localized "
+                "source-native text or a blind focused reread agreeing with OCR, not from the "
+                "target's expected wording. Use the candidate's resolved question and "
+                "candidate_answer; retain original discrepancies for review, not as an unresolved "
+                "reading veto. This does not resolve selection, applicability or continuity. "
+                "Pointers such as 'see supplemental answers' belong in question_links, never "
+                "in additional_contexts or citations; answer text comes only from the "
+                "supplement's checked answer parts."
             ),
         }
         artifacts["answer_handoff.json"] = _envelope(handoff).encode()

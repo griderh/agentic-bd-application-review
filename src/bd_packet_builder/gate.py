@@ -41,8 +41,8 @@ from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.reconciliation import RequirementAssessment
 from bd_packet_builder.scan import ExhibitImageCheck, ScanCheck
 
-GATE_VERSION = "answer-gate-v15"
-GATE_REVIEWER = "application_validation_gate_v15"
+GATE_VERSION = "answer-gate-v19"
+GATE_REVIEWER = "application_validation_gate_v19"
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
@@ -135,6 +135,10 @@ def validate_answers(
                         historical_receipt.context_citation in basis.additional_contexts
                         or basis.prior_question == historical_receipt.context_citation
                     )
+                )
+                or (
+                    basis is not None
+                    and historical_receipt.context_citation in basis.question_links
                 )
                 or historical_receipt.supports(proposal, requirements[proposal.requirement_id])
             ):

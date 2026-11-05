@@ -319,6 +319,8 @@ class HistoricalBasis(Contract):
     correspondence: HistoricalCorrespondence | None = None
     tenure: HistoricalTenure | None = None
     additional_contexts: Annotated[tuple[HistoricalContextCitation, ...], Field(max_length=10)] = ()
+    # Navigation-only pointers (for example "see supplemental answers"); never answer text.
+    question_links: Annotated[tuple[HistoricalContextCitation, ...], Field(max_length=3)] = ()
     reading_resolution: ReadingResolution | None = None
 
 

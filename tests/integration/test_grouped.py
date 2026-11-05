@@ -768,6 +768,42 @@ def test_actual_sdk_preserves_schema_invalid_response_for_private_diagnostics(tm
     assert record["error"]["problems"]
 
 
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+def test_evidence_failure_reports_safe_sdk_cause_and_http_status(tmp_path, status):
+    setup = Setup(tmp_path, blank_pdf())
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(
+            status,
+            json={"error": {"message": "PRIVATE DOCUMENT CONTENT", "type": "synthetic_error"}},
+        )
+
+    async def execute():
+        async with (
+            httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http,
+            AsyncOpenAI(
+                base_url="https://synthetic.invalid/v1",
+                api_key="synthetic",
+                http_client=http,
+                max_retries=0,
+            ) as api,
+        ):
+            return await run_grouped_packet_agent(
+                OpenAIChatClient(model="synthetic", async_client=api), setup.tools()
+            )
+
+    final = asyncio.run(execute())
+    assert final.status == "failed"
+    assert final.failure.code == "evidence_model_failed"
+    assert final.failure.during_status == "created"
+    assert f"HTTP {status}" in final.failure.message
+    assert "ChatClientException -> " in final.failure.message
+    assert "PRIVATE DOCUMENT CONTENT" not in final.model_dump_json()
+    assert len(calls) == 1
+
+
 def test_group_wire_schema_requires_numeric_confidence_for_proposed_answers():
     from bd_packet_builder.grouped import group_response_format
 

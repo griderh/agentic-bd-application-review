@@ -244,7 +244,11 @@ def _technical_error(error: BaseException) -> dict[str, Any]:
         result["causes"].append(label)
         if isinstance(current, ValidationError):
             result["problems"] = _problems(current)
-        current = current.__cause__ or current.__context__
+        current = (
+            current.__cause__
+            or current.__context__
+            or next((arg for arg in current.args if isinstance(arg, BaseException)), None)
+        )
     return result
 
 
@@ -637,7 +641,11 @@ async def run_grouped_packet_agent(
                 "Collect approved evidence, then finish_evidence. Begin with get_run_status."
             )
         except AgentFrameworkException as error:
-            return tools.fail("evidence_model_failed", type(error).__name__)
+            diagnostic = _technical_error(error)
+            return tools.fail(
+                "evidence_model_failed",
+                "Evidence model call failed: " + " -> ".join(diagnostic["causes"]),
+            )
         if tools.manifest().status == "failed":
             return tools.manifest()
         if tools.manifest().status != "evidence_collected":

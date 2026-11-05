@@ -11,6 +11,7 @@ from typing import Annotated, Literal, Protocol
 
 import pypdfium2 as pdfium
 from openai import OpenAI
+from PIL import Image
 from pydantic import ConfigDict, Field, ValidationError
 
 from bd_packet_builder.contracts import (
@@ -360,6 +361,29 @@ def verify_amount_row(
         raise ScanVerificationError("minimum_amount_row_label_or_confidence_disagrees")
 
 
+def render_region(
+    root: Path,
+    inventory: Inventory,
+    source_id: str,
+    page: int,
+    render_sha256: str,
+    box: NormalizedBox,
+) -> bytes:
+    png = _render_image(root, inventory, source_id, page)
+    if hashlib.sha256(png).hexdigest() != render_sha256:
+        raise ScanVerificationError("scan_render_mismatch")
+    with Image.open(BytesIO(png)) as image:
+        bounds = (
+            int(box.left * image.width / 1000),
+            int(box.top * image.height / 1000),
+            min(image.width, int(box.right * image.width / 1000) + 1),
+            min(image.height, int(box.bottom * image.height / 1000) + 1),
+        )
+        with image.crop(bounds) as crop, BytesIO() as output:
+            crop.save(output, format="PNG")
+            return output.getvalue()
+
+
 class ScanEvidence:
     """One blind image request per page, with a bounded in-memory transcript cache."""
 
@@ -494,6 +518,20 @@ class ScanEvidence:
             self._transcripts[key] = transcript
         read_source_bytes(self.root, self.inventory, source_id)
         return transcript
+
+    def transcribe_region(
+        self, source_id: str, page: int, render_sha256: str, box: NormalizedBox
+    ) -> tuple[ScanTranscript, str] | None:
+        png = render_region(self.root, self.inventory, source_id, page, render_sha256, box)
+        digest = hashlib.sha256(png).hexdigest()
+        key = source_id, page, digest
+        if key not in self._transcripts:
+            if self._attempts >= self.max_pages:
+                return None
+            self._attempts += 1
+            self._transcripts[key] = self.reader.transcribe(png)
+        read_source_bytes(self.root, self.inventory, source_id)
+        return self._transcripts[key], digest
 
     def locate_exhibit(
         self, source_id: str, page: int, title: str, artifact_path: str

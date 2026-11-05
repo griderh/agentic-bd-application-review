@@ -6,10 +6,12 @@ import math
 import re
 from contextlib import closing
 from difflib import SequenceMatcher
+from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Literal
 
 import pypdfium2 as pdfium
+from PIL import Image
 from pydantic import Field
 
 from bd_packet_builder.contracts import (
@@ -23,11 +25,12 @@ from bd_packet_builder.contracts import (
     Nonblank,
     OcrCitation,
     Requirement,
+    Sha256,
     TextValue,
     explicit_choice_answer,
 )
 from bd_packet_builder.evidence import EvidenceError, resolve_quote
-from bd_packet_builder.historical_controls import inspect_control
+from bd_packet_builder.historical_controls import ControlPixels, inspect_control
 from bd_packet_builder.inventory import Inventory, read_source_bytes
 from bd_packet_builder.layout import MappedResponse
 from bd_packet_builder.local_inputs import read_local_input
@@ -43,11 +46,12 @@ from bd_packet_builder.scan import (
     _render_image,
     normalized,
     parse_ocr_artifact,
+    render_region,
 )
 from bd_packet_builder.visual import NormalizedBox
 
-CONTEXT_VERSION = "historical-page-context-v7"
-QUESTION_READING_VERSION = "question-reading-v1"
+CONTEXT_VERSION = "historical-page-context-v8"
+QUESTION_READING_VERSION = "question-reading-v2"
 
 _QUESTION_PROTECTED = re.compile(
     r"no|not|never|ever|neither|nor|without|except|unless|only|all|any|each|every|and|or|"
@@ -143,7 +147,9 @@ def verified_question_requirements(
 class QuestionReconciliation(Contract):
     version: str = QUESTION_READING_VERSION
     target_requirement_ids: tuple[str, ...]
-    status: Literal["reconciled_against_native_blank"] = "reconciled_against_native_blank"
+    status: Literal["reconciled_against_native_blank", "resolved_against_historical_source"] = (
+        "reconciled_against_native_blank"
+    )
     explanation: str = (
         "The historical image question matches a unique native question in the exact blank. "
         "Localized OCR differs only in spacing/punctuation or one bounded lowercase word "
@@ -155,6 +161,25 @@ class QuestionReconciliation(Contract):
 def question_reconciliation(
     check: "HistoricalContextCheck", targets: tuple[Requirement, ...]
 ) -> QuestionReconciliation | None:
+    if any(r.part == "question" and r.status == "resolved" for r in check.printed_readings):
+        identities = tuple(
+            target.requirement_id
+            for target in targets
+            if _question_tokens(check.effective_field.question.text)
+            == _question_tokens(target.instruction)
+        )
+        return (
+            QuestionReconciliation(
+                target_requirement_ids=identities,
+                status="resolved_against_historical_source",
+                explanation="Historical printed wording was resolved against source-native text "
+                "in the region or a blind focused reread, agreeing exactly with OCR. The wording "
+                "matches the target; the target was not used to repair the historical reading. "
+                "Selection and current continuity are checked separately.",
+            )
+            if identities
+            else None
+        )
     differences = [d for d in check.discrepancies if d.part == "question"]
     if (
         not differences
@@ -240,6 +265,107 @@ class ExtractionDiscrepancy(Contract):
     image_reading: str
     ocr_reading: str
     selection_reason: str
+
+
+class PrintedTextReading(Contract):
+    part: Literal["question", "answer"]
+    native: Citation | None = None
+    focused: ScanTranscript | None = None
+    crop_sha256: Sha256 | None = None
+    status: Literal["resolved", "disagrees", "budget_exhausted"]
+
+
+def _printed_reading(
+    root: Path,
+    inventory: Inventory,
+    raw: bytes,
+    field: HistoricalPageField,
+    part: Literal["question", "answer"],
+    citation: OcrCitation,
+    scans: ScanEvidence | None,
+    saved: PrintedTextReading | None,
+) -> tuple[PrintedTextReading, str]:
+    region = field.question if part == "question" else field.answer
+    data = parse_ocr_artifact(raw)
+    words = list(data.words[citation.word_start : citation.word_end])
+    if part == "answer":
+        words = [
+            w
+            for w in words
+            if not (
+                len(normalized(w.text)) == 1
+                and not w.text.isnumeric()
+                and (
+                    (w.top + w.height) * 1000 / data.image_height < region.box.top
+                    or w.left * 1000 / data.image_width <= region.box.left + 8
+                )
+            )
+        ]
+    quote = " ".join(w.text for w in words)
+    image_tokens = normalized(re.sub("[•·●]", " ", region.text)).split()
+    ocr_tokens = [normalized(w.text) for w in words]
+    agreed: set[int] = set()
+    for block in SequenceMatcher(
+        None, image_tokens, ocr_tokens, autojunk=False
+    ).get_matching_blocks():
+        agreed.update(range(block.b, block.b + block.size))
+    confident = bool(words) and all(w.confidence >= 90 or i in agreed for i, w in enumerate(words))
+    native = (
+        _native_citation(
+            root,
+            inventory,
+            citation.source_id,
+            citation.page,
+            region.model_copy(update={"text": quote}),
+        )
+        if quote
+        else None
+    )
+    if native is not None:
+        return PrintedTextReading(
+            part=part, native=native[0], status="resolved" if confident else "disagrees"
+        ), quote
+    focused = None
+    crop_hash = None
+    crop_box = region.box
+    if (
+        part == "answer"
+        and field.control is not None
+        and field.control.box.left < crop_box.left <= field.control.box.right < crop_box.right - 1
+    ):
+        crop_box = crop_box.model_copy(update={"left": field.control.box.right + 1})
+    if saved is not None:
+        if saved.focused is not None:
+            png = render_region(
+                root,
+                inventory,
+                citation.source_id,
+                citation.page,
+                citation.render_sha256,
+                crop_box,
+            )
+            if hashlib.sha256(png).hexdigest() == saved.crop_sha256:
+                focused, crop_hash = saved.focused, saved.crop_sha256
+    elif scans is not None:
+        result = scans.transcribe_region(
+            citation.source_id, citation.page, citation.render_sha256, crop_box
+        )
+        if result is not None:
+            focused, crop_hash = result
+    return PrintedTextReading(
+        part=part,
+        focused=focused,
+        crop_sha256=crop_hash,
+        status=(
+            "budget_exhausted"
+            if focused is None
+            else "resolved"
+            if confident
+            and focused.readable
+            and normalized(re.sub("[•·●]", " ", focused.text)) == normalized(quote)
+            else "disagrees"
+        ),
+    ), quote
 
 
 def _read_part(
@@ -334,6 +460,9 @@ def _make_check(
     allow_disagreements: bool,
     prompt_version: str = SCAN_VERSION,
     context_version: str = CONTEXT_VERSION,
+    *,
+    scans: ScanEvidence | None = None,
+    printed_readings: tuple[PrintedTextReading, ...] = (),
 ) -> "HistoricalContextCheck":
     _geometry(field, transcript.historical_fields)
     question, warnings = _read_part(
@@ -435,7 +564,16 @@ def _make_check(
     )
     if field.control is not None:
         try:
-            _verify_control(root, inventory, source_id, page, field)
+            _verify_control(
+                root,
+                inventory,
+                source_id,
+                page,
+                field,
+                transcript.historical_fields,
+                raw,
+                answer,
+            )
             if isinstance(answer, OcrCitation) and _control_label_agrees(raw, field, answer):
                 warnings = tuple(
                     d.model_copy(
@@ -468,6 +606,51 @@ def _make_check(
                     ),
                 ),
             )
+    readings: list[PrintedTextReading] = []
+    if context_version == CONTEXT_VERSION and allow_disagreements and field.control is not None:
+        for name, citation in (("question", question), ("answer", answer)):
+            if not isinstance(citation, OcrCitation) or not any(
+                d.part == name
+                and d.code == "historical_text_or_region_disagrees"
+                and normalized(d.image_reading) != normalized(d.ocr_reading)
+                for d in warnings
+            ):
+                continue
+            # Only printed wording on selected, independently inspected controls is eligible.
+            if field.control.state != "selected" or any(d.part == "control" for d in warnings):
+                continue
+            part_name: Literal["question", "answer"] = (
+                "question" if name == "question" else "answer"
+            )
+            reading, _ = _printed_reading(
+                root,
+                inventory,
+                raw,
+                field,
+                part_name,
+                citation,
+                scans,
+                next((r for r in printed_readings if r.part == name), None),
+            )
+            readings.append(reading)
+            if reading.status == "resolved":
+                warnings = tuple(
+                    d.model_copy(
+                        update={
+                            "code": "historical_printed_text_resolved",
+                            "selection_reason": (
+                                "Localized source-native text"
+                                if reading.native
+                                else "A blind focused image reread"
+                            )
+                            + " agrees exactly with local OCR. Original image reading retained; "
+                            "selection and historical applicability are checked separately.",
+                        }
+                    )
+                    if d.part == name and d.code == "historical_text_or_region_disagrees"
+                    else d
+                    for d in warnings
+                )
     return HistoricalContextCheck(
         version=context_version,
         prompt_version=prompt_version,
@@ -479,6 +662,7 @@ def _make_check(
         role=role,
         answer=answer,
         discrepancies=warnings,
+        printed_readings=tuple(readings),
     )
 
 
@@ -503,25 +687,167 @@ def _control_label_agrees(raw: bytes, field: HistoricalPageField, answer: OcrCit
 
 
 def _verify_control(
-    root: Path, inventory: Inventory, source_id: str, page: int, field: HistoricalPageField
+    root: Path,
+    inventory: Inventory,
+    source_id: str,
+    page: int,
+    field: HistoricalPageField,
+    fields: tuple[HistoricalPageField, ...],
+    raw: bytes,
+    answer: Citation | OcrCitation,
 ) -> None:
+    """Check the mark pixels, then relate the located mark to the grounded label on the page.
+
+    Model box edges are hints only: the relationship uses the pixel-located mark and the
+    OCR words or native text bounds of the cited label.
+    """
     control = field.control
     if control is None:
         return
-    box, label = control.box, field.answer.box
-    if abs((box.top + box.bottom - label.top - label.bottom) / 2) > max(
-        box.bottom - box.top, label.bottom - label.top
-    ) + 8 or not (
-        -max(8, (box.right - box.left) / 2) <= label.left - box.right <= 100
-        or -max(8, (box.right - box.left) / 2) <= box.left - label.right <= 100
+    png = _render_image(root, inventory, source_id, page)
+    pixels: ControlPixels | None = None
+    pixel_error: str | None = None
+    try:
+        pixels = inspect_control(png, control.box)
+    except ValueError as error:
+        pixel_error = str(error)
+    if pixels is None:
+        hint = control.box
+        mark = (float(hint.left), float(hint.top), float(hint.right), float(hint.bottom))
+    else:
+        with Image.open(BytesIO(png)) as image:
+            width, height = image.size
+        left, top, right, bottom = pixels.pixel_box
+        mark = (
+            left * 1000 / width,
+            top * 1000 / height,
+            right * 1000 / width,
+            bottom * 1000 / height,
+        )
+    mark_x = (mark[0] + mark[2]) / 2
+    on_left = mark_x <= (field.answer.box.left + field.answer.box.right) / 2
+    located = _label_anchor(root, inventory, source_id, page, field, raw, answer, on_left)
+    if located is None:
+        raise ScanVerificationError("historical_control_label_geometry_disagrees")
+    anchor, line_height = located
+    edge = anchor[0] if on_left else anchor[2]
+    gap = edge - mark[2] if on_left else mark[0] - edge
+    tolerance = max(4, line_height / 2)
+    row = (anchor[1] - tolerance, anchor[3] + tolerance)
+    if (
+        not (mark_x < edge if on_left else mark_x > edge)
+        or gap > _WIDE_GAP
+        or (
+            gap > _NEAR_GAP
+            and _gap_has_words(
+                root,
+                inventory,
+                source_id,
+                page,
+                raw,
+                answer,
+                (mark[2], edge) if on_left else (edge, mark[0]),
+                row,
+            )
+        )
+        # Check strokes may rise above the box; the mark's base stays on the label line.
+        or not row[0] <= mark[3] <= row[1]
+        or any(
+            other != field
+            and other.control is not None
+            # Only a control wholly between the mark and the label intervenes; stacked
+            # controls in the mark's own column do not.
+            and (
+                mark[2] <= other.control.box.left and other.control.box.right <= edge
+                if on_left
+                else edge <= other.control.box.left and other.control.box.right <= mark[0]
+            )
+            and row[0] <= (other.control.box.top + other.control.box.bottom) / 2 <= row[1]
+            for other in fields
+        )
     ):
         raise ScanVerificationError("historical_control_label_geometry_disagrees")
-    try:
-        pixels = inspect_control(_render_image(root, inventory, source_id, page), box)
-    except ValueError as error:
-        raise ScanVerificationError(str(error)) from None
+    if pixels is None:
+        raise ScanVerificationError(pixel_error or "control_outline_not_resolved")
     if pixels.state == "ambiguous" or pixels.state != control.state:
         raise ScanVerificationError("historical_control_mark_disagrees")
+
+
+_NEAR_GAP = 100
+# Right-aligned option columns can sit farther from short labels; only blank space may intervene.
+_WIDE_GAP = 200
+
+
+def _gap_has_words(
+    root: Path,
+    inventory: Inventory,
+    source_id: str,
+    page: int,
+    raw: bytes,
+    answer: Citation | OcrCitation,
+    span: tuple[float, float],
+    row: tuple[float, float],
+) -> bool:
+    """Whether words from the label's own text layer lie between the mark and the label."""
+    if isinstance(answer, Citation):
+        data = read_source_bytes(root, inventory, source_id)
+        with (
+            pdfium.PdfDocument(data) as document,
+            closing(document[page - 1]) as pdf_page,
+            closing(pdf_page.get_textpage()) as text,
+        ):
+            width, height = pdf_page.get_size()
+            between = text.get_text_bounded(
+                left=span[0] * width / 1000,
+                bottom=height - row[1] * height / 1000,
+                right=span[1] * width / 1000,
+                top=height - row[0] * height / 1000,
+                errors="strict",
+            )
+        return any(len(t) > 1 and any(c.isalnum() for c in t) for t in between.split())
+    ocr = parse_ocr_artifact(raw)
+    return any(
+        len(token := normalized(w.text)) > 1
+        and any(c.isalnum() for c in token)
+        and span[0] < (w.left + w.width / 2) * 1000 / ocr.image_width < span[1]
+        and row[0] <= (w.top + w.height / 2) * 1000 / ocr.image_height <= row[1]
+        for w in ocr.words
+    )
+
+
+def _label_anchor(
+    root: Path,
+    inventory: Inventory,
+    source_id: str,
+    page: int,
+    field: HistoricalPageField,
+    raw: bytes,
+    answer: Citation | OcrCitation,
+    on_left: bool,
+) -> tuple[tuple[float, float, float, float], float] | None:
+    """Page bounds and line height of the label nearest the control (OCR word or native text)."""
+    if isinstance(answer, Citation):
+        native = _native_citation(root, inventory, source_id, page, field.answer)
+        if native is None:
+            return None
+        box = native[1]
+        lines = answer.quote.count("\n") + 1
+        return (box.left, box.top, box.right, box.bottom), (box.bottom - box.top) / lines
+    data = parse_ocr_artifact(raw)
+    words = data.words[answer.word_start : answer.word_end]
+    # One-character tokens are often the control outline, a bullet, or check residue.
+    words = tuple(w for w in words if len(normalized(w.text)) > 1) or words
+    if not words:
+        return None
+    word = words[0] if on_left else words[-1]
+    top = word.top * 1000 / data.image_height
+    bottom = (word.top + word.height) * 1000 / data.image_height
+    return (
+        word.left * 1000 / data.image_width,
+        top,
+        (word.left + word.width) * 1000 / data.image_width,
+        bottom,
+    ), bottom - top
 
 
 def _contains(box: NormalizedBox, x: float, y: float) -> bool:
@@ -874,6 +1200,23 @@ class HistoricalContextCheck(Contract):
     answer: Citation | OcrCitation
     min_word_confidence: Annotated[int, Field(ge=90, le=100)] = 90
     discrepancies: tuple[ExtractionDiscrepancy, ...] = ()
+    printed_readings: tuple[PrintedTextReading, ...] = ()
+
+    @property
+    def effective_field(self) -> HistoricalPageField:
+        updates: dict[str, HistoricalPagePart] = {}
+        for reading in self.printed_readings:
+            if reading.status != "resolved":
+                continue
+            text = (
+                reading.native.quote
+                if reading.native
+                else (reading.focused.text if reading.focused is not None else "")
+            )
+            if text:
+                original = self.field.question if reading.part == "question" else self.field.answer
+                updates[reading.part] = original.model_copy(update={"text": text})
+        return self.field.model_copy(update=updates)
 
     @property
     def answer_disputed(self) -> bool:
@@ -884,6 +1227,7 @@ class HistoricalContextCheck(Contract):
                 "historical_label_write_in_separated",
                 "historical_control_label_layout_reconciled",
                 "historical_native_numeric_layout_reconciled",
+                "historical_printed_text_resolved",
             )
             and normalized(d.image_reading) != normalized(d.ocr_reading)
             for d in self.discrepancies
@@ -897,11 +1241,14 @@ class HistoricalContextCheck(Contract):
     def context_citation(self) -> HistoricalContextCitation:
         role = self.context_role
         quote = (" ".join(role.quote.split()) + "\n" if role else "") + " ".join(
-            (self.field.question.text if self.discrepancies else self.question.quote).split()
+            (
+                self.effective_field.question.text if self.discrepancies else self.question.quote
+            ).split()
         )
-        payload = self.model_dump_json().encode()
+        excluded = set() if self.version == CONTEXT_VERSION else {"printed_readings"}
+        payload = self.model_dump_json(exclude=excluded).encode()
         if not self.discrepancies:
-            legacy_current = self.model_dump(mode="json", exclude={"discrepancies"})
+            legacy_current = self.model_dump(mode="json", exclude=excluded | {"discrepancies"})
             payload = json.dumps(legacy_current, separators=(",", ":"), ensure_ascii=False).encode()
         if self.version in (
             "historical-page-context-v1",
@@ -909,13 +1256,17 @@ class HistoricalContextCheck(Contract):
             "historical-page-context-v3",
             "historical-page-context-v4",
         ):
-            legacy = self.model_dump(mode="json")
+            legacy = self.model_dump(mode="json", exclude=excluded)
             legacy.pop("discrepancies")
             legacy["field"].pop("control")
             for field in legacy["transcript"]["historical_fields"]:
                 field.pop("control")
             payload = json.dumps(legacy, separators=(",", ":"), ensure_ascii=False).encode()
-        if self.version not in ("historical-page-context-v6", CONTEXT_VERSION):
+        if self.version not in (
+            "historical-page-context-v6",
+            "historical-page-context-v7",
+            CONTEXT_VERSION,
+        ):
             legacy = json.loads(payload)
             legacy["field"].pop("write_in", None)
             for field in legacy["transcript"]["historical_fields"]:
@@ -949,7 +1300,7 @@ class HistoricalContextCheck(Contract):
                 d.code == "historical_native_numeric_layout_reconciled" for d in self.discrepancies
             )
             or not self.discrepancies
-            else self.field.answer.text
+            else self.effective_field.answer.text
         )
         if self.answer_disputed:
             if (
@@ -980,6 +1331,7 @@ class HistoricalContextCheck(Contract):
                 "historical-page-context-v4",
                 "historical-page-context-v5",
                 "historical-page-context-v6",
+                "historical-page-context-v7",
                 CONTEXT_VERSION,
             )
             and self.prompt_version in SUPPORTED_SCAN_VERSIONS
@@ -988,7 +1340,12 @@ class HistoricalContextCheck(Contract):
                 or (
                     self.field.control.state == "selected"
                     and self.version
-                    in ("historical-page-context-v5", "historical-page-context-v6", CONTEXT_VERSION)
+                    in (
+                        "historical-page-context-v5",
+                        "historical-page-context-v6",
+                        "historical-page-context-v7",
+                        CONTEXT_VERSION,
+                    )
                     and self.prompt_version
                     in (
                         "scan-cross-check-v3",
@@ -1049,7 +1406,7 @@ class HistoricalContextCheck(Contract):
         if self.field not in self.transcript.historical_fields:
             return False
         try:
-            if self.discrepancies or self.field.write_in is not None:
+            if self.discrepancies or self.field.write_in is not None or self.printed_readings:
                 if self.discrepancies and not allow_disagreements:
                     return False
                 return self == _make_check(
@@ -1066,10 +1423,18 @@ class HistoricalContextCheck(Contract):
                     allow_disagreements,
                     self.prompt_version,
                     self.version,
+                    printed_readings=self.printed_readings,
                 )
             if self.field.control is not None:
                 _verify_control(
-                    root, inventory, self.question.source_id, self.question.page, self.field
+                    root,
+                    inventory,
+                    self.question.source_id,
+                    self.question.page,
+                    self.field,
+                    self.transcript.historical_fields,
+                    artifact,
+                    self.answer,
                 )
             _geometry(self.field, self.transcript.historical_fields)
             if (
@@ -1137,6 +1502,8 @@ class HistoricalAssociation(Contract):
     candidate_answer: str | None = None
     write_in: HistoricalWriteInEvidence | None = None
     question_reconciliation: QuestionReconciliation | None = None
+    printed_resolutions: tuple[PrintedTextReading, ...] = ()
+    printed_reading_issues: tuple[str, ...] = ()
 
 
 class HistoricalPageIssue(Contract):
@@ -1215,6 +1582,7 @@ class HistoricalContextEvidence:
                         self.scans.endpoint,
                         self.scans.deployment,
                         True,
+                        scans=self.scans,
                     )
                     if field.control is not None and field.control.state != "selected":
                         continue
@@ -1223,9 +1591,17 @@ class HistoricalContextEvidence:
                         HistoricalAssociation(
                             context_citation=check.context_citation,
                             answer_citation=check.answer,
-                            question=field.question.text,
+                            question=check.effective_field.question.text,
                             role=check.context_role.quote if check.context_role else None,
                             discrepancies=check.discrepancies,
+                            printed_resolutions=tuple(
+                                r for r in check.printed_readings if r.status == "resolved"
+                            ),
+                            printed_reading_issues=tuple(
+                                f"{r.part}:{r.status}"
+                                for r in check.printed_readings
+                                if r.status != "resolved"
+                            ),
                             question_reconciliation=question_reconciliation(
                                 check, self.question_requirements
                             ),
@@ -1237,7 +1613,7 @@ class HistoricalContextEvidence:
                                     d.code == "historical_native_numeric_layout_reconciled"
                                     for d in check.discrepancies
                                 )
-                                else field.answer.text
+                                else check.effective_field.answer.text
                             ),
                         )
                     )
@@ -1264,7 +1640,16 @@ class HistoricalContextEvidence:
                 )
                 if field.control is not None:
                     part = "control"
-                    _verify_control(root, inventory, source_id, page, field)
+                    _verify_control(
+                        root,
+                        inventory,
+                        source_id,
+                        page,
+                        field,
+                        transcript.historical_fields,
+                        raw,
+                        answer,
+                    )
                     if field.control.state != "selected":
                         continue
                 check = HistoricalContextCheck(
@@ -1326,7 +1711,11 @@ class HistoricalContextEvidence:
         result = HistoricalPageResult(
             associations=tuple(associations),
             issues=tuple(issues),
-            controls=tuple(f for f in transcript.historical_fields if f.control is not None),
+            controls=tuple(
+                next((c.effective_field for c in self.checks if c.field == f), f)
+                for f in transcript.historical_fields
+                if f.control is not None
+            ),
             scope=(
                 "localized_historical_candidates_with_extraction_discrepancies_not_current_confirmation"
                 if any(a.discrepancies for a in associations)

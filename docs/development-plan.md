@@ -2,6 +2,54 @@
 
 Status: implementation roadmap, rebaselined October 28, 2026.
 
+**Historical-control pixel stability and label grounding (v30):** evaluate rectangle, circle and connected-check
+evidence together within a bounded hint neighborhood. Anchor intact circles to pixel
+components, group overlapping fits on one physical outline, and discount small contained
+loops only when their ink belongs to the independently verified check component. Estimate
+check arms from supported component columns and use component-height fit tolerance, avoiding
+single-column antialiasing and hint-padding classification changes. Separate competing
+controls/marks still require review; sparse ink stays ambiguous.
+The saved Q1 mark is selected in 81/81 recorded-box/shift/padding/resolution combinations,
+with identical detected bounds per resolution. All 24 previously matching controls among
+28 saved receipts remain matched; two mismatches now match. Synthetic gate/writer cases
+preserve output-region limits. These are offline verification results, not autonomous
+coverage recovery. Q2 and Q3 remain separate issues. Control-label relationships use the
+pixel-located mark and the cited label's OCR/native bounds, not model box edges: same-line
+base alignment, bounded gap (wider only across blank space), and no control wholly between.
+Saved-run replay fixes Q1, keeps 449 decisions, and rejects four merged-OCR p2 marks whose
+label side is ungrounded. Agent v30/gate v19 record control-pixel version v3; context v8 and
+legacy receipt hashes stay unchanged. No paid calls, dependencies
+or source/run mutations; any separately authorized live test must start a fresh run.
+Validation: 1,414 passed, 42 skipped on Python 3.12 and 3.13 (79 new synthetic cases);
+Ruff lint/format, strict mypy on both targets and whitespace checks passed. Model-quality
+and held-out accuracy evaluation were not performed.
+
+**Targeted printed-wording resolution (v28):** for selected historical controls in
+`answer_first_review`, resolve question/option transcription independently from the selection.
+Use geometrically checked source-native text agreeing exactly with localized OCR; otherwise
+attempt one blind crop reread within the existing image allowance. Do not supply expected
+wording or OCR alternatives to that reread. Exact agreement is required, with confidence 90
+or higher on disputed OCR words; lower-confidence unchanged words require original-image
+agreement too. No fuzzy digits, altered conditions or target-to-history copying. Cache the
+attempt, preserve original readings and retain explicit unresolved/budget exceptions.
+Historical context v8 stores source-native citations or crop hashes/transcripts; gate v17 and
+the independent writer reproduce checks, retain mark/applicability/policy validation and keep
+legacy receipt hashes stable. Agent v28/question-reading v2 expose resolved wording to answering.
+The scanned Q1/Q7 regions have no native text: fresh focused readings remain unmeasured, not
+silently replaced by historical successful model outputs. Offline saved-run revalidation
+retains all 44 accepted answers; Q2 is unchanged. Synthetic production gate/writer cases cover
+both resolution paths and rejection/tampering. Five new paid synthetic evaluation cases remain
+unexecuted (0/5); no paid calls or new dependencies for this increment. Full offline validation:
+1,335 passed, 42 skipped on Python 3.12 and 3.13; Ruff lint/format, strict mypy for both targets
+and whitespace checks passed.
+
+**Supplemental-answer question links (v27):** keep navigation pointers out of answer
+composition. `HistoricalBasis.question_links` holds checked main-form pointers to supplemental
+answers; only `prior_question` and `additional_contexts` are answer pieces. Gate v16 and the
+writer recheck links and require the same packet/role, no control, an undisputed short pointer
+phrase and a matching question prefix; links never count as answer evidence. Saved-run
+reconstruction of `90c316ca…` fills Q10 (46 populated, none lost); this is not a fresh model run.
+
 **Bounded question-reading reconciliation (v26):** separate question transcription from answer
 text and selected-control verification. Discovery and grouped answering receive target-bound
 reconciliation metadata only when the image question matches unique native text in the exact

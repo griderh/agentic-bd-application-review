@@ -152,3 +152,131 @@ def test_outline_free_marks_require_a_resolved_check_shape(scale, shape):
     else:
         with pytest.raises(ValueError, match="control_outline_not_resolved"):
             inspect_control(stream.getvalue(), box)
+
+
+@pytest.mark.parametrize("scale", [1, 2, 3])
+@pytest.mark.parametrize("shift", [-2, 0, 2])
+@pytest.mark.parametrize("inset", [-3, 0, 2])
+def test_small_rectangular_ink_cannot_hide_a_connected_checkmark(scale, shift, inset):
+    canvas = Image.new("RGB", (1000 * scale, 1000 * scale), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.line(
+        [(x * scale, y * scale) for x, y in [(198, 210), (216, 236), (260, 165)]],
+        fill="black",
+        width=4 * scale,
+    )
+    # A small outline-shaped feature within the mark's bounding region is not the control.
+    draw.rectangle(
+        (230 * scale, 209 * scale, 243 * scale, 231 * scale),
+        outline="black",
+        width=scale,
+    )
+    stream = BytesIO()
+    canvas.save(stream, format="PNG")
+    result = inspect_control(
+        stream.getvalue(),
+        NormalizedBox(
+            left=200 + shift + inset,
+            top=200 + shift,
+            right=240 + shift - inset,
+            bottom=240 + shift,
+        ),
+    )
+    assert result.state == "selected"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("scale", [1, 2])
+@pytest.mark.parametrize("shift", [-3, 0, 3])
+@pytest.mark.parametrize("padding", [-2, 0, 4])
+def test_circle_selection_is_stable_across_hint_variations(selected, scale, shift, padding):
+    with (
+        Image.open(BytesIO(image_circle(selected))) as source,
+        source.resize((1000 * scale, 1000 * scale)) as resized,
+    ):
+        stream = BytesIO()
+        resized.save(stream, format="PNG")
+    result = inspect_control(
+        stream.getvalue(),
+        NormalizedBox(
+            left=200 + shift - padding,
+            top=200 + shift - padding,
+            right=240 + shift + padding,
+            bottom=240 + shift + padding,
+        ),
+    )
+    assert result.state == ("selected" if selected else "unselected")
+
+
+def image_circle(selected):
+    canvas = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.ellipse((200, 200, 239, 239), outline="black", width=2)
+    if selected:
+        draw.line((205, 215, 217, 234, 248, 190), fill="black", width=3)
+    stream = BytesIO()
+    canvas.save(stream, format="PNG")
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize("shape", ["rectangle", "circle"])
+def test_separate_checkmark_cannot_select_an_empty_neighbor(shape):
+    canvas = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(canvas)
+    if shape == "rectangle":
+        draw.rectangle((242, 200, 265, 223), outline="black", width=2)
+    else:
+        draw.ellipse((242, 200, 265, 223), outline="black", width=2)
+    draw.line([(186, 214), (203, 231), (239, 174)], fill="black", width=3)
+    stream = BytesIO()
+    canvas.save(stream, format="PNG")
+    with pytest.raises(ValueError, match="control_outline_not_resolved"):
+        inspect_control(stream.getvalue(), NormalizedBox(left=200, top=195, right=260, bottom=235))
+
+
+@pytest.mark.parametrize("shape", ["rectangle", "circle"])
+def test_competing_selected_and_empty_outlines_require_review(shape):
+    canvas = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(canvas)
+    for x in (200, 230):
+        bounds = (x, 200, x + 23, 223)
+        if shape == "rectangle":
+            draw.rectangle(bounds, outline="black", width=2)
+        else:
+            draw.ellipse(bounds, outline="black", width=2)
+    draw.line((205, 205, 218, 218), fill="black", width=3)
+    draw.line((205, 218, 218, 205), fill="black", width=3)
+    stream = BytesIO()
+    canvas.save(stream, format="PNG")
+    with pytest.raises(ValueError, match="control_outline_not_resolved"):
+        inspect_control(stream.getvalue(), NormalizedBox(left=190, top=185, right=250, bottom=240))
+
+
+@pytest.mark.parametrize("scale", [1, 2, 3])
+def test_sparse_ink_inside_circle_stays_ambiguous(scale):
+    with Image.open(BytesIO(image_circle(False))) as source:
+        ImageDraw.Draw(source).line((216, 217, 220, 217), fill="black", width=2)
+        with source.resize((1000 * scale, 1000 * scale)) as resized:
+            stream = BytesIO()
+            resized.save(stream, format="PNG")
+    result = inspect_control(
+        stream.getvalue(), NormalizedBox(left=197, top=197, right=243, bottom=243)
+    )
+    assert result.state == "ambiguous"
+
+
+@pytest.mark.parametrize("scale", [0.75, 1.25])
+@pytest.mark.parametrize("inset", [-3, 0, 2])
+def test_antialiased_check_with_attached_loop_remains_selected(scale, inset):
+    canvas = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.line([(198, 210), (216, 236), (260, 165)], fill="black", width=4)
+    draw.rectangle((230, 209, 243, 231), outline="black", width=1)
+    with canvas.resize((round(1000 * scale), round(1000 * scale))) as resized:
+        stream = BytesIO()
+        resized.save(stream, format="PNG")
+    result = inspect_control(
+        stream.getvalue(),
+        NormalizedBox(left=200 + inset, top=200, right=240 - inset, bottom=240),
+    )
+    assert result.state == "selected"
