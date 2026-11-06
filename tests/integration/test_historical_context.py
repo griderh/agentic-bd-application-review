@@ -143,6 +143,14 @@ def test_composed_printed_identity_requires_exact_same_role_parts(
         "different_role",
         "missing_receipt",
         "link_repeats_answer",
+        "omitted_pointer_number",
+        "omitted_answer_number",
+        "number_punctuation",
+        "conflicting_numbers",
+        "changed_condition",
+        "forged_link_hash",
+        "native_truncated_heading",
+        "image_only_truncated_heading",
     ],
 )
 def test_supplement_pointer_is_a_question_link_not_answer_text(
@@ -163,11 +171,58 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         tmp_path,
         monkeypatch,
         primary_answer="Blair Example" if change == "not_a_pointer" else "See supplement",
-        secondary_question="Title" if change == "different_question" else "Name",
+        historical_policy="answer_first_review",
+        native_questions=change == "native_truncated_heading",
+        primary_question="3. Name"
+        if change in ("omitted_answer_number", "number_punctuation", "conflicting_numbers")
+        else "Name if authorized"
+        if change in ("native_truncated_heading", "image_only_truncated_heading")
+        else "Name",
+        secondary_question={
+            "different_question": "Title",
+            "omitted_pointer_number": "3: Name",
+            "number_punctuation": "3: NAME",
+            "conflicting_numbers": "4. Name",
+            "changed_condition": "Name if authorized",
+            "native_truncated_heading": "Name-:",
+            "image_only_truncated_heading": "Name-:",
+        }.get(change, "Name"),
         secondary_role="Backup representative"
         if change == "different_role"
         else "Primary representative",
     )
+    if change in (
+        "omitted_pointer_number",
+        "omitted_answer_number",
+        "number_punctuation",
+        "conflicting_numbers",
+        "changed_condition",
+        "native_truncated_heading",
+        "image_only_truncated_heading",
+    ):
+        from bd_packet_builder import ocr
+
+        execute = ocr._execute
+
+        def word_level_ocr(command, *args):
+            result = execute(command, *args)
+            if "--version" in command:
+                return result
+            rows = result.splitlines()
+            separated = [rows[0]]
+            for row in rows[1:]:
+                columns = row.split("\t")
+                tokens = columns[-1].split()
+                width = int(columns[8]) // len(tokens)
+                for offset, token in enumerate(tokens):
+                    word = columns.copy()
+                    word[6] = str(int(columns[6]) + offset * width)
+                    word[8] = str(width)
+                    word[-1] = token
+                    separated.append("\t".join(word))
+            return "\n".join(separated) + "\n"
+
+        monkeypatch.setattr(ocr, "_execute", word_level_ocr)
     call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
     call(tools, "finish_evidence")
     checks = tuple(
@@ -183,6 +238,8 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         if change == "pointer_as_answer_fragment"
         else (pointer.context_citation,)
     )
+    if change == "forged_link_hash":
+        links = (pointer.context_citation.model_copy(update={"check_sha256": "0" * 64}),)
     proposal = AnswerProposal(
         requirement_id="references",
         outcome="proposed",
@@ -222,8 +279,15 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         (answer,) if change == "missing_receipt" else checks,
         {},
     )
-    assert (not issues and bool(snapshots)) == (change == "none")
-    if change == "none":
+    accepted = change in (
+        "none",
+        "omitted_pointer_number",
+        "omitted_answer_number",
+        "number_punctuation",
+        "native_truncated_heading",
+    )
+    assert (not issues and bool(snapshots)) == accepted
+    if accepted:
         # The pointer is navigation only; it never becomes answer evidence.
         answer_citations = historical_answer_citations(proposal, snapshots)
         assert answer_citations
@@ -237,8 +301,95 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
                 "different_role": "historical_question_link_context_mismatch",
                 "missing_receipt": "historical_question_link_receipt_missing",
                 "link_repeats_answer": "historical_question_link_repeats_answer",
+                "conflicting_numbers": "historical_question_link_question_mismatch",
+                "changed_condition": "historical_question_link_question_mismatch",
+                "forged_link_hash": "historical_question_link_receipt_missing",
+                "image_only_truncated_heading": "historical_question_link_question_mismatch",
             }[change],
         )
+    if change in (
+        "omitted_pointer_number",
+        "omitted_answer_number",
+        "number_punctuation",
+        "conflicting_numbers",
+        "changed_condition",
+    ):
+        target = next(
+            r
+            for r in json.loads(setup.artifact("form_interpretation.json"))["requirements"][
+                "requirements"
+            ]
+            if r["requirement_id"] == "p1.name"
+        )
+        staged = proposal.model_copy(
+            update={
+                "requirement_id": "p1.name",
+                "historical_basis": proposal.historical_basis.model_copy(
+                    update={
+                        "category": "contact",
+                        "context": "firm_wide",
+                        "role": None,
+                        "correspondence": proposal.historical_basis.correspondence.model_copy(
+                            update={"target_question": target["instruction"]}
+                        ),
+                    }
+                ),
+            }
+        )
+        call(tools, "submit_answers", {"proposals": [staged.model_dump(mode="json")]})
+        decision = next(
+            d
+            for d in json.loads(setup.artifact("answer_review.json"))["decisions"]
+            if d["requirement_id"] == "p1.name"
+        )
+        assert (decision["decision"] == "draft_verified") == accepted, decision["reason"]
+        call(tools, "assemble_packet")
+        call(tools, "publish_results")
+        report = json.loads(setup.artifact("draft.json"))
+        assert ("p1.name" in report["written_requirements"]) == accepted
+        packet_text = PdfReader(BytesIO(setup.artifact("packet.pdf"))).pages[0].extract_text()
+        assert ("Blair Example" in packet_text) == accepted
+        assert "See supplement" not in packet_text
+        assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+        if accepted:
+            summary = setup.artifact("reviewer-summary.txt").decode()
+            assert "HISTORICAL - CONTINUITY UNCONFIRMED" in summary
+        if change == "conflicting_numbers":
+            request = DraftRequest.model_validate_json(setup.artifact("draft_request.json"))
+            review = DraftReview.model_validate_json(setup.artifact("answer_review.json"))
+            forced = review.model_copy(
+                update={
+                    "decisions": tuple(
+                        d.model_copy(update={"decision": "draft_verified"})
+                        if d.requirement_id == "p1.name"
+                        else d
+                        for d in review.decisions
+                    )
+                }
+            )
+            blank = setup.evidence_root / request.source
+            blank.parent.mkdir(parents=True, exist_ok=True)
+            blank.write_bytes(setup.blank)
+            request_path = Path("outputs/forged-link-review-request.json")
+            raw = setup.artifact("draft_request.json")
+            (setup.evidence_root / request_path).write_bytes(raw)
+            output = publish_draft(
+                setup.evidence_root,
+                request_path,
+                raw,
+                request,
+                forced,
+                forced.model_dump_json().encode(),
+                None,
+            )
+            assert (
+                "Blair Example"
+                not in PdfReader(output / "draft-packet.pdf").pages[0].extract_text()
+            )
+            assert (
+                "p1.name"
+                not in json.loads((output / "draft.json").read_bytes())["written_requirements"]
+            )
 
 
 @pytest.mark.parametrize("change", ["none", "invented_anchor", "conflicting_dates", "discrepancy"])
@@ -369,6 +520,7 @@ def setup_page(
     primary_x_offset: int = 0,
     unboxed_control: bool = False,
     check_rise: int = 21,
+    native_questions: bool = False,
 ):
     setup = Setup(tmp_path, blank_pdf(), evidence_text=evidence_text, scanned=scanned_current)
     target = setup.evidence_root / PRIOR
@@ -414,6 +566,9 @@ def setup_page(
     ):
         canvas = Canvas(str(target), pagesize=(600, 800), invariant=True)
         canvas.drawImage(ImageReader(image), 0, 0, 600, 800)
+        if native_questions:
+            canvas.drawString(40, 710, primary_question)
+            canvas.drawString(40, 570, secondary_question)
         if primary_write_in is not None:
             for index, line in enumerate(primary_write_in.splitlines()):
                 canvas.drawString(240 + primary_x_offset, 710 - index * 12, line)

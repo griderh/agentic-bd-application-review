@@ -14,6 +14,32 @@ not just the framework's `ChatClientException` wrapper. Error bodies, request pa
 credentials are excluded. This improves diagnosis; it does not automatically retry calls
 or recover causes already discarded by older runs.
 
+### Historical question-link presentation stability (agent v31)
+
+Slice 1 of the [semantic grounding plan](docs/semantic-grounding-development-plan.md) is
+implemented. Main-form/supplement links compare substantive wording separately from a
+leading question number. Missing numbering, case, line breaks and sentence punctuation
+do not block a link; explicitly conflicting numbers do. Numeric punctuation, signs,
+operators, conditions and qualifiers remain significant.
+
+Arbitrary question-prefix matching is no longer accepted. A supplement's explicitly
+truncated heading (`-:` or `...`) can match a longer main-form question only when the
+truncated heading is independently located in native PDF text. Image-only truncation,
+wrong roles, missing/forged receipts and pointers used as answer text still reject.
+Differently worded questions remain for Slice 2; this is not semantic-reuse completion.
+
+Offline replay of `df859ab2...` now accepts 47 answers instead of 46. Q3 is newly written,
+Q1 and Q10 remain written, and no previously written answers are lost. The original run
+is unchanged. Rendered Q3 text and its supplemental pointer were inspected; changed
+pixels outside allowed regions are zero. Replay of `0b42eb8b...` retains all 45 accepted
+answers, including Q3; its already-withheld Q1 is not retroactively answered.
+
+Validation: **1,480 passed, 42 skipped on Python 3.12 and 3.13**, including 38 new cases.
+No paid calls or model-quality evaluations were performed. Agent v31, gate v20 and
+writer v15 record the changed behavior; historical context v8 and control-pixel v3
+remain unchanged. Use a fresh v31 run for a separately authorized live test; do not
+resume an older run with changed component versions.
+
 ### Historical-control pixel stability and label grounding (agent v30)
 
 Rectangle, circular-outline and connected-check evidence are now evaluated together, rather

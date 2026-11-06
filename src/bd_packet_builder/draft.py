@@ -48,6 +48,7 @@ from bd_packet_builder.exhibits import (
 )
 from bd_packet_builder.historical_context import (
     HistoricalContextCheck,
+    _native_citation,
     control_option_id,
     question_reconciliation,
     verified_question_requirements,
@@ -753,8 +754,30 @@ _PLAIN_HISTORICAL_REASONS = {
 }
 
 
-def _question_tokens(text: str) -> list[str]:
-    return re.sub(r"[^0-9a-z]+", " ", text.casefold()).split()
+def _question_presentation(text: str) -> tuple[str | None, list[str]]:
+    label = re.match(r"^\s*(?:\((\d{1,3})\)|(\d{1,3})[.):])\s*(?=[a-z])", text, re.I)
+    number = (label[1] or label[2]) if label else None
+    wording = text[label.end() :] if label else text
+    # Preserve numeric punctuation, operators and unknown symbols rather than erasing
+    # a condition while normalizing ordinary sentence punctuation.
+    tokens = re.findall(r"""\d+(?:[.,]\d+)*|\w+|[^\w\s.,:;!?()"']""", wording.casefold())
+    return number, tokens
+
+
+def _question_links_agree(
+    pointer: str, answer: str, *, allow_truncated_answer: bool = False
+) -> bool:
+    pointer_number, pointer_words = _question_presentation(pointer)
+    answer_number, answer_words = _question_presentation(answer)
+    if pointer_number is not None and answer_number is not None and pointer_number != answer_number:
+        return False
+    if pointer_words and pointer_words == answer_words:
+        return True
+    truncation = re.search(r"(?:-\s*:|\.\.\.)\s*$", answer)
+    if not allow_truncated_answer or truncation is None:
+        return False
+    _, stem = _question_presentation(answer[: truncation.start()])
+    return bool(stem) and pointer_words[: len(stem)] == stem and len(pointer_words) > len(stem)
 
 
 def _verify_question_links(
@@ -769,7 +792,6 @@ def _verify_question_links(
 ) -> str | None:
     """Check navigation pointers separately; they never contribute answer text or evidence."""
     answer_contexts = {c.context_citation for c in receipts} | set(basis.additional_contexts)
-    answer_tokens = _question_tokens(receipt.question.quote)
     role = normalized(receipt.role.quote) if receipt.role else None
     for index, link in enumerate(basis.question_links):
         if link in answer_contexts or link in basis.question_links[:index]:
@@ -789,9 +811,19 @@ def _verify_question_links(
             or not _POINTER.search(checked.answer.quote)
         ):
             return "historical_question_link_not_a_pointer"
-        link_tokens = _question_tokens(checked.question.quote)
-        shorter, longer = sorted((link_tokens, answer_tokens), key=len)
-        if not shorter or longer[: len(shorter)] != shorter:
+        if not _question_links_agree(checked.question.quote, receipt.question.quote) and (
+            not _question_links_agree(
+                checked.question.quote, receipt.question.quote, allow_truncated_answer=True
+            )
+            or _native_citation(
+                root,
+                inventory,
+                receipt.question.source_id,
+                receipt.question.page,
+                receipt.field.question,
+            )
+            is None
+        ):
             return "historical_question_link_question_mismatch"
         current: list[bytes] = []
         for citation in checked.ocr_citations:
@@ -2051,7 +2083,7 @@ def publish_draft(
     payload: dict[str, object] = {
         "domain_knowledge": knowledge_context(),
         "schema_version": 1,
-        "writer_version": "reviewed-draft-overlay-v14",
+        "writer_version": "reviewed-draft-overlay-v15",
         "created_at": datetime.now(UTC).isoformat(),
         "status": "incomplete_draft_not_for_submission",
         "mode": request.mode,

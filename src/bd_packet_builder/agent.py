@@ -97,7 +97,7 @@ from bd_packet_builder.scan import (
 )
 from bd_packet_builder.visual import VisualPage
 
-AGENT_VERSION = "packet-agent-v30"
+AGENT_VERSION = "packet-agent-v31"
 AGENT_INSTRUCTIONS = """You complete one broker-dealer application packet by calling tools.
 You have no other capabilities: no shell, files, browsing, email or submission.
 

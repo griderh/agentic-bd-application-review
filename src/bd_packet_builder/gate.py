@@ -41,8 +41,8 @@ from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.reconciliation import RequirementAssessment
 from bd_packet_builder.scan import ExhibitImageCheck, ScanCheck
 
-GATE_VERSION = "answer-gate-v19"
-GATE_REVIEWER = "application_validation_gate_v19"
+GATE_VERSION = "answer-gate-v20"
+GATE_REVIEWER = "application_validation_gate_v20"
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 

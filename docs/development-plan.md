@@ -2,6 +2,16 @@
 
 Status: implementation roadmap, rebaselined October 28, 2026.
 
+**Next grounding increment (November 6, 2026):** follow the
+[semantic reuse development plan](semantic-grounding-development-plan.md). Separate source
+fidelity, semantic applicability, partial coverage, reuse eligibility and currency. Reuse
+existing bounded answering and evidence contracts; start with extractive answers, not a new
+agent/retrieval subsystem. Slice 1 is implemented (agent v31/gate v20/writer v15): numbering
+is separate from substantive wording, and only native-verified explicit supplemental
+truncation permits a longer linked question. Saved-run replay restores Q3 without losing
+Q1/Q10 or other written answers. Both Python suites pass 1,480 tests with 42 opt-in skips.
+Semantic applicability and partial coverage remain unimplemented; continue with Slice 2.
+
 **Historical-control pixel stability and label grounding (v30):** evaluate rectangle, circle and connected-check
 evidence together within a bounded hint neighborhood. Anchor intact circles to pixel
 components, group overlapping fits on one physical outline, and discount small contained
