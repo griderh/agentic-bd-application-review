@@ -136,8 +136,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Firm registration identifiers", "Firm and representative BrokerCheck disclosures"),
             "issuer-required",
             (
-                "Include when the issuer requests registration or BrokerCheck "
-                "evidence, or an approved packet checklist requires it.",
+                "Commonly relevant when registration identifiers or BrokerCheck evidence "
+                "are requested; also assess whether checked details support another current "
+                "requirement.",
             ),
             "Match the report's printed subject and CRD identity to the firm or named "
             "representative; never transfer an individual report to the firm.",
@@ -154,7 +155,11 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             "SIPC membership listing",
             ("SIPC membership",),
             "issuer-required",
-            ("Include only when requested by the issuer or an approved attachment checklist.",),
+            (
+                "Commonly relevant to a membership request or checklist; assess other "
+                "specific links to current packet requirements rather than treating this "
+                "cue as exhaustive.",
+            ),
             "Match the listed legal member identity, not a similar trade name.",
             "Verify the listing's printed date; do not treat membership as time-independent.",
             (
@@ -169,9 +174,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Monthly financial condition", "Net capital", "Capital and financial eligibility"),
             "business-required",
             (
-                "Use the applicable monthly report for a current financial question; "
-                "attach only when an issuer requirement or approved packet policy "
-                "calls for it.",
+                "May support a current financial or net-capital requirement. For packet "
+                "inclusion, assess its value to the current request and keep it distinct "
+                "from an annual audit.",
             ),
             "Confirm the reporting entity from the report itself.",
             "Use the printed monthly reporting period; a filename date is only a "
@@ -189,8 +194,8 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Audited annual financial statements", "Annual financial condition", "Audit opinion"),
             "business-required",
             (
-                "Attach only when explicitly requested or required by an approved "
-                "packet policy; use the relevant annual statement for answers.",
+                "May support annual financial questions or a request for audited "
+                "statements. Assess the current packet need and match the requested year.",
             ),
             "Confirm the audited legal entity and statement scope.",
             "Verify the printed fiscal year and audit period; do not substitute a "
@@ -208,8 +213,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Firm identity and background", "Public-fund services", "Products and capabilities"),
             "relevant-supporting",
             (
-                "Use or include only when the issuer asks about the described services "
-                "or an approved reviewer finds the material relevant.",
+                "May provide firm and public-fund service context. Assess whether those "
+                "services explain or support a current requirement; marketing alone is "
+                "not proof of a specific fact.",
             ),
             "Match claims to the firm and the specific service or product in the issuer question.",
             "Check any printed as-of date and the period requested; undated marketing "
@@ -226,8 +232,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Settlement instructions", "Clearing and delivery identifiers"),
             "relevant-supporting",
             (
-                "Keep necessary confidential material in scope; include only when the "
-                "issuer request or approved packet policy requires it.",
+                "Necessary confidential material remains in scope. It may support "
+                "settlement, clearing or delivery requirements when entity, account and "
+                "destination match; confidentiality alone is not an exclusion reason.",
             ),
             "Match the named legal entity, account, and requested destination using "
             "explicit source identifiers.",
@@ -245,8 +252,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Agency market activity", "Agency performance and positioning"),
             "relevant-supporting",
             (
-                "Include only for an explicit snapshot or agency-market support "
-                "request, or an approved packet-specific need.",
+                "May provide dated context for U.S. agency market activity or performance. "
+                "Establish how its contents inform a current requirement; do not infer "
+                "relevance from historical inclusion alone.",
             ),
             "Match the firm, agency product, market, and metric definition to the question.",
             "Verify the snapshot's printed as-of date and measurement window; "
@@ -263,8 +271,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Bloomberg rankings", "Transaction volume and league-table position"),
             "issuer-required",
             (
-                "Include only when the issuer explicitly requests rankings or an "
-                "approved packet checklist requires them.",
+                "May support a current request about underwriting activity, rankings or "
+                "transaction experience when category, product, geography and period "
+                "match; an old packet's use is only a lead to assess.",
             ),
             "Match firm identity, ranking category, product, geography, side, and ranking basis.",
             "Verify the printed ranking period and publication date; never claim it is "
@@ -305,7 +314,11 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             "Business-continuity statement",
             ("Business continuity", "Disaster recovery"),
             "issuer-required",
-            ("Include only when requested by the issuer or an approved packet checklist.",),
+            (
+                "May support business-continuity or disaster-recovery requirements; "
+                "assess the statement's content, scope and effective date against the "
+                "current request.",
+            ),
             "Match the statement to the firm legal entity.",
             "Check its stated effective, review, or revision date and the period requested.",
             (
@@ -320,8 +333,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Fixed-income performance", "Market highlights", "Trading activity"),
             "relevant-supporting",
             (
-                "Include only when the issuer requests the described market or "
-                "performance data, or an approved packet-specific need applies.",
+                "May support a current request about fixed-income market activity or "
+                "performance when its metrics and period fit; selective highlights are "
+                "not a complete performance record.",
             ),
             "Match the product, firm, geography, and metric definition.",
             "Use the document's stated measurement period and publication date; do not "
@@ -338,8 +352,8 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("AML program certification", "Compliance attestation"),
             "issuer-required",
             (
-                "Include only when the issuer requests this certification or an "
-                "approved checklist requires it.",
+                "May support an AML program certification or compliance-document "
+                "requirement. Confirm current entity, signer, date and covered period.",
             ),
             "Verify the certifying entity and any signer identity in the current "
             "source; do not copy a personal acknowledgment.",
@@ -356,8 +370,8 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Settlement and delivery", "Clearing identifiers"),
             "relevant-supporting",
             (
-                "Include only when a current issuer requirement or approved packet "
-                "policy requests delivery details.",
+                "May support settlement, clearing or delivery requirements when the "
+                "entity, account and destination match the current request.",
             ),
             "Match entity, account, and destination using explicit identifiers.",
             "Verify effective/revision date and transaction context.",
@@ -390,8 +404,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Agency business", "Firm capabilities", "Market positioning"),
             "relevant-supporting",
             (
-                "Include only when the issuer asks about the described business or "
-                "approved reviewers identify a packet-specific need.",
+                "May support a requirement about corporate agency business or firm "
+                "capabilities. Establish the connection to the current request and do "
+                "not treat positioning as verified rankings.",
             ),
             "Match claims to the firm, corporate-agency business, and scope asked.",
             "Verify any stated as-of date and measurement period; undated text is not "
@@ -408,8 +423,9 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ("Sustainable finance", "Environmental and social finance activities"),
             "issuer-required",
             (
-                "Include only when the issuer asks about sustainable finance or an "
-                "approved checklist requires the statement.",
+                "May support a requirement about sustainable-finance activities when "
+                "the firm's role and the requested activity match; do not infer "
+                "relevance from the document title alone.",
             ),
             "Match the issuer's requested activity and the firm's stated role; "
             "distinguish firm activity from client activity.",
@@ -521,7 +537,7 @@ def default_catalog() -> SourceCatalog:
     )
 
 
-SOURCE_CONTEXT_VERSION = "source-context-v7"
+SOURCE_CONTEXT_VERSION = "source-context-v8"
 
 
 def source_context() -> dict[str, object]:
@@ -530,9 +546,17 @@ def source_context() -> dict[str, object]:
 
     catalog = default_catalog()
     document_metadata = {item.folder: item for item in catalog.supporting_documents}
+    selection_guidance = next(
+        entry.guidance for entry in REFERENCE.entries if entry.entry_id == "supporting-documents"
+    )
     return {
         "version": SOURCE_CONTEXT_VERSION,
         "trust": "navigation_and_sponsor_policy_not_document_evidence",
+        "catalog_role": (
+            "Document descriptions, inclusion_class labels and applicability conditions "
+            "describe typical uses and discovery cues, not binding inclusion rules."
+        ),
+        "selection_guidance": list(selection_guidance),
         "domain_knowledge": {
             "version": REFERENCE.version,
             "sha256": KNOWLEDGE_SHA256,

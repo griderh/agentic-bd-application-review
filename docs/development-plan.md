@@ -17,11 +17,84 @@ Ruff lint/format, strict mypy and whitespace checks pass. Model quality remains 
 until the fresh real-packet run.
 Next: fresh paid packet verification of the restored baseline before further development.
 
+**General supporting-document recommendations (agent v40/source-context v8):** introduced
+cross-municipality selection using current requirements, answer-support needs, inspected
+candidate contents and approved packet precedents. Catalog purposes remain discovery cues;
+historical attachment sets are not copied automatically. A fresh v40 run demonstrated that
+prompt guidance alone did not ensure coverage: relevant candidates remained unassessed and
+attachment-planning calls failed validation. The v40 results did not meet the intended behavior.
+
+**Enforced candidate coverage (agent v41):** the agent now pages through every source in the
+approved supporting-document catalog and records one include, exclude or review-required
+decision per source in batches of up to 50. Evidence collection cannot finish until all candidate
+pages have been listed and every candidate has a decision. Include and review-required decisions
+must identify source pages actually read; code validates the page references. The coverage gate
+does not force inclusion, copy historical packets or expose the restricted financial tier.
+Missing required support and unresolved relevance remain reviewer exceptions. The private
+attachment manifest v3 holds the full audit; reviewer summaries remain concise. The catalog stays
+general-purpose; no issuer- or document-specific attachment rule was added.
+
+Six synthetic paid recommendation cases cover varied support types and confidential settlement
+instructions; paid evaluation remains 0/6 executed. Runs
+`d541ac696bba4eb9851b1f884c4136ca` and `c9630b8e779648e69d87b42620c3ecd9` failed before evidence
+handoff without planning calls. Run `18112502b289447fbab7ff72bf9d1c81` confirms it loaded agent
+v42/groups v12; run `6e73ae20d11d49938617c1bd95f45261` loaded v43, but still repeated candidate
+listings and failed before handoff. The v43 code blocked general `list_sources`, but duplicate
+candidate-list calls returned success-shaped empty pages. In v44, repeated pages are rejected
+with explicit next-step guidance, and the private progress log includes safe validation details
+for rejected `finish_evidence` and repeated candidate listing. Candidate decisions remain model
+driven. Run `b39367debf3d4a6dbf60bf24f199853b` loaded v44 but records only “started” for its
+candidate-list calls, with no tool completion or validation event; `finish_evidence` then reports
+that candidate enumeration was never initialized. An unexpected exception inside candidate
+listing is plausible but not proven because no exception details were persisted. Agent v45 now
+fails closed at the tool boundary and records only the tool name and exception class, avoiding
+arguments, document text and exception messages. Run `bf67cb3a7c454562b0b955d2db000975` then
+confirmed `list_attachment_candidates` failed with `ValidationError`. A synthetic regression
+reproduced it: catalog family folders such as `Business Continuity Statement` contain spaces,
+but source-summary and family-query schemas used the stricter identifier pattern `^[\w.-]+$`.
+The shared `SourceFamilyName` contract now permits safe single-folder names, and agent v46 records
+the updated tool schema. Run `d2fad40c616a48baac154b0126d40e68` loaded v46/groups v12 and
+completed candidate enumeration. The first answer pass staged 13 of 14 groups; group 12 returned
+invalid JSON, then explicit recovery staged it successfully. Final deterministic validation found
+that 11 selected supporting documents exceeded `DraftReview.attachment_source_ids`' limit of 10,
+inconsistent with the 20-source request/gate/evidence limits. The review limit is now 20, and
+answer-submission validation failures support explicit recovery with safe field-path/type
+diagnostics. The existing run's saved groups were reused on final recovery without another
+answer-generation call.
+
+Run outcome: published a 95-page incomplete draft, 47/69 requirements written, 11 selected
+supporting documents, zero unassessed candidates; not for submission. Candidate coverage ran
+successfully, but semantic recommendation quality remains unverified. The first paid recovery
+retried only the malformed group. Targeted draft/run/agent/grouped/live tests passed 233 with one
+skip; Ruff lint/format, strict mypy and whitespace checks pass.
+The duplicate-listing regression first failed against v43; the affected attachment/grouped/live
+suites passed 83 tests with one skip on v44. A new synthetic unexpected-exception regression
+passes on v45. V46 validation: the affected attachment/grouped/live/agent suites passed 126 tests
+with one skip on Python 3.12 and 3.13; the full Python 3.12 suite passed 1,699 tests with 57
+skipped. These offline tests do not establish live semantic recommendation quality.
+
 **Evidence-phase continuation (groups v9):** a model text reply before `finish_evidence` no
 longer fails the run immediately. Code resumes the same local conversation with a fixed prompt
 at most twice, within the original evidence model-call and elapsed-time budgets; repeated stops
 fail explicitly. Model text is not logged. Validation: 1,683 passed, 51 skipped on each Python
 target; Ruff, strict mypy and whitespace checks pass. Three new offline cases; no paid calls.
+
+**Malformed answer JSON resilience (groups v13):** one automatic regeneration per answer group
+for JSON syntax errors only. Reuse the same requirements and checked evidence with validation
+feedback; never repair or salvage partial JSON. The retry shares the existing three attempts per
+group, cumulative group-model limit and elapsed-time budget, including the per-call timeout.
+Successful groups remain saved; schema, citation and grounding checks are unchanged. Transport,
+timeout, deterministic validation and finalization failures do not trigger this retry. A second
+JSON syntax failure or exhausted budget retains explicit recovery without publishing a packet.
+Durable request markers preserve retry accounting across interruptions and resume.
+Content-free progress/application logs report retry starts, outcomes and limit skips. Private
+attempt records include response byte size, allowlisted SDK completion reason and retry origin.
+Existing answer plans remain immutable; start a fresh v13 run rather than upgrading older runs.
+Offline tests cover recovery, repeated failures, unchanged evidence, unsupported-answer withholding,
+budgets, interrupted recovery, safe logs and SDK completion metadata. No paid calls are needed
+for this implementation; synthetic recovery tests are not model-quality evaluation.
+Validation on Python 3.12: full offline suite **1,718 passed, 57 skipped**; Ruff lint/format,
+strict mypy and whitespace checks pass. No paid model calls were made.
 
 **Historical narrative recovery (agent v37/groups v8/context v9):** extend existing bounded
 printed-wording recovery to plain historical answer text, including narratives, before handing

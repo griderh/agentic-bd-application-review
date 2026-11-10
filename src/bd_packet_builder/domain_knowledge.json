@@ -94,12 +94,18 @@
       "authority": "Phase 1 scope and existing approved supporting-document catalog.",
       "applies_to": "Selection of supporting materials, narratives, exhibits and confidential operational documents.",
       "guidance": [
-        "Use source_context.supporting_documents to plan by purpose and inclusion conditions, not just exact issuer document names. Inspect public-funds product/service narratives, agency performance, league tables, sustainable-finance materials, representative bios and applicable BrokerCheck evidence.",
-        "Follow named tables/exhibits in historical answers. Prefer suitable standalone documents; otherwise select bounded approved historical exhibits with exact checked titles and explicit date/category/scope limitations.",
-        "Record inclusion/exclusion/gaps using plan_supporting_document. Missing financial corroboration and unsigned cover letters are explicit gaps/human components.",
-        "Settlement/delivery instructions are necessary confidential evidence: inspect legal identity, clearing/DTC identifiers and delivery instructions. SIPC evidence supports exact member identity and source date."
+        "Treat source_context.supporting_documents as descriptive discovery guidance: purpose, topics and inclusion conditions are common cues, not exhaustive rules. Recommend support by comparing the current form's requirements and answer-support needs with the candidate document's actual contents, entity, subject and period.",
+        "Consider both explicit attachment requests and supporting material that substantively helps answer or contextualize a current requirement. Do not include a document merely because its filename/family sounds relevant, and do not exclude it solely because the form did not name it.",
+        "Use approved prior packets from multiple municipalities as precedents, not templates. Follow each relevant prior answer's attachment/reference to the actual exhibit, inspect its purpose and scope, and assess transfer to the current requirement. Historical inclusion alone never establishes that an attachment belongs in the new packet.",
+        "Record candidate decisions with plan_supporting_document, linked to the applicable requirement(s). Explain the positive relevance path for inclusion and the mismatch/irrelevance for exclusion; preserve entity, subject, period, ranking-category and other material limitations.",
+        "Use review_required when the available form, source contents and relevant history do not establish whether a plausible candidate is appropriate. Use unavailable only when a current requirement or established support need exists but no suitable source is available; absence of an unrelated catalog family is not a gap.",
+        "For historical exhibits, prefer a suitable approved standalone document; otherwise select only bounded exhibit pages with exact checked titles and explicit date/category/scope limitations. Never append historical application, cover-letter, personal, signed or attestation pages.",
+        "Keep complete routine selection reasoning in attachment-manifest.json. The reviewer summary should surface only unavailable, uncertain or human-action items, with the full selection audit kept separately.",
+        "Inspect public-funds product/service narratives, agency performance, league tables, sustainable-finance materials, representative bios and applicable BrokerCheck evidence when their content and context may support a current requirement. Treat confidential settlement/delivery instructions as in-scope when relevant."
       ],
       "limitations": [
+        "A prior packet's unexplained attachment is not a reason to copy it. Do not make a historical precedent into an automatic inclusion requirement or claim document contents establish facts beyond their scope.",
+        "Catalog inclusion conditions are not authoritative issuer policy; explicit issuer requirements still control, and uncertain applicability should be shown for human review rather than guessed.",
         "Never append completed forms or signed historical cover letters. Prior rankings are not current performance confirmation. Catalog inclusion is conditional, not an unconditional issuer requirement.",
         "Marketing does not establish personal acts, regulatory absence or signing authority. Settlement instructions do not establish account-opening requirements unless explicit; SIPC membership does not establish current capital or regulatory history."
       ]

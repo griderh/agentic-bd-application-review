@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from agent_framework import (
@@ -33,19 +34,34 @@ from bd_packet_builder.followup import (
 from bd_packet_builder.proposals import ModelAnswerValue, ModelProposal
 from bd_packet_builder.run import RunManifest
 
-GROUP_VERSION = "answer-groups-v11"
+GROUP_VERSION = "answer-groups-v13"
 GROUP_SIZE = 5
 MAX_GROUP_ATTEMPTS = 3
+MAX_JSON_RETRIES = 1
 GROUP_TIMEOUT_SECONDS = 180
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_VERIFICATION_REQUESTS = 20
 MAX_EVIDENCE_CONTINUATIONS = 2
 EVIDENCE_CONTINUATION = (
-    "The evidence phase is not finished: finish_evidence has not been called, and a text reply "
-    "does not end it. Continue with evidence tools if more approved evidence is needed, "
-    "otherwise call finish_evidence now."
+    "The evidence phase is not finished, and a text reply does not end it. Continue from the "
+    "latest tool result. Treat the most recent finish_evidence error as the next required action. "
+    "If it reports unlisted candidates, call list_attachment_candidates at the exact next_offset "
+    "until complete. If it reports unassessed candidates, call plan_supporting_documents for "
+    "every remaining candidate in batches of up to 50; do not repeat already completed listing "
+    "pages or list_sources. Read a page before include or review_required; exclude with a reason "
+    "when no plausible link exists. Do not call finish_evidence again until all candidates have "
+    "one decision. Then complete any other evidence work and call finish_evidence. Use tools; "
+    "do not reply with text alone."
 )
-ProposeGroup = Callable[[dict[str, Any]], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class GroupResponse:
+    text: str
+    finish_reason: str | None = None
+
+
+ProposeGroup = Callable[[dict[str, Any]], Awaitable[str | GroupResponse]]
 ANSWER_INSTRUCTIONS = (
     AGENT_INSTRUCTIONS
     + """
@@ -333,6 +349,9 @@ async def _attempt_group(
     name: str,
     requests_remaining: int,
     can_followup: bool,
+    *,
+    json_retry_of_attempt: int | None = None,
+    timeout_seconds: float = GROUP_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "version": GROUP_VERSION,
@@ -345,17 +364,33 @@ async def _attempt_group(
         "resolved_citation_paths": [],
         "instructions_sha256": _digest(ANSWER_INSTRUCTIONS),
         "response_schema_sha256": _digest(group_response_format()),
+        "response_bytes": None,
+        "finish_reason": None,
     }
+    request_marker = {k: record[k] for k in ("version", "requirement_ids", "input_sha256")}
+    if json_retry_of_attempt is not None:
+        record["json_retry_of_attempt"] = request_marker["json_retry_of_attempt"] = (
+            json_retry_of_attempt
+        )
     tools.answer_checkpoint(
         name.replace(".json", "-request.json"),
-        {k: record[k] for k in ("version", "requirement_ids", "input_sha256")},
+        request_marker,
     )
     try:
-        response = await asyncio.wait_for(propose(payload), timeout=GROUP_TIMEOUT_SECONDS)
+        model_response = await asyncio.wait_for(propose(payload), timeout=timeout_seconds)
     except (AgentFrameworkException, TimeoutError) as error:
         record["error"] = _technical_error(error)
         return record
-    if len(response.encode()) > MAX_RESPONSE_BYTES:
+    response = model_response.text if isinstance(model_response, GroupResponse) else model_response
+    if isinstance(model_response, GroupResponse):
+        record["finish_reason"] = (
+            model_response.finish_reason
+            if model_response.finish_reason
+            in (None, "stop", "length", "tool_calls", "content_filter")
+            else "unknown"
+        )
+    record["response_bytes"] = len(response.encode())
+    if record["response_bytes"] > MAX_RESPONSE_BYTES:
         record["error"] = {"code": "group_response_too_large"}
         return record
     record["response"] = response
@@ -507,7 +542,7 @@ class _EvidenceBoundary(FunctionMiddleware):
 async def run_answer_groups(
     tools: PacketAgentTools, propose: ProposeGroup, *, resume: bool = False
 ) -> RunManifest:
-    """One attempt per unfinished group; further correction requires explicit resume."""
+    """Retry malformed JSON once; other corrections require follow-up or explicit resume."""
     handoff = tools.answer_handoff()
     retained = handoff.get("retained_proposals", [])
     retained_ids = {p["requirement_id"] for p in retained}
@@ -525,6 +560,7 @@ async def run_answer_groups(
         "groups": [[r["requirement_id"] for r in group] for group in groups],
         "group_size": GROUP_SIZE,
         "max_group_attempts": MAX_GROUP_ATTEMPTS,
+        "max_json_retries": MAX_JSON_RETRIES,
         "timeout_seconds": GROUP_TIMEOUT_SECONDS,
         "group_model_limit": tools.limits.max_turns - tools.limits.max_turns // 2,
         "max_verification_requests": MAX_VERIFICATION_REQUESTS,
@@ -563,6 +599,10 @@ async def run_answer_groups(
             and not name.endswith("-verification-request.json")
         )
         records: list[dict[str, Any]] = []
+        json_retries_used = sum(
+            "json_retry_of_attempt" in json.loads(tools.answer_artifact(request))
+            for request in requests
+        )
         for request in requests:
             response_name = request.replace("-request.json", ".json")
             records.append(
@@ -590,6 +630,7 @@ async def run_answer_groups(
         ):
             incomplete = True
             continue
+        json_retry_of_attempt = None
         for attempt in range(len(records) + 1, MAX_GROUP_ATTEMPTS + 1):
             verification_used = sum(
                 len(json.loads(tools.answer_artifact(a.name))["requests"])
@@ -612,6 +653,13 @@ async def run_answer_groups(
                 },
             }
             name = f"{prefix}{attempt}.json"
+            if json_retry_of_attempt is not None:
+                message = (
+                    f"Answer JSON retry started: group={index} attempt={attempt} "
+                    f"retry_of_attempt={json_retry_of_attempt} reason=json_invalid"
+                )
+                logging.getLogger(__name__).info("%s run=%s", message, tools.manifest().run_id)
+                tools.answer_progress(message)
             attempts_used += 1
             record = await _attempt_group(
                 tools,
@@ -620,9 +668,45 @@ async def run_answer_groups(
                 name,
                 requests_remaining,
                 calls_remaining > 1,
+                json_retry_of_attempt=json_retry_of_attempt,
+                timeout_seconds=min(
+                    GROUP_TIMEOUT_SECONDS,
+                    max(0, tools.limits.max_seconds - (time.monotonic() - started)),
+                ),
             )
             tools.answer_checkpoint(name, record)
             records.append(record)
+            if json_retry_of_attempt is not None:
+                message = (
+                    f"Answer JSON retry finished: group={index} attempt={attempt} "
+                    f"status={record['status']} response_bytes={record['response_bytes']} "
+                    f"finish_reason={record['finish_reason'] or 'unavailable'}"
+                )
+                logging.getLogger(__name__).info("%s run=%s", message, tools.manifest().run_id)
+                tools.answer_progress(message)
+                json_retry_of_attempt = None
+            invalid_json = record["status"] == "invalid_response" and any(
+                problem["type"] == "json_invalid"
+                for problem in (record["error"] or {}).get("problems", [])
+            )
+            if invalid_json:
+                reason = None
+                if json_retries_used >= MAX_JSON_RETRIES:
+                    reason = "retry_limit"
+                elif attempt >= MAX_GROUP_ATTEMPTS:
+                    reason = "group_attempt_limit"
+                elif attempts_used >= plan["group_model_limit"]:
+                    reason = "model_call_limit"
+                elif time.monotonic() - started >= tools.limits.max_seconds:
+                    reason = "elapsed_time_limit"
+                if reason is not None:
+                    message = f"Answer JSON retry unavailable: group={index} reason={reason}"
+                    logging.getLogger(__name__).info("%s run=%s", message, tools.manifest().run_id)
+                    tools.answer_progress(message)
+                    break
+                json_retries_used += 1
+                json_retry_of_attempt = attempt
+                continue
             if record["status"] != "evidence_requested":
                 break
             if (
@@ -750,10 +834,10 @@ async def run_grouped_packet_agent(
         },
     )
 
-    async def propose(payload: dict[str, Any]) -> str:
+    async def propose(payload: dict[str, Any]) -> GroupResponse:
         if time.monotonic() - started >= tools.limits.max_seconds:
             raise TimeoutError("Grouped model budget exhausted")
         response = await answer_agent.run(_json(payload))
-        return response.text
+        return GroupResponse(response.text, response.finish_reason)
 
     return await run_answer_groups(tools, propose, resume=resume)

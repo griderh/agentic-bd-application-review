@@ -231,6 +231,7 @@ class BlobPacketBackend:
                     ),
                     scan_endpoint=self.config.endpoint,
                     scan_deployment=self.config.deployment,
+                    require_attachment_coverage=True,
                 )
                 return await run_grouped_packet_agent(client, tools, resume=resume)
 

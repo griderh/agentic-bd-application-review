@@ -9,6 +9,7 @@ from agent_framework_openai import OpenAIChatClient
 from openai import AsyncOpenAI
 from reportlab.pdfgen.canvas import Canvas
 
+from bd_packet_builder.agent import AGENT_INSTRUCTIONS, AGENT_VERSION
 from bd_packet_builder.blob_storage import REVIEWS, PacketBlobStorage
 from bd_packet_builder.draft import DraftReview
 from bd_packet_builder.form_layout import FormInterpretation
@@ -17,7 +18,9 @@ from bd_packet_builder.grouped import (
     ANSWER_INSTRUCTIONS,
     EVIDENCE_CONTINUATION,
     EVIDENCE_INSTRUCTIONS,
+    GROUP_VERSION,
     MAX_EVIDENCE_CONTINUATIONS,
+    GroupResponse,
     run_answer_groups,
     run_grouped_packet_agent,
 )
@@ -56,6 +59,19 @@ def ready(tmp_path):
         "confidence": 0.9,
     }
     return setup, tools, proposal
+
+
+def test_evidence_tool_order_includes_attachment_planning_and_continuation_guidance():
+    ordered_workflow = AGENT_INSTRUCTIONS.split("Rules that cannot be overridden")[0]
+    normalized_instructions = " ".join(AGENT_INSTRUCTIONS.split())
+    assert "plan_supporting_document" in ordered_workflow
+    assert "plan_supporting_documents" in ordered_workflow
+    assert AGENT_VERSION == "packet-agent-v46"
+    assert GROUP_VERSION == "answer-groups-v13"
+    assert "not a subset exempt from a decision" in normalized_instructions
+    assert "exactly one decision for every candidate" in normalized_instructions
+    assert "plan_supporting_documents" in EVIDENCE_CONTINUATION
+    assert "do not repeat already completed listing pages" in EVIDENCE_CONTINUATION
 
 
 def test_grouped_answering_persists_proposals_and_publishes_through_gate(tmp_path):
@@ -619,8 +635,10 @@ def test_completion_recovery_preserves_rechecked_answers_without_regeneration(tm
 
 def test_failed_group_records_exact_errors_then_resumes_without_evidence_calls(tmp_path):
     setup, tools, proposal = ready(tmp_path)
+    calls = []
 
     async def malformed(payload):
+        calls.append(payload)
         return json.dumps({"proposals": [{"requirement_id": "p1.name", "outcome": "proposed"}]})
 
     final = asyncio.run(run_answer_groups(tools, malformed))
@@ -629,6 +647,7 @@ def test_failed_group_records_exact_errors_then_resumes_without_evidence_calls(t
     record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
     assert record["status"] == "invalid_response"
     assert record["error"]["problems"]
+    assert len(calls) == 1
     fresh = setup.tools()
 
     async def fixed(payload):
@@ -640,6 +659,144 @@ def test_failed_group_records_exact_errors_then_resumes_without_evidence_calls(t
     assert setup.mapper.calls == 1
     assert not any("read_page" in call for call in fresh.trace)
     assert "answer-group-000-attempt-2.json" in {a.name for a in final.artifacts}
+
+
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_invalid_json_retries_once_with_original_evidence_and_logs_safely(
+    tmp_path, caplog, unsupported
+):
+    setup, tools, proposal = ready(tmp_path)
+    events = []
+    tools = setup.tools(progress_sink=events.append)
+    if unsupported:
+        proposal["value"]["value"] = "Fabricated unsupported firm"
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return '{"proposals":[' + " " * 1000
+        assert payload["previous_errors"][0]["problems"] == [{"path": "", "type": "json_invalid"}]
+        return json.dumps({"proposals": [proposal]})
+
+    with caplog.at_level("INFO", logger="bd_packet_builder.grouped"):
+        final = asyncio.run(run_answer_groups(tools, propose))
+    assert final.status == "published"
+    assert len(calls) == 2
+    for key in ("requirements", "native_quote_citations", "assigned_requirement_ids"):
+        assert calls[0][key] == calls[1][key]
+    assert calls[1]["verification_budget"]["group_calls_remaining"] == 2
+    first = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
+    second = json.loads(setup.artifact("answer-group-000-attempt-2.json"))
+    request = json.loads(setup.artifact("answer-group-000-attempt-2-request.json"))
+    assert first["status"] == "invalid_response"
+    assert first["response_bytes"] == 1014
+    assert second["status"] == "staged_unvalidated"
+    assert second["json_retry_of_attempt"] == request["json_retry_of_attempt"] == 1
+    assert sum("Answer JSON retry started" in e for e in events) == 1
+    assert any("Answer JSON retry finished" in e and "staged_unvalidated" in e for e in events)
+    assert "Answer JSON retry started" in caplog.text
+    assert "Answer JSON retry finished" in caplog.text
+    assert NAME not in caplog.text
+    assert "Fabricated unsupported firm" not in "\n".join(events) + caplog.text
+    review = json.loads(setup.artifact("answer_review.json"))
+    assert review["decisions"][0]["decision"] == ("withhold" if unsupported else "draft_verified")
+
+
+def test_repeated_invalid_json_stops_after_one_retry_and_explicit_resume_can_recover(tmp_path):
+    setup, tools, proposal = ready(tmp_path)
+    calls = []
+    events = []
+    tools = setup.tools(progress_sink=events.append)
+
+    async def malformed(payload):
+        calls.append(payload)
+        return '{"proposals":['
+
+    final = asyncio.run(run_answer_groups(tools, malformed))
+    assert final.status == "failed"
+    assert final.failure.code == "answer_groups_incomplete"
+    assert len(calls) == 2
+    assert "packet.pdf" not in {a.name for a in final.artifacts}
+    assert any("retry_limit" in e for e in events)
+
+    async def fixed(payload):
+        calls.append(payload)
+        return json.dumps({"proposals": [proposal]})
+
+    assert asyncio.run(run_answer_groups(setup.tools(), fixed, resume=True)).status == "published"
+    assert len(calls) == 3
+    assert setup.mapper.calls == 1
+
+
+def test_interrupted_json_retry_is_recorded_and_not_restarted_automatically(tmp_path):
+    setup, tools, _ = ready(tmp_path)
+    calls = []
+
+    async def interrupted(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return '{"proposals":['
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_answer_groups(tools, interrupted))
+    assert len(calls) == 2
+    marker = setup.artifact("answer-group-000-attempt-2-request.json")
+    assert json.loads(marker)["json_retry_of_attempt"] == 1
+
+    async def malformed(payload):
+        calls.append(payload)
+        return '{"proposals":['
+
+    result = asyncio.run(run_answer_groups(setup.tools(), malformed, resume=True))
+    assert result.status == "failed"
+    assert len(calls) == 3
+    assert setup.artifact("answer-group-000-attempt-2-request.json") == marker
+
+
+@pytest.mark.parametrize("reason", [None, "stop", "length", "PRIVATE DOCUMENT CONTENT"])
+def test_group_completion_metadata_is_allowlisted(tmp_path, reason):
+    setup, tools, proposal = ready(tmp_path)
+
+    async def propose(payload):
+        return GroupResponse(json.dumps({"proposals": [proposal]}), reason)
+
+    assert asyncio.run(run_answer_groups(tools, propose)).status == "published"
+    record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
+    assert record["finish_reason"] == (
+        "unknown" if reason == "PRIVATE DOCUMENT CONTENT" else reason
+    )
+    assert record["response_bytes"] == len(record["response"].encode())
+    assert "PRIVATE DOCUMENT CONTENT" not in json.dumps(record)
+
+
+@pytest.mark.parametrize("limit", ["group_attempt", "model_call", "elapsed_time"])
+def test_invalid_json_retry_respects_existing_budgets(tmp_path, monkeypatch, limit):
+    from bd_packet_builder import grouped
+
+    setup, tools, _ = ready(tmp_path)
+    events = []
+    tools = setup.tools(progress_sink=events.append)
+    calls = []
+    clock = [0.0]
+    monkeypatch.setattr(grouped.time, "monotonic", lambda: clock[0])
+    if limit == "group_attempt":
+        monkeypatch.setattr(grouped, "MAX_GROUP_ATTEMPTS", 1)
+    elif limit == "model_call":
+        tools.limits = tools.limits.model_copy(update={"max_turns": 2})
+
+    async def malformed(payload):
+        calls.append(payload)
+        if limit == "elapsed_time":
+            clock[0] = tools.limits.max_seconds + 1
+        return '{"proposals":['
+
+    final = asyncio.run(run_answer_groups(tools, malformed))
+    assert final.status == "failed"
+    assert len(calls) == 1
+    assert any(f"{limit}_limit" in e for e in events)
+    assert not any("retry started" in e for e in events)
 
 
 def test_resume_rejects_changed_source_before_model_call(tmp_path):
@@ -822,6 +979,83 @@ def test_actual_sdk_preserves_schema_invalid_response_for_private_diagnostics(tm
     assert record["error"]["problems"]
 
 
+@pytest.mark.parametrize("completion", ["completed", "incomplete"])
+def test_actual_sdk_json_retry_records_completion_metadata(tmp_path, completion):
+    setup, tools, proposal = ready(tmp_path)
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        first = len(calls) == 1
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_synthetic",
+                "object": "response",
+                "created_at": 0,
+                "status": completion if first else "completed",
+                "incomplete_details": {"reason": "max_output_tokens"}
+                if first and completion == "incomplete"
+                else None,
+                "model": "synthetic",
+                "output": [
+                    {
+                        "id": "msg_synthetic",
+                        "type": "message",
+                        "status": completion if first else "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"proposals":['
+                                if first
+                                else json.dumps({"proposals": [proposal]}),
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    async def execute():
+        async with (
+            httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http,
+            AsyncOpenAI(
+                base_url="https://synthetic.invalid/v1",
+                api_key="synthetic",
+                http_client=http,
+                max_retries=0,
+            ) as api,
+        ):
+            return await run_grouped_packet_agent(
+                OpenAIChatClient(model="synthetic", async_client=api), tools
+            )
+
+    assert asyncio.run(execute()).status == "published"
+    assert len(calls) == 2
+    first = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
+    second = json.loads(setup.artifact("answer-group-000-attempt-2.json"))
+    assert first["finish_reason"] == ("length" if completion == "incomplete" else "stop")
+    assert first["response_bytes"] == 14
+    assert second["finish_reason"] == "stop"
+    assert second["response_bytes"] == len(second["response"].encode())
+    assert second["json_retry_of_attempt"] == 1
+    assert len(calls[0]["input"]) == len(calls[1]["input"]) == 1
+    initial_payload = json.loads(calls[0]["input"][0]["content"][0]["text"])
+    retry_payload = json.loads(calls[1]["input"][0]["content"][0]["text"])
+    assert initial_payload.pop("previous_errors") == []
+    assert retry_payload.pop("previous_errors")[0]["problems"] == [
+        {"path": "", "type": "json_invalid"}
+    ]
+    assert initial_payload.pop("verification_budget")["group_calls_remaining"] == 3
+    assert retry_payload.pop("verification_budget")["group_calls_remaining"] == 2
+    assert initial_payload == retry_payload
+    plan = json.loads(setup.artifact("answer-plan.json"))
+    assert plan["version"] == "answer-groups-v13"
+    assert plan["max_json_retries"] == 1
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
 def test_evidence_failure_reports_safe_sdk_cause_and_http_status(tmp_path, status):
     setup = Setup(tmp_path, blank_pdf())
@@ -1000,6 +1234,11 @@ def test_resume_preserves_successful_groups_and_only_retries_failed_group(tmp_pa
         )
 
     assert asyncio.run(run_answer_groups(tools, propose)).status == "failed"
+    assert assigned == [
+        [f"p1.name{i}" for i in range(5)],
+        ["p1.name5"],
+        ["p1.name5"],
+    ]
     first = setup.artifact("answer-group-000-attempt-1.json")
     recovered = []
 

@@ -220,6 +220,9 @@ def test_purpose_catalog_exposes_only_approved_supporting_families() -> None:
 
     guidance = source_context()
     assert guidance["supporting_documents"] == data["supporting_documents"]
+    assert guidance["selection_guidance"]
+    assert any("prior packet" in item.lower() for item in guidance["selection_guidance"])
+    assert "not binding inclusion rules" in guidance["catalog_role"]
     from bd_packet_builder.knowledge import knowledge_context
 
     reference = knowledge_context()

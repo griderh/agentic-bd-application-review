@@ -304,6 +304,7 @@ async def run_live(
         scan_reader=FoundryScanReader(config, allow_paid=allow_paid),
         scan_endpoint=config.endpoint,
         scan_deployment=config.deployment,
+        require_attachment_coverage=True,
         progress_sink=progress_sink,
     )
     try:

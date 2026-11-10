@@ -19,6 +19,7 @@ from agent_framework import (
     FunctionInvocationLayer,
     Message,
 )
+from pydantic import BaseModel
 from pypdf import PdfReader
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
@@ -195,6 +196,8 @@ class Setup:
     def tools(self, **kwargs: object) -> PacketAgentTools:
         # Existing fixtures exercise legacy request semantics; new cases opt into schema 2.
         kwargs.setdefault("draft_schema_version", 1)
+        # Most tests isolate answer behavior; attachment-planning tests explicitly enable the gate.
+        kwargs.setdefault("require_attachment_coverage", False)
         return PacketAgentTools(
             self.store,
             self.manifest.run_id,
@@ -366,6 +369,57 @@ def test_terminal_tool_progress_reports_failure_code_not_document_payload(setup:
     tools.call("read_historical_page", "{}")
     assert "run_ended" in events[-1]
     assert "Synthetic sensitive" not in " ".join(events)
+
+
+def test_unexpected_tool_exception_fails_run_with_safe_diagnostics(setup: Setup) -> None:
+    events: list[str] = []
+    tools = setup.tools(progress_sink=events.append)
+    tools.call("interpret_form", "{}")
+
+    def fail_unexpectedly(_manifest: object, _arguments: object) -> object:
+        raise RuntimeError("PRIVATE source contents must not be logged")
+
+    tools._handlers["list_attachment_candidates"] = fail_unexpectedly
+    result = json.loads(tools.call("list_attachment_candidates", "{}"))
+    manifest = tools.manifest()
+
+    assert result["ok"] is False
+    assert result["error"]["failure_code"] == "tool_execution_failed"
+    assert manifest.failure is not None
+    assert manifest.failure.code == "tool_execution_failed"
+    assert "RuntimeError" in manifest.failure.message
+    assert "PRIVATE" not in manifest.failure.message
+    assert "RuntimeError" in " ".join(events)
+    assert "PRIVATE" not in " ".join(events)
+
+
+def test_submission_validation_failure_is_resumable_and_logs_only_safe_fields(
+    setup: Setup,
+) -> None:
+    events: list[str] = []
+    tools = setup.tools(progress_sink=events.append)
+    tools.call("interpret_form", "{}")
+    tools.call("finish_evidence", "{}")
+
+    class _ValidationContract(BaseModel):
+        attachment_source_ids: tuple[str, ...]
+
+    def fail_validation(_manifest: object, _arguments: object) -> object:
+        _ValidationContract.model_validate({"attachment_source_ids": "PRIVATE"})
+        return {}
+
+    tools._handlers["submit_answers"] = fail_validation
+    result = json.loads(tools.call("submit_answers", '{"proposals":[]}'))
+    manifest = tools.manifest()
+
+    assert result["ok"] is False
+    assert result["error"]["failure_code"] == "answer_validation_failed"
+    assert manifest.failure is not None
+    assert manifest.failure.code == "answer_validation_failed"
+    assert "attachment_source_ids:tuple_type" in manifest.failure.message
+    assert "PRIVATE" not in manifest.failure.message
+    assert "validation=attachment_source_ids:tuple_type" in " ".join(events)
+    assert "PRIVATE" not in " ".join(events)
 
 
 def test_scripted_model_completes_a_run_with_deterministic_gates(setup: Setup) -> None:
@@ -851,6 +905,7 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "get_run_status",
         "interpret_form",
         "list_sources",
+        "list_attachment_candidates",
         "search_pages",
         "index_source",
         "read_page",
@@ -859,6 +914,7 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "read_historical_page",
         "select_attachment",
         "plan_supporting_document",
+        "plan_supporting_documents",
         "resolve_representative_bio",
         "select_historical_exhibit",
         "finish_evidence",
@@ -868,6 +924,10 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "publish_results",
     }
     assert specs["stage_answers"].parameters()["properties"]["proposals"]["maxItems"] == 10
+    assert (
+        "review_required"
+        in specs["plan_supporting_document"].parameters()["properties"]["disposition"]["enum"]
+    )
     for spec in specs.values():
         assert spec.description
         assert (

@@ -1239,9 +1239,10 @@ Answering can return typed `verification_requests` for an already discovered sou
 exact quotation and subject. Application code verifies those requests with the existing native
 or scanned-source checks and passes `verification_results` back to the affected group.
 No arbitrary paths, external actions or additional agents are exposed. At most two follow-up
-rounds fit within the existing three attempts per group, 30 cumulative group calls and shared
-image/tool/time limits; there are at most 20 verification requests per run. Technical model
-failures still require explicit recovery rather than automatic retries.
+rounds fit within the existing three attempts per group, configured cumulative group-call limit
+and shared image/tool/time limits; there are at most 20 verification requests per run. Transport
+errors, timeouts and schema/grounding failures still require explicit recovery rather than
+automatic retries.
 
 For an explicit USD minimum, a request can include `minimum_amount`: exact issuer
 `criterion_quote`, `field_label` and `line_label`, with the amount alone as its quote.
@@ -1263,8 +1264,22 @@ evidence verification, approve a packet or establish that every criterion was co
 
 Issuer-criterion matching ignores whitespace and PDF line wrapping only; spelling, case and
 punctuation must still match. This avoids rejecting an unchanged quotation split across lines.
-Malformed or unfinished model JSON is never completed by guessing; it remains an explicit
-group failure for recovery. Successful groups and completed verification remain reusable.
+With `answer-groups-v13`, syntactically malformed or unfinished model JSON gets **one automatic
+retry per group**, provided the existing three-attempt, cumulative model-call and elapsed-time
+budgets allow it. The retry generates a fresh response from the same requirements and checked
+evidence, with validation feedback; it does not repair or salvage the malformed response.
+It consumes a group attempt, leaving fewer calls for evidence follow-up. Every response still
+undergoes normal schema, citation, grounding and publication checks. Valid JSON with an invalid
+schema or unsupported answers does not trigger this retry. Successful groups are not regenerated.
+Repeated malformed JSON or exhausted budgets leave the run explicitly recoverable without a packet.
+
+Retry start, outcome and budget/limit skips are written to the content-free progress stream
+(`progress.jsonl` for the demo) and application logs. Private attempt checkpoints record response
+byte size and the SDK completion reason (`stop`, `length`, `tool_calls`, `content_filter`, or
+unavailable/unknown); retry request/result checkpoints identify the failed attempt being retried.
+These diagnostics never copy answers or document text into operational logs. Retry markers survive
+interruption and explicit resume; resume does not reset the automatic retry allowance.
+Start a fresh run for v13; older answer plans are not upgraded or rewritten in place.
 
 Each follow-up saves an immutable request marker before execution and a private result afterward.
 Recovery reuses completed verification results and cached image readings, retaining successful
@@ -1294,8 +1309,8 @@ For a missing answer, trace **group response → gate decision → final draft a
 | `form_interpretation.json` | Questions, answer types, choices, layout and protected signing regions. |
 | `answer_handoff.json` | Discovery observations and checked evidence supplied to answering; not answer approval. |
 | `answer-plan.json` | Stable groups of up to five questions, handoff hash, versions and call/follow-up limits. |
-| `answer-group-NNN-attempt-N-request.json` | Durable marker for a model answering attempt. |
-| `answer-group-NNN-attempt-N.json` | Original response and intake diagnostics. `staged_unvalidated` is structural acceptance only. |
+| `answer-group-NNN-attempt-N-request.json` | Durable marker for a model answering attempt, including the retry origin when applicable. |
+| `answer-group-NNN-attempt-N.json` | Private original response, byte size, completion reason, retry origin and intake diagnostics. `staged_unvalidated` is structural acceptance only. |
 | `answer-group-NNN-attempt-N-verification-request.json` | Requested follow-up operations recorded before execution. |
 | `answer-group-NNN-attempt-N-verification.json` | Verification results, deterministic minimum comparisons and cached reading/budget state. |
 | `draft_request.json` | Combined proposals, requirements, layout and sources sent to gate/writer. |
@@ -1355,14 +1370,64 @@ never permission to fill current signature dates. Headcount is copied unchanged,
 approximation qualifiers and a current-review flag. Financial amounts and reporting periods are
 never extrapolated.
 
-The source catalog now exposes the specifically approved supporting families for bios, agency
-performance, Bloomberg tables, sustainability and other business evidence, as well as the earlier
-financial/registration sources. It does not expose arbitrary folders or the restricted financial
-tier. Archived cover letters remain outside automatic inclusion; an unsigned/new letter is a
-human/generated-component gap. `plan_supporting_document` records inclusion/exclusion/gap reasons,
-linked questions and period/entity limitations. The private `attachment-manifest.json` and reviewer
-summary retain these decisions; unselected documents without a supplied rationale are explicitly
-reported as such, not described as deliberately irrelevant. They are never merged into the packet.
+The source catalog exposes approved families for bios, agency/business support, rankings,
+sustainability and other evidence, plus financial/registration sources. It does not expose
+arbitrary folders or the restricted financial tier. Archived cover letters remain outside
+automatic inclusion; a new/unsigned letter is a human/generated-component gap.
+
+Attachment selection is a general recommendation, not a municipality-to-document mapping.
+`domain_knowledge.json` guides the model to weigh the current form, answer-support needs,
+inspected source contents and relevant approved packet precedents. The family descriptions and
+conditions in `retrieval.py` are discovery cues, not exhaustive inclusion rules. Historical
+attachments prompt investigation; they are not copied as a set or treated as automatic precedent.
+The fresh v40 run showed that prompt guidance alone did not ensure coverage: relevant available
+candidates remained unassessed, and some attachment-planning calls failed validation. Agent v41
+now pages through every source in the approved supporting-document catalog and requires an
+explicit include, exclude or review-required decision for each before `finish_evidence` can
+proceed. Decisions are submitted in batches of up to 50. Inclusion and review-required decisions
+must identify pages actually read from that source; the tool validates those references. This
+gate does not force any attachment, copy historical packets, or expose the restricted financial
+tier. A candidate that is explicitly excluded is not a review exception; an unresolved
+requirement-linked decision remains visible to reviewers.
+
+The private `attachment-manifest.json` v3 retains the full decision audit; reviewer summaries
+remain focused on unresolved gaps and human actions. Coverage enforcement does not establish that
+the model's semantic recommendations are correct; the six synthetic paid recommendation cases
+remain opt-in and **0/6 executed**. Runs `d541ac696bba4eb9851b1f884c4136ca` and
+`c9630b8e779648e69d87b42620c3ecd9` both failed before evidence handoff without any
+`plan_supporting_documents` calls. The latest run, `18112502b289447fbab7ff72bf9d1c81`, confirms
+the model loaded agent v42/groups v12; run `6e73ae20d11d49938617c1bd95f45261` loaded agent v43
+and still repeated candidate listings before failing the gate. The v43 code blocked general
+`list_sources`, but duplicate candidate-list calls returned success-shaped empty pages. The new
+v44 behavior rejects repeated pages with an explicit next-step error and writes safe validation
+details for `finish_evidence` and repeated candidate listing to the private progress log. This
+preserves model-driven decisions while making ignored or repeated tool requests observable.
+Run `b39367debf3d4a6dbf60bf24f199853b` loaded v44 but did not record completion or validation
+events for its two candidate-list calls; `finish_evidence` then reported candidate enumeration
+had not been initialized. Run `bf67cb3a7c454562b0b955d2db000975` exposed the specific
+`ValidationError` in `list_attachment_candidates`. A sanitized regression reproduced it: a
+catalog folder name such as `Business Continuity Statement` was incorrectly validated as an
+identifier that cannot contain spaces. Source-family summaries and family-query inputs now use a
+path-safe family-name contract, while family IDs and other identifiers retain their stricter
+validation. Agent v46 records the tool-schema change. A fresh v46 run is still needed to verify
+live candidate coverage and model recommendations; the offline regression only establishes that
+the candidate listing succeeds for folder names with spaces. The tool boundary continues to log
+only safe tool, exception, and (for Pydantic errors) field-path/type details; it never logs
+arguments, document text, or exception messages. Fresh run `d2fad40c616a48baac154b0126d40e68`
+loaded agent v46/groups v12 and completed candidate enumeration. Its first answer pass staged
+13 of 14 groups; group 12 returned invalid JSON. Explicit recovery retried that group successfully,
+then deterministic submission validation exposed a separate contract mismatch: 11 selected
+support sources exceeded `DraftReview.attachment_source_ids`' old limit of 10, though the request,
+gate and evidence-tool limits allow 20. The review limit is now 20. Submission-validation failures
+are explicitly resumable; compatibility also allows the existing run's recorded submit-validation
+failure to resume after sources and saved artifacts are rechecked.
+
+The final recovery reused saved group results without another answer-generation call and published
+a 95-page **incomplete draft**, with 47/69 requirements written, 11 selected support documents
+and no unassessed candidates. It is not for submission; semantic attachment recommendation quality
+is not established by coverage. The [run artifacts](outputs/agent-runs/d2fad40c616a48baac154b0126d40e68/readable)
+include the separate reviewer summary and private audit. Targeted draft/run/agent/grouped/live
+suites passed **233 tests, 1 skipped**. Ruff, format, strict mypy and whitespace checks pass.
 Physical inclusion does not establish financial eligibility or satisfy every checklist criterion.
 
 Existing trusted reviewer assessments can be passed to a fresh run:

@@ -22,6 +22,9 @@ from bd_packet_builder.knowledge import KNOWLEDGE_IDS, KNOWLEDGE_SHA256
 
 Nonblank = Annotated[str, StringConstraints(min_length=1, max_length=20_000, pattern=r"\S")]
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
+SourceFamilyName = Annotated[
+    str, StringConstraints(min_length=1, max_length=255, pattern=r"^[^/\\]*\S[^/\\]*$")
+]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 EvidenceStatus = Literal[
     "current_evidence", "currently_corroborated", "historical_continuity_unconfirmed", "unsupported"

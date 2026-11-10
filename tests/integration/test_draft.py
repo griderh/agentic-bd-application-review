@@ -1179,6 +1179,28 @@ def test_explicit_attachment_selection_survives_without_a_verified_answer(tmp_pa
         validate_answers(tmp_path, parsed, "a" * 64, selected_attachment_source_ids=("b" * 64,))
 
 
+def test_review_accepts_more_than_ten_explicit_attachment_sources(tmp_path: Path) -> None:
+    _, _, data = prepare(tmp_path)
+    for index in range(10):
+        make_pdf(
+            tmp_path / f"bd_agreements/supporting_data/FINRA_Certification/additional-{index}.pdf",
+            [(40, 740, f"Synthetic selected support {index}.")],
+        )
+    sources = build_inventory(tmp_path).sources
+    data["sources"] = [dict(path=source.path, sha256=source.sha256) for source in sources]
+    data["attachments"] = [source.source_id for source in sources]
+    request = DraftRequest.model_validate_json(json.dumps(data))
+
+    review = validate_answers(
+        tmp_path,
+        request,
+        hashlib.sha256(request.model_dump_json().encode()).hexdigest(),
+        selected_attachment_source_ids=tuple(data["attachments"]),
+    )
+
+    assert len(review.attachment_source_ids) == 11
+
+
 def test_gate_decides_every_proposal_and_never_verifies_unanswered_or_signing(
     tmp_path: Path,
 ) -> None:

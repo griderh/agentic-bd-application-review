@@ -280,7 +280,7 @@ class DraftReview(Contract):
     request_sha256: Sha256
     reviewer: Nonblank
     decisions: Annotated[tuple[DraftDecision, ...], Field(max_length=100)]
-    attachment_source_ids: Annotated[tuple[Sha256, ...], Field(max_length=10)] = ()
+    attachment_source_ids: Annotated[tuple[Sha256, ...], Field(max_length=20)] = ()
     reviewer_notes: Annotated[tuple[Nonblank, ...], Field(max_length=200)] = ()
     scan_checks: Annotated[tuple[ScanCheck, ...], Field(max_length=100)] = ()
     historical_context_checks: Annotated[

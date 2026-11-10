@@ -21,6 +21,7 @@ from bd_packet_builder.contracts import (
     OcrCitation,
     Requirement,
     Sha256,
+    SourceFamilyName,
 )
 from bd_packet_builder.evidence import EvidenceError, TextCitation, resolve_quote
 from bd_packet_builder.historical_context import HistoricalContextEvidence, HistoricalPageResult
@@ -73,7 +74,7 @@ class EvidenceLimits(Contract):
 class SourceSummary(Contract):
     source_id: Sha256
     path: Nonblank
-    family: Identifier
+    family: SourceFamilyName
     format: Identifier
     page_count: int | None
     period: str | None
@@ -84,7 +85,7 @@ class SourceSummary(Contract):
 
 
 class SelectionSummary(Contract):
-    family: Identifier
+    family: SourceFamilyName
     source_id: Sha256 | None
     period: str | None
     requested_period: str | None
@@ -547,14 +548,23 @@ class EvidenceTools:
 
     def select_attachment(self, source_id: str) -> tuple[str, ...]:
         """Candidate packet attachment; the answer gate still decides which are kept."""
+        return self.select_attachments((source_id,))
+
+    def select_attachments(self, source_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Atomically add a bounded batch of candidate packet attachments."""
         self._tick()
-        source = self._pdf(source_id)
-        if source.family == "historical_reference":
-            raise ToolInputError("Prior packets are internal evidence, never packet attachments")
-        if source_id not in self._attachments:
-            if len(self._attachments) >= self._limits.max_attachments:
-                raise ToolLimitError("Attachment limit reached")
-            self._attachments.append(source_id)
+        if len(set(source_ids)) != len(source_ids):
+            raise ToolInputError("An attachment source may appear only once in a batch")
+        for source_id in source_ids:
+            source = self._pdf(source_id)
+            if source.family == "historical_reference":
+                raise ToolInputError(
+                    "Prior packets are internal evidence, never packet attachments"
+                )
+        additions = [source_id for source_id in source_ids if source_id not in self._attachments]
+        if len(self._attachments) + len(additions) > self._limits.max_attachments:
+            raise ToolLimitError("Attachment limit reached")
+        self._attachments.extend(additions)
         return self.attachments
 
     def verify_scan_quote(

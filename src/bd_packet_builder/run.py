@@ -485,13 +485,24 @@ class FileRunStore:
         run_dir = self._run_dir(run_id)
         with _locked(run_dir):
             manifest = self._load(run_dir)
+            failure = manifest.failure
+            legacy_submission_validation_failure = (
+                failure is not None
+                and failure.code == "tool_execution_failed"
+                and failure.message.startswith(
+                    "submit_answers failed unexpectedly (ValidationError);"
+                )
+            )
             if (
                 manifest.status != "failed"
-                or manifest.failure is None
-                or manifest.failure.code != "answer_groups_incomplete"
-                or manifest.failure.during_status != "evidence_collected"
+                or failure is None
+                or failure.code not in ("answer_groups_incomplete", "answer_validation_failed")
+                and not legacy_submission_validation_failure
+                or failure.during_status != "evidence_collected"
             ):
-                raise RunTransitionError("Only a checkpointed answer-group failure can resume")
+                raise RunTransitionError(
+                    "Only checkpointed answer or submission-validation failures can resume"
+                )
             if len(manifest.steps) >= manifest.limits.max_steps:
                 raise RunLimitError("Run step limit exceeded")
             now = self._now()

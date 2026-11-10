@@ -156,6 +156,51 @@ def test_run_ids_are_unique_and_isolated(store: FileRunStore) -> None:
         store.read_artifact(second, "requirements.json")
 
 
+@pytest.mark.parametrize(
+    ("failure_code", "message", "resumable"),
+    [
+        ("answer_groups_incomplete", "Answer group needs recovery.", True),
+        ("answer_validation_failed", "Submission validation failed.", True),
+        (
+            "tool_execution_failed",
+            "submit_answers failed unexpectedly (ValidationError); the run was stopped.",
+            True,
+        ),
+        (
+            "tool_execution_failed",
+            "list_sources failed unexpectedly (ValidationError); the run was stopped.",
+            False,
+        ),
+    ],
+)
+def test_resume_answers_allows_only_checkpointed_or_submission_failures(
+    store: FileRunStore, failure_code: str, message: str, resumable: bool
+) -> None:
+    run_id = create(store)
+    store.advance(
+        run_id,
+        step="interpret_form",
+        expected_status="created",
+        to_status="form_interpreted",
+        artifacts={"requirements.json": b"{}"},
+    )
+    store.advance(
+        run_id,
+        step="finish_evidence",
+        expected_status="form_interpreted",
+        to_status="evidence_collected",
+    )
+    store.fail(run_id, code=failure_code, message=message)
+
+    if resumable:
+        assert store.resume_answers(run_id).status == "evidence_collected"
+    else:
+        with pytest.raises(
+            RunTransitionError, match="checkpointed answer or submission-validation failures"
+        ):
+            store.resume_answers(run_id)
+
+
 def test_full_lifecycle_publishes_incomplete_outcome_with_exceptions(
     store: FileRunStore, clock: Clock
 ) -> None:
