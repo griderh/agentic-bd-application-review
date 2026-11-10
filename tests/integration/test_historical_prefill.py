@@ -513,7 +513,7 @@ def test_source_listing_and_handoff_expose_document_context_not_answers(tmp_path
     guidance = listing["source_context"]
     from bd_packet_builder.knowledge import knowledge_context
 
-    assert guidance["version"] == "source-context-v5"
+    assert guidance["version"] == "source-context-v7"
     assert guidance["domain_knowledge"]["sha256"] == knowledge_context()["sha256"]
     handoff = call(tools, "finish_evidence")
     assert handoff["source_context"] == guidance

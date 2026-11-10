@@ -43,7 +43,9 @@ def test_question_link_presentation_preserves_substantive_wording(pointer, answe
         ("3. Name if authorized", "3: Name...", True),
         ("4. Name if authorized", "3: Name-:", False),
         ("3. Name if authorized", "3: Name", False),
-        ("3. Name if authorized", "3: Nam-:", False),
+        ("3. Name if authorized", "3: Nam-:", True),
+        ("3. Name if authorized", "3: Nax-:", False),
+        ("3. Name if authorized", "3: Name if authorizedx-:", False),
         ("3. Name-:", "3: Name if authorized", False),
     ],
 )

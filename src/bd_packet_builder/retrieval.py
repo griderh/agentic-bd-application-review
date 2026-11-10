@@ -285,11 +285,12 @@ def _supporting_documents() -> tuple[SupportingDocument, ...]:
             ),
             "issuer-required",
             (
-                "Include only for a named representative when the issuer requests a "
-                "biography or its checklist requires one.",
+                "Always include the selected bio of each named representative; it grounds "
+                "their title and contact details.",
             ),
-            "Match the printed individual to the current approved roster and requested "
-            "representative role; do not guess identity.",
+            "Match the printed individual to the evidence-backed proposed representative. "
+            "Keep role-assignment evidence separate; historical assignments remain "
+            "continuity-unconfirmed. Do not guess identity or select by filename.",
             "Verify dates and employment periods as printed; do not treat a prior "
             "biography as current.",
             (
@@ -520,7 +521,7 @@ def default_catalog() -> SourceCatalog:
     )
 
 
-SOURCE_CONTEXT_VERSION = "source-context-v5"
+SOURCE_CONTEXT_VERSION = "source-context-v7"
 
 
 def source_context() -> dict[str, object]:

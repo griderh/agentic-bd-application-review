@@ -193,6 +193,8 @@ class Setup:
         self.mapper = mapper or FakeMapper()
 
     def tools(self, **kwargs: object) -> PacketAgentTools:
+        # Existing fixtures exercise legacy request semantics; new cases opt into schema 2.
+        kwargs.setdefault("draft_schema_version", 1)
         return PacketAgentTools(
             self.store,
             self.manifest.run_id,
@@ -857,6 +859,7 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "read_historical_page",
         "select_attachment",
         "plan_supporting_document",
+        "resolve_representative_bio",
         "select_historical_exhibit",
         "finish_evidence",
         "stage_answers",

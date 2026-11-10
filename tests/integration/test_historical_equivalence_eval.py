@@ -72,6 +72,30 @@ def test_model_separates_selected_label_and_associated_write_in(layout):
 
 CASES = (
     (
+        "Describe your principal fixed-income product specializations.",
+        "We specialize in agency securities and Treasury instruments.",
+        "Which fixed-income instruments are your firm's specialties?",
+        {"applicable"},
+    ),
+    (
+        "Describe product specializations.",
+        "We specialize in agency securities.",
+        "Describe product specializations and average daily trading volume.",
+        {"partially_applicable"},
+    ),
+    (
+        "Who is the primary representative?",
+        "Avery Example",
+        "Who is the chief compliance officer?",
+        {"incompatible"},
+    ),
+    (
+        "Which products does the firm offer?",
+        "Agency securities and Treasury instruments.",
+        "Does the firm offer municipal bonds?",
+        {"uncertain", "incompatible"},
+    ),
+    (
         "Years established (firm-wide)",
         "26",
         "How long has your firm been operating?",
@@ -119,6 +143,8 @@ CASES = (
     [
         "Minimum capital on line 3750 or line 3760 of the report.",
         "Has the firm been investigated for disputable or unfair activities?",
+        "Our synthetic agency desk supports municipal portfolios with dedicated client service.",
+        "We offer agency notes, Treasury bills and municipal bonds through a specialist desk.",
     ],
 )
 def test_focused_transcription_is_literal_and_repeatable(text):

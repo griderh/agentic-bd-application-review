@@ -282,6 +282,8 @@ def test_reviewer_summary_includes_specific_unanswered_explanation(tmp_path):
 
 def test_supplement_text_verification_preserves_line_ending_hyphens(tmp_path):
     request, review, data = prepare(tmp_path)
+    # A one-line box cannot hold an explicit line break at any allowed size.
+    data["layout"]["responses"][0]["text_region"].update(bottom=736.0, leading=12.0)
     data["requirements"]["requirements"][0]["kind"] = "text"
     data["layout"]["responses"][0]["requirement"] = data["requirements"]["requirements"][0]
     data["proposals"]["proposals"][0]["value"] = {
@@ -297,13 +299,81 @@ def test_supplement_text_verification_preserves_line_ending_hyphens(tmp_path):
     assert report["render_checks"]["supplement_pages_rendered_and_text_checked"] == 1
 
 
-def test_long_text_uses_readable_supplement_instead_of_being_left_blank(tmp_path: Path) -> None:
+def short_text_draft(tmp_path: Path, value: str, **region_update: float) -> tuple[Path, dict]:
+    request, review, data = prepare(tmp_path)
+    data["layout"]["responses"][0]["text_region"].update(**region_update)
+    data["requirements"]["requirements"][0]["kind"] = "text"
+    data["layout"]["responses"][0]["requirement"] = data["requirements"]["requirements"][0]
+    data["proposals"]["proposals"][0]["value"] = {"kind": "text", "value": value}
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    output = run_draft(tmp_path, Path("outputs/request.json"), Path("outputs/review.json"))
+    return output, json.loads((output / "draft.json").read_text())
+
+
+def test_short_text_that_fits_keeps_the_standard_font(tmp_path: Path) -> None:
+    _, report = short_text_draft(tmp_path, "Director")
+    assert report["placements"]["crd"] == {
+        "mode": "inline",
+        "font_size": 10.0,
+        "line_count": 1,
+        "fit": "standard",
+        "evidence_packet_pages": report["placements"]["crd"]["evidence_packet_pages"],
+    }
+
+
+def test_short_text_shrinks_onto_one_line_before_using_the_supplement(tmp_path: Path) -> None:
+    value = "Managing Director, Head of Synthetic Public Finance"
+    # ~250 pt at 10 pt; the 200 pt box holds it on one line at a reduced size.
+    output, report = short_text_draft(tmp_path, value, right=320.0)
+    placement = report["placements"]["crd"]
+    assert placement["mode"] == "inline"
+    assert placement["fit"] == "reduced_font"
+    assert placement["line_count"] == 1
+    assert 6.0 <= placement["font_size"] < 10.0
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+    from pypdf import PdfReader
+
+    packet = PdfReader(output / "draft-packet.pdf")
+    assert value in packet.pages[0].extract_text()
+    assert "See packet page" not in packet.pages[0].extract_text()
+    summary = (output / "reviewer-summary.txt").read_text()
+    assert "SHORT-FIELD FIT" in summary
+    assert "crd: reduced_font" in summary
+
+
+def test_wrapped_inline_text_verification_preserves_line_ending_hyphens(tmp_path: Path) -> None:
+    _, report = short_text_draft(tmp_path, "Synthetic Heading-\nContinued text")
+    assert report["placements"]["crd"]["mode"] == "inline"
+    assert report["placements"]["crd"]["line_count"] == 2
+
+
+def test_long_short_field_wraps_within_its_box_at_a_readable_size(tmp_path: Path) -> None:
+    value = "Managing Director of Institutional Fixed Income Sales and Public Funds"
+    output, report = short_text_draft(tmp_path, value, right=280.0)
+    placement = report["placements"]["crd"]
+    assert placement["mode"] == "inline"
+    assert placement["fit"] == "wrapped"
+    assert placement["line_count"] == 2
+    assert placement["font_size"] >= 6.0
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+    from pypdf import PdfReader
+
+    text = PdfReader(output / "draft-packet.pdf").pages[0].extract_text()
+    assert value.split()[0] in text and value.split()[-1] in text
+    assert "See packet page" not in text
+
+
+def test_text_that_cannot_fit_at_the_minimum_font_uses_the_supplement(tmp_path: Path) -> None:
     request, review, data = prepare(tmp_path)
     region = data["layout"]["responses"][0]["text_region"]
     region.update(right=280.0)
     data["requirements"]["requirements"][0]["kind"] = "text"
     data["layout"]["responses"][0]["requirement"] = data["requirements"]["requirements"][0]
-    value = "Managing Director of Institutional Fixed Income Sales and Public Funds"
+    value = (
+        "Managing Director of Institutional Fixed Income Sales and Public Funds, "
+        "Synthetic Regional Coordinator for Municipal Advisory and Underwriting Relationships"
+    )
     data["proposals"]["proposals"][0]["value"] = {"kind": "text", "value": value}
     request.write_text(json.dumps(data))
     write_review(request, review)
@@ -311,6 +381,8 @@ def test_long_text_uses_readable_supplement_instead_of_being_left_blank(tmp_path
     report = json.loads((output / "draft.json").read_text())
     assert "crd" in report["written_requirements"]
     assert report["placements"]["crd"]["mode"] == "supplement"
+    assert report["placements"]["crd"]["fit"] == "below_minimum_font"
+    assert "crd: below_minimum_font" in (output / "reviewer-summary.txt").read_text()
     from pypdf import PdfReader
 
     packet = PdfReader(output / "draft-packet.pdf")
@@ -808,6 +880,18 @@ def test_bad_answers_are_withheld_while_other_supported_work_continues(
         item["requirement_id"] == bad_id and item["status"] == "blank" and item["issues"]
         for item in manifest["answers"]
     )
+
+
+def test_long_write_in_is_written_at_a_reduced_font_instead_of_withheld(tmp_path: Path) -> None:
+    request, review, data = prepare(tmp_path)
+    text = "Fictional notes about synthetic municipal instruments and regional offerings"
+    data["proposals"]["proposals"][1]["value"]["write_ins"][0]["text"] = text
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    output = execute(tmp_path, request, review)
+    manifest = json.loads((output / "draft.json").read_text())
+    assert "instruments" in manifest["written_requirements"]
+    assert manifest["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
 
 
 def test_unapproved_attachment_is_omitted_and_cannot_support_written_answers(

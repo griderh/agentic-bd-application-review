@@ -35,6 +35,7 @@ from bd_packet_builder.inventory import Inventory, read_source_bytes
 from bd_packet_builder.layout import MappedResponse
 from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.ocr import ocr_text
+from bd_packet_builder.question_presentation import questions_agree
 from bd_packet_builder.scan import (
     SCAN_VERSION,
     SUPPORTED_SCAN_VERSIONS,
@@ -50,7 +51,8 @@ from bd_packet_builder.scan import (
 )
 from bd_packet_builder.visual import NormalizedBox
 
-CONTEXT_VERSION = "historical-page-context-v8"
+CONTEXT_VERSION = "historical-page-context-v9"
+_PRINTED_CONTEXT_VERSIONS = ("historical-page-context-v8", CONTEXT_VERSION)
 QUESTION_READING_VERSION = "question-reading-v2"
 
 _QUESTION_PROTECTED = re.compile(
@@ -607,17 +609,34 @@ def _make_check(
                 ),
             )
     readings: list[PrintedTextReading] = []
-    if context_version == CONTEXT_VERSION and allow_disagreements and field.control is not None:
+    if context_version in _PRINTED_CONTEXT_VERSIONS and allow_disagreements:
         for name, citation in (("question", question), ("answer", answer)):
             if not isinstance(citation, OcrCitation) or not any(
                 d.part == name
                 and d.code == "historical_text_or_region_disagrees"
                 and normalized(d.image_reading) != normalized(d.ocr_reading)
+                and (name != "question" or not questions_agree(d.image_reading, d.ocr_reading))
                 for d in warnings
             ):
                 continue
-            # Only printed wording on selected, independently inspected controls is eligible.
-            if field.control.state != "selected" or any(d.part == "control" for d in warnings):
+            if field.control is not None:
+                # Preserve the selected-control eligibility checks, including v8 replay.
+                if field.control.state != "selected" or any(d.part == "control" for d in warnings):
+                    continue
+            elif (
+                context_version != CONTEXT_VERSION
+                or name != "answer"
+                or any(
+                    d.part != "answer"
+                    and not (
+                        d.part == "question"
+                        and d.code == "historical_text_or_region_disagrees"
+                        and questions_agree(d.image_reading, d.ocr_reading)
+                    )
+                    for d in warnings
+                )
+            ):
+                # Plain answers may recover transcription, not a disputed question/role link.
                 continue
             part_name: Literal["question", "answer"] = (
                 "question" if name == "question" else "answer"
@@ -1234,6 +1253,28 @@ class HistoricalContextCheck(Contract):
         )
 
     @property
+    def presentation_discrepancies(self) -> tuple[ExtractionDiscrepancy, ...]:
+        """Derived handoff annotations; original source receipts remain immutable."""
+        return tuple(
+            discrepancy.model_copy(
+                update={
+                    "code": "historical_question_presentation_resolved",
+                    "selection_reason": (
+                        "Question wording agrees after presentation-only normalization. "
+                        "Original image/OCR readings are retained; numbering, numeric values, "
+                        "identifiers and substantive conditions remain checked. This is not "
+                        "semantic applicability or current confirmation."
+                    ),
+                }
+            )
+            if discrepancy.part == "question"
+            and discrepancy.code == "historical_text_or_region_disagrees"
+            and questions_agree(discrepancy.image_reading, discrepancy.ocr_reading)
+            else discrepancy
+            for discrepancy in self.discrepancies
+        )
+
+    @property
     def context_role(self) -> OcrCitation | None:
         return self.role if self.field.section_role is not None else None
 
@@ -1245,7 +1286,7 @@ class HistoricalContextCheck(Contract):
                 self.effective_field.question.text if self.discrepancies else self.question.quote
             ).split()
         )
-        excluded = set() if self.version == CONTEXT_VERSION else {"printed_readings"}
+        excluded = set() if self.version in _PRINTED_CONTEXT_VERSIONS else {"printed_readings"}
         payload = self.model_dump_json(exclude=excluded).encode()
         if not self.discrepancies:
             legacy_current = self.model_dump(mode="json", exclude=excluded | {"discrepancies"})
@@ -1265,6 +1306,7 @@ class HistoricalContextCheck(Contract):
         if self.version not in (
             "historical-page-context-v6",
             "historical-page-context-v7",
+            "historical-page-context-v8",
             CONTEXT_VERSION,
         ):
             legacy = json.loads(payload)
@@ -1332,6 +1374,7 @@ class HistoricalContextCheck(Contract):
                 "historical-page-context-v5",
                 "historical-page-context-v6",
                 "historical-page-context-v7",
+                "historical-page-context-v8",
                 CONTEXT_VERSION,
             )
             and self.prompt_version in SUPPORTED_SCAN_VERSIONS
@@ -1344,6 +1387,7 @@ class HistoricalContextCheck(Contract):
                         "historical-page-context-v5",
                         "historical-page-context-v6",
                         "historical-page-context-v7",
+                        "historical-page-context-v8",
                         CONTEXT_VERSION,
                     )
                     and self.prompt_version
@@ -1593,7 +1637,7 @@ class HistoricalContextEvidence:
                             answer_citation=check.answer,
                             question=check.effective_field.question.text,
                             role=check.context_role.quote if check.context_role else None,
-                            discrepancies=check.discrepancies,
+                            discrepancies=check.presentation_discrepancies,
                             printed_resolutions=tuple(
                                 r for r in check.printed_readings if r.status == "resolved"
                             ),

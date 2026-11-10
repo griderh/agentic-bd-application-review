@@ -72,6 +72,10 @@ from bd_packet_builder.knowledge import knowledge_context
 from bd_packet_builder.layout import MappedResponse, PageBox, ResponseLayout, validate_layout
 from bd_packet_builder.local_inputs import LocalInputError, read_local_input
 from bd_packet_builder.ocr import OcrWordEvidence, ocr_text
+from bd_packet_builder.question_presentation import (
+    question_presentation as _question_presentation,
+)
+from bd_packet_builder.question_presentation import questions_agree, truncated_question_continues
 from bd_packet_builder.reconciliation import (
     ReconciliationError,
     RequirementAssessment,
@@ -187,7 +191,7 @@ class DraftAdditionalForm(Contract):
 
 
 class DraftRequest(Contract):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     mode: Literal["fictional", "reviewed_evidence"]
     source: Nonblank
     requirements: ApplicationRequirements
@@ -303,10 +307,25 @@ class DraftReview(Contract):
         return self
 
 
+# Short single-box answers may shrink/wrap down to this size before using the supplement.
+MIN_SHORT_FONT = 6.0
+_SHORT_FONT_STEP = 0.5
+_COMPACT_LEADING = 1.15
+_DESCENT = 0.22
+
+
 @dataclass(frozen=True)
 class TextPlacement:
     region: NarrativeRegion
     lines: tuple[str, ...]
+    font_size: float | None = None
+    leading: float | None = None
+
+    @property
+    def fit(self) -> Literal["standard", "reduced_font", "wrapped"]:
+        if self.font_size is None:
+            return "standard"
+        return "wrapped" if len(self.lines) > 1 else "reduced_font"
 
 
 @dataclass(frozen=True)
@@ -326,6 +345,26 @@ def _lines(text: str, region: NarrativeRegion) -> tuple[str, ...]:
     if lines is None or len(lines) > math.floor((region.top - region.bottom) / region.leading):
         raise DraftError("Answer cannot fit at the configured readable font size")
     return lines
+
+
+def fit_short_text(text: str, region: NarrativeRegion) -> TextPlacement | None:
+    """Largest font from the region size down to MIN_SHORT_FONT whose wrapped lines fit."""
+    if any(not (32 <= ord(c) <= 126 or c == "\n") for c in text):
+        raise DraftError("Unsupported font characters; answer needs a reviewed font/layout")
+    width, height = region.right - region.left, region.top - region.bottom
+    lines = wrap_text(text, width, region.font_size, _measure)
+    if lines is not None and len(lines) <= math.floor(height / region.leading):
+        return TextPlacement(region, lines)
+    size = region.font_size - _SHORT_FONT_STEP
+    while size >= MIN_SHORT_FONT:
+        leading = round(size * _COMPACT_LEADING, 2)
+        # The last line's descenders must stay inside the reviewed box.
+        capacity = math.floor((height - size * (1 + _DESCENT)) / leading) + 1
+        lines = wrap_text(text, width, size, _measure)
+        if lines is not None and len(lines) <= capacity:
+            return TextPlacement(region, lines, size, leading)
+        size -= _SHORT_FONT_STEP
+    return None
 
 
 def _overlap(a: PageBox | NarrativeRegion, b: PageBox | NarrativeRegion) -> bool:
@@ -687,7 +726,7 @@ def verify_historical_context(
                     return ("historical_write_in_relationship_unresolved",), ()
     for checked in receipts:
         if checked.field.control is not None and any(
-            d.part == "question" and normalized(d.image_reading) != normalized(d.ocr_reading)
+            d.part == "question" and not questions_agree(d.image_reading, d.ocr_reading)
             for d in checked.discrepancies
         ):
             reconciled = question_reconciliation(checked, question_requirements)
@@ -729,6 +768,17 @@ _POINTER = re.compile(
 
 
 _PLAIN_HISTORICAL_REASONS = {
+    "historical_question_correspondence_required": (
+        "The historical answer lacks an assessment tied to this exact target question."
+    ),
+    "historical_question_applicability_uncertain": (
+        "It is uncertain whether the historical answer addresses this question. This is "
+        "different from unconfirmed current continuity."
+    ),
+    "historical_question_partially_applicable": (
+        "Only part of the question has applicable historical support. Partial-response "
+        "writing is not enabled; supported and missing parts are identified below."
+    ),
     "historical_composition_has_unsupported_text": (
         "The proposed answer does not exactly equal the cited historical answer pieces joined "
         "in order. A 'see supplement' pointer cited as an answer piece causes this."
@@ -754,16 +804,6 @@ _PLAIN_HISTORICAL_REASONS = {
 }
 
 
-def _question_presentation(text: str) -> tuple[str | None, list[str]]:
-    label = re.match(r"^\s*(?:\((\d{1,3})\)|(\d{1,3})[.):])\s*(?=[a-z])", text, re.I)
-    number = (label[1] or label[2]) if label else None
-    wording = text[label.end() :] if label else text
-    # Preserve numeric punctuation, operators and unknown symbols rather than erasing
-    # a condition while normalizing ordinary sentence punctuation.
-    tokens = re.findall(r"""\d+(?:[.,]\d+)*|\w+|[^\w\s.,:;!?()"']""", wording.casefold())
-    return number, tokens
-
-
 def _question_links_agree(
     pointer: str, answer: str, *, allow_truncated_answer: bool = False
 ) -> bool:
@@ -773,11 +813,7 @@ def _question_links_agree(
         return False
     if pointer_words and pointer_words == answer_words:
         return True
-    truncation = re.search(r"(?:-\s*:|\.\.\.)\s*$", answer)
-    if not allow_truncated_answer or truncation is None:
-        return False
-    _, stem = _question_presentation(answer[: truncation.start()])
-    return bool(stem) and pointer_words[: len(stem)] == stem and len(pointer_words) > len(stem)
+    return allow_truncated_answer and truncated_question_continues(answer, pointer)
 
 
 def _verify_question_links(
@@ -823,6 +859,17 @@ def _verify_question_links(
                 receipt.field.question,
             )
             is None
+            and (
+                not questions_agree(receipt.field.question.text, receipt.question.quote)
+                or _native_citation(
+                    root,
+                    inventory,
+                    receipt.question.source_id,
+                    receipt.question.page,
+                    receipt.field.question.model_copy(update={"text": receipt.question.quote}),
+                )
+                is None
+            )
         ):
             return "historical_question_link_question_mismatch"
         current: list[bytes] = []
@@ -1081,9 +1128,11 @@ def selected_inventory(root: Path, request: DraftRequest) -> Inventory:
 
 def _draw_text(canvas: Canvas, placement: TextPlacement) -> None:
     region = placement.region
-    canvas.setFont("Helvetica", region.font_size)
+    size = placement.font_size or region.font_size
+    leading = placement.leading or region.leading
+    canvas.setFont("Helvetica", size)
     for index, line in enumerate(placement.lines):
-        canvas.drawString(region.left, region.top - region.font_size - index * region.leading, line)
+        canvas.drawString(region.left, region.top - size - index * leading, line)
 
 
 def _form_pdf(
@@ -1156,10 +1205,13 @@ def _render_checks(
                 closing(document[packet_page_offset + b.page - 1]) as page,
                 closing(page.get_textpage()) as text,
             ):
+                # PDFium replaces a visible line-ending hyphen and break with STX.
                 actual = " ".join(
                     text.get_text_bounded(
                         left=b.left, bottom=b.bottom, right=b.right, top=b.top, errors="strict"
-                    ).split()
+                    )
+                    .replace("\x02", "- ")
+                    .split()
                 )
                 if any(" ".join(line.split()) not in actual for line in placement.lines):
                     raise DraftError("Written text is missing or clipped in its reviewed region")
@@ -1557,6 +1609,7 @@ def publish_draft(
             historical_policy=request.historical_policy,
             calculation_date=request.calculation_date,
             verified_current_scans=tuple(c for c, _ in context_snapshots),
+            require_applicability=request.schema_version == 2,
         )
         history_issues = (*context_issues, *history_issues)
         issues: list[str] = []
@@ -1574,7 +1627,7 @@ def publish_draft(
             d.model_dump_json(): d.model_dump(mode="json")
             for c in review.historical_context_checks
             if c.supports(proposal, req) or c.answer in proposal.citations
-            for d in c.discrepancies
+            for d in c.presentation_discrepancies
         }
         if discrepancies:
             result["historical_extraction_discrepancies"] = list(discrepancies.values())
@@ -1587,6 +1640,12 @@ def publish_draft(
                 if context_verified
                 and any(
                     d["code"] == "historical_native_numeric_layout_reconciled"
+                    for d in discrepancies.values()
+                )
+                else "question_presentation_resolved"
+                if context_verified
+                and all(
+                    d["code"] == "historical_question_presentation_resolved"
                     for d in discrepancies.values()
                 )
                 else "extraction_discrepancy_unresolved"
@@ -1726,22 +1785,22 @@ def publish_draft(
                     if isinstance(value, BooleanValue)
                     else value.value
                 )
-                if any(not (32 <= ord(c) <= 126 or c == "\n") for c in text):
-                    raise DraftError(
-                        "Unsupported font characters; answer needs a reviewed font/layout"
-                    )
                 region = mapped.text_region
-                lines = wrap_text(text, region.right - region.left, region.font_size, _measure)
-                overflow = lines is None or len(lines) > math.floor(
-                    (region.top - region.bottom) / region.leading
-                )
-                if overflow and isinstance(value, TextValue):
+                fitted = fit_short_text(text, region)
+                if fitted is None and isinstance(value, TextValue):
                     _lines(f"See packet page {MAX_PACKET_PAGES}.", region)
                     reserve_supplement(identity, text)
-                    placements[identity] = {"mode": "supplement"}
+                    placements[identity] = {"mode": "supplement", "fit": "below_minimum_font"}
+                elif fitted is None:
+                    raise DraftError("Answer cannot fit at the minimum readable font size")
                 else:
-                    candidate_texts.append(TextPlacement(region, _lines(text, region)))
-                    placements[identity] = {"mode": "inline"}
+                    candidate_texts.append(fitted)
+                    placements[identity] = {
+                        "mode": "inline",
+                        "font_size": fitted.font_size or region.font_size,
+                        "line_count": len(fitted.lines),
+                        "fit": fitted.fit,
+                    }
             elif isinstance(value, (SingleSelectValue, MultiSelectValue)):
                 for option in mapped.options:
                     if option.option_id in value.selected:
@@ -1750,11 +1809,10 @@ def publish_draft(
                     option = next(o for o in mapped.options if o.option_id == write_in.option_id)
                     if option.write_in_region is None:
                         raise DraftError("Selected write-in lacks a reviewed writable region")
-                    candidate_texts.append(
-                        TextPlacement(
-                            option.write_in_region, _lines(write_in.text, option.write_in_region)
-                        )
-                    )
+                    write_in_fit = fit_short_text(write_in.text, option.write_in_region)
+                    if write_in_fit is None:
+                        raise DraftError("Answer cannot fit at the minimum readable font size")
+                    candidate_texts.append(write_in_fit)
                 placements[identity] = {"mode": "choice", "selected": list(value.selected)}
             elif isinstance(value, NarrativeValue):
                 if mapped.narrative_region is None:
@@ -1927,7 +1985,10 @@ def publish_draft(
                     "Additional issuer form fields require an approved text or identifier answer"
                 )
             additional_text = approved_proposal.value.value
-            form_texts.append(TextPlacement(field.region, _lines(additional_text, field.region)))
+            additional_fit = fit_short_text(additional_text, field.region)
+            if additional_fit is None:
+                raise DraftError("Answer cannot fit at the minimum readable font size")
+            form_texts.append(additional_fit)
             if field.requirement_id not in written_requirements:
                 written_requirements.append(field.requirement_id)
         additional_form_texts.append(form_texts)
@@ -2083,7 +2144,7 @@ def publish_draft(
     payload: dict[str, object] = {
         "domain_knowledge": knowledge_context(),
         "schema_version": 1,
-        "writer_version": "reviewed-draft-overlay-v15",
+        "writer_version": "reviewed-draft-overlay-v19",
         "created_at": datetime.now(UTC).isoformat(),
         "status": "incomplete_draft_not_for_submission",
         "mode": request.mode,
@@ -2238,11 +2299,25 @@ def publish_draft(
             extraction_details = item.get("historical_extraction_discrepancies")
             extraction_parts = (
                 tuple(
-                    dict.fromkeys(str(d["part"]) for d in extraction_details if isinstance(d, dict))
+                    dict.fromkeys(
+                        str(d["part"])
+                        for d in extraction_details
+                        if isinstance(d, dict)
+                        and d.get("code") != "historical_question_presentation_resolved"
+                    )
                 )
                 if isinstance(extraction_details, list)
                 else ()
             )
+            if isinstance(extraction_details, list) and any(
+                isinstance(d, dict) and d.get("code") == "historical_question_presentation_resolved"
+                for d in extraction_details
+            ):
+                summary.append(
+                    f"- {identity}: QUESTION PRESENTATION RESOLVED; substantive wording agrees. "
+                    "Original readings retained; applicability, answer support and historical "
+                    "continuity are separate checks."
+                )
             if item["status"] in ("blank", "requirement_satisfied") or identity in assessments:
                 assessment = assessments.get(identity)
                 summary.append(
@@ -2265,6 +2340,21 @@ def publish_draft(
                     )
                 )
                 if item["status"] == "blank":
+                    basis = next(
+                        p.historical_basis
+                        for p in request.proposals.proposals
+                        if p.requirement_id == identity
+                    )
+                    if basis is not None and basis.correspondence is not None:
+                        correspondence = basis.correspondence
+                        summary.append(
+                            f"  QUESTION CORRESPONDENCE ({correspondence.assessment}; "
+                            "model interpretation, not semantic approval): "
+                            f"{correspondence.reason} "
+                            f"Differences/coverage gap: {correspondence.differences}. "
+                            f"Historical source: {basis.prior_question.source_id}, "
+                            f"page {basis.prior_question.page}."
+                        )
                     summary.append(
                         f"  Validation details: {item['review_reason']}; "
                         f"writer checks: {item['issues']}"
@@ -2344,7 +2434,7 @@ def publish_draft(
                         else "  ACTION: Verify the conflicting readings against an independent "
                         "source for the same subject and field; enter the supported value "
                         "only after verification."
-                        if item.get("historical_extraction_discrepancies")
+                        if extraction_parts
                         else "  ACTION: "
                         + str(item.get("effective_explanation") or item["review_reason"])
                     )
@@ -2407,6 +2497,26 @@ def publish_draft(
                                         "  OCR question: " + str(difference["ocr_reading"]),
                                     ]
                                 )
+        adjusted = [
+            (identity, placement)
+            for identity, placement in placements.items()
+            if placement.get("fit") not in (None, "standard")
+        ]
+        if adjusted:
+            summary.extend(
+                [
+                    "",
+                    "SHORT-FIELD FIT (internal; reduced font, wrapped or moved to the supplement; "
+                    f"minimum {MIN_SHORT_FONT:g} pt; check legibility):",
+                ]
+            )
+            for identity, placement in adjusted:
+                summary.append(
+                    f"- {identity}: below_minimum_font; written in Supplemental Answers."
+                    if placement["mode"] == "supplement"
+                    else f"- {identity}: {placement['fit']}; {placement['font_size']:g} pt, "
+                    f"{placement['line_count']} line(s)."
+                )
         summary.extend(["", "Supporting-document completeness (not semantic approval):"])
         for audit in audit_support(
             tuple(accepted), inventory, tuple(attachment_ids), approved_exhibits

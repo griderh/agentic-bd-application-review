@@ -15,7 +15,9 @@ from bd_packet_builder.form_layout import FormInterpretation
 from bd_packet_builder.foundry import FoundryConfig
 from bd_packet_builder.grouped import (
     ANSWER_INSTRUCTIONS,
+    EVIDENCE_CONTINUATION,
     EVIDENCE_INSTRUCTIONS,
+    MAX_EVIDENCE_CONTINUATIONS,
     run_answer_groups,
     run_grouped_packet_agent,
 )
@@ -25,6 +27,7 @@ from bd_packet_builder.visual import VisualPage
 from tests.integration.test_agent import (
     NAME,
     FakeMapper,
+    ModelTurn,
     Setup,
     blank_pdf,
     call,
@@ -83,6 +86,57 @@ def test_grouped_answering_persists_proposals_and_publishes_through_gate(tmp_pat
         calls[0]["source_context"]["domain_knowledge"]["sha256"] == application["reference_sha256"]
     )
     assert "supporting-documents" in setup.artifact("reviewer-summary.txt").decode()
+
+
+@pytest.mark.parametrize("limit", ["group", "run_calls", "verification"])
+def test_complete_proposals_survive_followup_limits_without_executing_requests(
+    tmp_path, monkeypatch, limit
+):
+    from bd_packet_builder import grouped
+
+    setup, tools, proposal = ready(tmp_path)
+    if limit == "group":
+        monkeypatch.setattr(grouped, "MAX_GROUP_ATTEMPTS", 1)
+    elif limit == "run_calls":
+        tools.limits = tools.limits.model_copy(update={"max_turns": 2})
+    else:
+        monkeypatch.setattr(grouped, "MAX_VERIFICATION_REQUESTS", 0)
+
+    def unexpected_verification(*args):
+        pytest.fail("An exhausted follow-up budget must not perform verification.")
+
+    monkeypatch.setattr(tools, "verify_answer_evidence", unexpected_verification)
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        assert payload["verification_budget"]["followup_allowed"] is False
+        if limit == "verification":
+            assert payload["verification_budget"]["requests_remaining"] == 0
+        else:
+            assert payload["verification_budget"]["group_calls_remaining"] == 1
+        return json.dumps(
+            {
+                "proposals": [proposal],
+                "verification_requests": [
+                    {
+                        "requirement_id": "p1.name",
+                        "source_id": proposal["citations"][0]["source_id"],
+                        "page": 1,
+                        "quote": NAME,
+                        "expected_subject": NAME,
+                        "method": "native",
+                    }
+                ],
+            }
+        )
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+    assert final.status == "published"
+    assert len(calls) == 1
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == ["p1.name"]
+    assert "evidence_followup_limit_exceeded" in setup.artifact("reviewer-summary.txt").decode()
+    assert not any(a.name.endswith("-verification-request.json") for a in final.artifacts)
 
 
 @pytest.mark.parametrize("changed_word", [False, True])
@@ -974,6 +1028,7 @@ class PhaseClient(FunctionInvocationLayer, BaseChatClient):
         self.steps = list(steps)
         self.answer = answer
         self.answer_calls = 0
+        self.evidence_inputs: list[list[str]] = []
 
     def _inner_get_response(self, *, messages, stream, options, **kwargs):
         async def respond():
@@ -984,11 +1039,16 @@ class PhaseClient(FunctionInvocationLayer, BaseChatClient):
                     for c in m.contents
                     if c.type == "function_result"
                 ]
+                self.evidence_inputs.append(
+                    [c.text for m in messages for c in m.contents if c.type == "text" and c.text]
+                )
                 turn = self.steps.pop(0)(transcript)
                 contents = [
                     Content.from_function_call(t.call_id, t.name, arguments=t.arguments)
                     for t in turn.tool_calls
                 ]
+                if turn.text:
+                    contents.append(Content.from_text(turn.text))
             else:
                 assert options["instructions"] == ANSWER_INSTRUCTIONS
                 assert not options.get("tools")
@@ -1044,3 +1104,90 @@ def test_real_framework_evidence_loop_hands_control_to_grouped_answering(tmp_pat
     assert final.status == "published"
     assert client.answer_calls == 1
     assert not client.steps
+
+
+def stop_with_text(_transcript):
+    return ModelTurn(text="I have gathered the evidence I need.", tool_calls=())
+
+
+def test_evidence_text_stop_continues_same_conversation_until_handoff(tmp_path):
+    setup = Setup(tmp_path, blank_pdf())
+    state = {}
+
+    def locate(listing):
+        return "locate_quote", {
+            "source_id": listing["result"]["sources"][0]["source_id"],
+            "page": 1,
+            "quote": NAME,
+        }
+
+    def remember(located):
+        state["citation"] = {
+            k: located["result"][k] for k in ("source_id", "page", "start", "end", "quote")
+        }
+        return "finish_evidence", {}
+
+    client = PhaseClient(
+        [
+            call("get_run_status"),
+            call("interpret_form"),
+            call("list_sources", {}),
+            with_result(locate),
+            stop_with_text,
+            with_result(remember),
+        ],
+        lambda: json.dumps(
+            {
+                "proposals": [
+                    {
+                        "requirement_id": "p1.name",
+                        "outcome": "proposed",
+                        "value": {"kind": "text", "value": NAME},
+                        "confidence": 0.9,
+                        "citations": [state["citation"]],
+                    }
+                ]
+            }
+        ),
+    )
+    events: list[str] = []
+    final = asyncio.run(run_grouped_packet_agent(client, setup.tools(progress_sink=events.append)))
+    assert final.status == "published"
+    assert not client.steps
+    continued = client.evidence_inputs[-1]
+    assert continued[0].startswith("Collect approved evidence")
+    assert "I have gathered the evidence I need." in continued
+    assert continued[-1] == EVIDENCE_CONTINUATION
+    assert "Evidence model ended its turn without finish_evidence; continuation 1/2" in events
+    assert not any("I have gathered" in e for e in events)
+
+
+def test_repeated_evidence_text_stops_fail_after_bounded_continuations(tmp_path):
+    setup = Setup(tmp_path, blank_pdf())
+    client = PhaseClient(
+        [call("get_run_status"), call("interpret_form")]
+        + [stop_with_text] * (MAX_EVIDENCE_CONTINUATIONS + 1),
+        lambda: pytest.fail("answering must not start"),
+    )
+    final = asyncio.run(run_grouped_packet_agent(client, setup.tools()))
+    assert final.status == "failed"
+    assert final.failure is not None
+    assert final.failure.code == "evidence_stopped_early"
+    assert f"after {MAX_EVIDENCE_CONTINUATIONS} continuation" in final.failure.message
+    assert not client.steps
+
+
+def test_evidence_continuations_share_one_model_call_budget(tmp_path):
+    setup = Setup(tmp_path, blank_pdf())
+    tools = setup.tools()
+    budget = tools.limits.max_turns // 2 - 1
+    client = PhaseClient(
+        [call("get_run_status")] * (budget - 1) + [stop_with_text] + [call("list_sources", {})] * 5,
+        lambda: pytest.fail("answering must not start"),
+    )
+    final = asyncio.run(run_grouped_packet_agent(client, tools))
+    assert final.status == "failed"
+    assert final.failure is not None
+    assert final.failure.code == "evidence_stopped_early"
+    assert "model-call budget" in final.failure.message
+    assert len(client.steps) == 5

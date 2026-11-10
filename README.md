@@ -9,10 +9,285 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
+### Slice 4 withdrawn: restore the verified-answer baseline
+
+The v38 run `a3fec3e3...` exposed a regression: Slice 4's answer-layout veto withheld Q3,
+Q10, Q11 and Q12 and produced no supplemental answers. Low-confidence OCR, column order
+and line-region differences could override native-verified answers or successful focused
+rereading. Slice 4's layout checks, prompt/schema additions and layout-only reporting have
+been removed rather than weakening the existing evidence verification rules.
+
+Slices 1-3 remain: bio identity/attachment, bio-grounded titles/contact comparison and inline
+short-field fitting. Q3's bounded narrative recovery and evidence-phase continuation also remain.
+Native quotes, question/role geometry, OCR/image agreement, historical reuse restrictions and
+gate/writer rechecks keep their pre-Slice-4 behavior. Genuine unresolved readings remain blank.
+
+Fresh-run provenance: agent v39/groups v11; restored scan v6/context v9/gate v24/writer v19.
+Start a fresh run after restarting long-running workers. Slice 4 v38 artifacts remain untouched;
+context v10 receipts are not accepted by the restored workflow and must not be resumed.
+Synthetic regressions cover native-verified narratives with imperfect OCR, table-order differences,
+supplement generation, and focused recovery with corroborated low-confidence words.
+No paid calls; real-packet recovery still requires a fresh run. Broader multiline extraction is
+deferred until a concrete failure justifies a narrowly tested change.
+
+Rollback validation: **1,689 passed, 51 skipped on each of Python 3.12 and 3.13**.
+Ruff lint/format, strict mypy and whitespace checks pass. These offline results verify the
+restored contracts and rendering, not real-document model quality.
+
+### Evidence-phase continuation (answer groups v9)
+
+Run `0b61f4bb...` failed with `evidence_stopped_early`: after 29 of 240 tools, with no error
+and time/call budgets remaining, the evidence model ended its turn with text instead of calling
+`finish_evidence`. Code now keeps the evidence conversation in one local session (history is
+not stored by the service) and sends at most two fixed continuation prompts asking it to keep
+using evidence tools or call `finish_evidence`. Continuations share the original evidence
+model-call and elapsed-time budgets; answering's reserved half is unchanged. Repeated text
+stops still fail as `evidence_stopped_early` with the continuation count. Progress records only
+`continuation n/2`, never the model's text. This adds no evidence, tools or answer authority.
+
+Validation: **1,683 passed, 51 skipped on Python 3.12 and 3.13**; Ruff lint/format,
+strict mypy and whitespace checks pass. Three new offline cases cover continuation with
+retained history, bounded repeated stops and the shared model-call budget. No paid calls.
+
+### Automatic historical narrative rereading (agent v37, context v9)
+
+In `answer_first_review`, code now attempts recovery of a plain historical answer's
+image/OCR transcription disagreement during discovery, including narrative answers without
+checkboxes or radio buttons. The question/role relationship must already be clear; this does
+not repair disputed associations or conflicting business evidence. Selected-control recovery
+keeps its existing checks.
+
+Recovery first checks localized native source text, then uses one blind focused image reread
+of the answer region if needed, within the existing shared scan budget. Only agreement with
+local OCR under the existing confidence checks resolves the discrepancy. A different reading,
+unreadable crop, insufficient confidence or exhausted budget leaves the answer disputed.
+There is no majority vote, wording repair or automatic current-business confirmation.
+
+Original readings and hashed recovery receipts are retained. The answer handoff exposes
+`printed_resolutions` or `printed_reading_issues`; referenced checks appear as
+`PRINTED-WORDING CHECK` entries in the internal reviewer summary. Gate and writer recheck
+saved receipts without paid calls. Context v8 receipts retain their original identities and
+control-only recovery semantics; new plain-answer recovery uses context v9. Start a fresh run
+to use the change. Provenance: agent v37, answer groups v8, historical context v9; the
+independent transcription prompt is unchanged.
+
+Validation: **1,680 passed, 51 skipped on Python 3.12 and 3.13**; Ruff lint/format,
+strict mypy and whitespace checks pass. Seventeen new offline regression cases cover
+recovery, refusal, replay, gate/writer output and integrity failures. Two synthetic narrative
+transcription evaluation cases were added; **0/2 executed** (paid opt-in). Offline contracts
+do not establish live model recovery quality. No paid calls or original-run modifications.
+
+### Short-field fit, Slice 3 (writer v19)
+
+Short single-box text answers (page-1 names, titles, addresses, telephones, emails, issuer-form
+fields and choice write-ins) no longer jump to the supplement just because they exceed one line
+at 10 pt. The writer keeps 10 pt when the answer fits; otherwise it uses the largest size, in
+0.5 pt steps down to a **6 pt minimum**, at which the wrapped lines fit inside the reviewed box
+(including descenders). One line is used when it fits; otherwise text wraps onto as many lines as
+the box height allows. Only text that cannot fit at 6 pt still goes to Supplemental Answers.
+`draft.json` placements record `fit` (`standard`, `reduced_font`, `wrapped`,
+`below_minimum_font`), font size and line count, and the internal reviewer summary lists every
+non-standard placement under `SHORT-FIELD FIT` for a legibility check. The rendered-output check
+still verifies every written line inside its box and no changes outside allowed regions; it now
+also handles PDFium's line-ending hyphen marker for inline text. Narrative fields are unchanged.
+Validation: **1,663 passed, 49 skipped on Python 3.12 and 3.13**; Ruff and strict mypy pass.
+No paid calls; a fresh live run is needed to confirm page-1 titles render inline.
+
+### Representative titles and contacts from bios, Slice 2 (agent v36)
+
+`resolve_representative_bio` now also accepts `field_requirements`, which map one representative's
+text title, telephone and email requirements (never the name field, each with a single owner;
+mappings may be added later without reassigning the person). Code extracts the selected bio's
+printed contact card: the exact name line, up to three title lines, then consecutive telephone
+and email lines. Labels such as "Title:" are not required; prose, similar names and distinct
+cards across pages yield `not_found`/`ambiguous`, never guessed values. Every line is an exact,
+rechecked span of the bio. At `submit_answers` code reconciles mapped fields deterministically:
+
+- **Title:** the bio title (stacked lines joined with ", ") takes precedence over history.
+- **Telephone:** a prior answer is kept if it contains any bio number (keyed by digits, so
+  formatting differences don't matter); historical-only numbers such as a mobile are reported,
+  not treated as contradictions. Otherwise the bio number(s) are used. Fax numbers are ignored.
+- **Email:** exact, case-insensitive comparison only; otherwise the bio address is used.
+
+Every selected bio is attached once (equivalent copies excluded) regardless of citation, and the
+attachment manifest records why. The private `representative_contacts.json` and a new reviewer
+summary section, `REPRESENTATIVE TITLE AND CONTACT RECONCILIATION`, list used/kept values,
+confirmed and historical-only details and meaningful differences; currency is not confirmed.
+A selected bio without a card is still attached and raises a `representative_bio_card_*`
+review exception. A bio that changes after selection fails the run rather than producing a
+packet. The gate now also accepts a text value matching a multiline quote with its line breaks
+written as ", ". Placement and font sizing are
+handled by Slice 3 (above). Validation: **1,658 passed,
+49 skipped on Python 3.12 and 3.13**; Ruff lint/format and strict mypy pass. No paid calls;
+model use of the new mapping is unmeasured until a fresh live run. Provenance: agent v36,
+gate v24, answer groups v7, source context v7, representative bios v2.
+
+### Representative-to-bio resolution, Slice 1 (agent v35)
+
+Discovery now has a typed `resolve_representative_bio` tool. For each representative role,
+it binds the name requirement and related scalar requirements to explicit assignment evidence
+and searches the approved `bios` inventory within the existing evidence budgets. A bio cannot
+assign its subject to an application role. Historical assignments require the checked name/role
+receipt and remain continuity-unconfirmed; current assignment evidence must explicitly link the
+role label and person. Neither path bypasses the existing answer gate.
+
+Bio matching uses complete, case/whitespace-normalized subject headings in reliable native text,
+or an existing independently checked OCR identity quote with the matching employee subject.
+It does not use filenames, similar names, or an incidental mention in prose. Unsupported
+heading formats remain review items when the name is present, rather than being repaired by
+inference. The tool records exact identity citations and source hashes. Byte-identical copies
+are one candidate; distinct matching versions remain ambiguous, including apparently dated
+versions. No filename or document date automatically establishes authority or currency.
+
+Results distinguish selected, missing, ambiguous, unverified/incomplete search and unresolved
+assignment. Recognizable representative-name requirements omitted from discovery receive an
+explicit review exception; navigation hints never authorize an assignment. The private
+`representative_bios.json`, evidence selection, answer handoff and internal reviewer summary
+retain the links and gaps across answering/assembly restarts. Bios may be shared across roles.
+No employee details are added to ordinary progress logs.
+
+This is **identity resolution only**; Slice 2 (above) adds bio-grounded titles/contacts
+and mandatory inclusion. Inline placement and general multiline
+historical extraction are later slices. This increment does not fix the visible title fields
+by itself, certify current employment, or alter existing attachment selection.
+Validation: **1,616 passed, 49 skipped on Python 3.12 and 3.13**, including 35 new synthetic
+contract/integration cases. Ruff lint/format and strict mypy pass on application code.
+The Python 3.13 checks used a fresh standard-library venv installed from the pinned requirements;
+`pip check` passed. No dependency changes, paid calls, real-document fixtures or old-run edits.
+Provenance: agent v35, source context v6, representative identity links v1.
+Use a fresh run after the agent-version change; autonomous bio-selection quality has not yet
+been measured. Offline source checks do not establish model accuracy.
+Three synthetic model-quality cases cover explicit current assignment, historical assignment
+without continuity confirmation, and bio-only evidence that cannot assign a role. They are
+opt-in with `BD_RUN_REPRESENTATIVE_EVAL=1` plus the existing Foundry endpoint/deployment variables;
+**0/3 executed** for this increment. Default tests remain offline.
+
+### Mid-word truncated supplement headings (gate v23, writer v18)
+
+A truncated supplement heading may end inside a word, for example `references from public-:`
+for `references from public-sector clients`. Every earlier word must still match the main-form
+question exactly; only the final cut-off word may be a prefix of the corresponding word, and the
+main-form question must be strictly longer. An explicit dash/ellipsis truncation signal,
+compatible numbering, a source-native heading, a verified pointer and the same source/role
+context remain required. A mismatched partial word (`pubx-:`) or changed earlier wording is
+still rejected. The gate and writer share this comparison.
+
+Validation: **1,581 passed, 46 skipped on Python 3.12 and 3.13**; Ruff, strict mypy and
+whitespace checks pass. Q10 coverage in a fresh live run has not been remeasured.
+
+### Shared question-presentation resolution (agent v34)
+
+Historical question readings now share a deterministic presentation comparison with
+main-form/supplement navigation. It tolerates case, wrapping, omitted leading question
+numbers, ordinary sentence punctuation and reordered decorative heading punctuation.
+Explicit conflicting numbers, changed wording, amounts, signs, percentages, operators,
+numeric punctuation and identifier separators remain significant. This comparison applies
+to questions, never answer values, role identities or semantic applicability.
+
+Discovery annotates presentation-only question discrepancies as
+`historical_question_presentation_resolved` before answering. Original image/OCR readings,
+receipt bytes and hashes remain unchanged; the handoff does not choose a new literal
+transcription. Answer instructions distinguish resolved presentation from substantive
+conflicts and current-continuity concerns. Selected controls do not spend a focused image
+reread on presentation-only differences; mark/label and answer checks remain independent.
+
+Explicit terminal truncation signals (dash or ellipsis with surrounding sentence punctuation)
+can appear in different punctuation orders. Prefix linking still requires a source-native
+heading located within the checked region, a verified pointer, compatible numbering and
+the same source/role context. Either original reading may supply that independent native
+match when their presentation comparison agrees. A colon/question mark alone, arbitrary
+prefix, image-only shortened heading or substantive discrepancy does not authorize a link.
+The gate and independent writer reproduce these checks.
+
+Validation: **1,564 passed, 46 skipped on Python 3.12 and 3.13**, including 57 new synthetic
+cases for presentation, protected content, handoff resolution, selected controls and
+gate/writer supplement transfer. Ruff lint/format, strict mypy on both runtimes and
+whitespace checks pass. No recovery scripts, paid calls or original-run modifications;
+autonomous Q10 coverage/model quality has not been remeasured.
+Provenance: agent v34, grouped answers v6, gate/reviewer v22 and writer v17.
+Historical context v8 receipts and draft request schema 2 remain unchanged because
+resolution is a reproducible derived annotation, not altered source evidence.
+Use a fresh current-version run for separately authorized live testing.
+
 Evidence-phase model failures report a bounded exception-type chain and any HTTP status,
 not just the framework's `ChatClientException` wrapper. Error bodies, request payloads and
 credentials are excluded. This improves diagnosis; it does not automatically retry calls
 or recover causes already discarded by older runs.
+
+### Q1 source-row verification and bounded finalization (agent v33)
+
+Minimum-amount follow-up binds the exact minimum criterion to its assigned issuer question
+or option and requires the requested report line in that criterion. The source report's
+field label need not appear in the application: it must instead match the amount's row
+in the source OCR and independent image text. Subject, source snapshot, line, amount,
+units and threshold checks remain intact. A generic proof/attachment requirement cannot
+borrow another question's criterion.
+
+Each answer call now receives its remaining group-call and verification allowance.
+When no follow-up round or request budget remains, the model is instructed to return
+complete proposals and explicit unresolved conditions without requesting more verification.
+If it nevertheless returns complete proposals plus follow-up requests, code performs no
+verification, archives `evidence_followup_limit_exceeded` results, adds reviewer concerns
+and sends the proposals through the existing gate and independent writer. Supported answers
+can remain; unverified answers do not become supported merely because the budget expired.
+Incomplete group responses still require recovery. Three group calls and twenty actual
+verification requests remain the limits; blocked requests are not executed.
+
+Eleven new existing-suite regression cases cover source-only field labels, wrong rows/lines/
+requirements, final-attempt supported/unresolved/unsupported/incomplete responses, restart
+replay without regeneration and group/run-call/request-budget exhaustion.
+Validation: **1,507 passed, 46 skipped on Python 3.12 and 3.13**; Ruff lint/format,
+strict mypy on both runtimes and whitespace checks pass. No ad hoc recovery scripts,
+paid calls, dependency changes or saved-run modifications. Model-quality evaluation was
+not performed.
+
+Versions are agent v33 and grouped answers v5; Slice 2's gate v21, writer v16 and request
+schema 2 remain. Use the normal demo command for a fresh authorized live run:
+
+```bash
+caffeinate -i ./scripts/run_broward_demo.sh
+```
+
+Do not resume an older run after these component changes. In particular, the failed
+`b5f81fc6...` run exhausted its Q1 group attempts; ordinary resume cannot finish it.
+
+### Target-bound semantic applicability (agent v32)
+
+Slice 2 of the [semantic grounding plan](docs/semantic-grounding-development-plan.md) is
+implemented. New agent draft requests use schema 2. Under `answer_first_review`, every
+historical proposal must include correspondence tied to the exact target instruction,
+with an assessment of `applicable`, `partially_applicable`, `uncertain` or `incompatible`.
+The existing answer call compares meaning, entity/role, business/product scope, periods,
+conditions and qualifications; no separate model call or retrieval subsystem was added.
+
+Applicable, source-extractive answers can be written without current corroboration when
+otherwise eligible, with historical provenance and unconfirmed continuity flagged.
+Uncertain, partial, incompatible or missing correspondence leaves that answer blank,
+not the entire run failed. The internal reviewer summary retains the assessment,
+explanation, differences/coverage gaps and historical source reference. Partial-answer
+writing remains Slice 3.
+The newly introduced `partially_applicable` assessment cannot authorize writing under
+any schema or policy; legacy compatibility is not a partial-answer bypass.
+
+The gate and independent writer share enforcement. An `applicable` label cannot override
+changed/forged evidence receipts, literal-answer checks, explicit signer-role/period
+constraints, current contradictions or prohibited acts. Within-source question links and
+source-transcription reconciliation retain their fidelity checks; semantic interpretation
+does not repair disputed source wording or relax source-layout relationships.
+
+Schema-1 replay and the conservative policy retain their previous rules. Offline gate
+replay of `f1833520...` retains all 48 accepted answers under both schemas; `df859ab2...`
+retains all 46 previously accepted answers and Slice 1's newly accepted Q3 under both.
+Original saved artifacts are hash-checked unchanged.
+
+Validation: **1,496 passed, 46 skipped on Python 3.12 and 3.13**; Ruff lint/format,
+strict mypy on both targets and whitespace checks pass. Four new opt-in synthetic
+semantic cases cover synonymous wording, partial coverage, role mismatch and unsupported
+product scope. They were not run: offline contract/replay results do not establish model
+semantic accuracy or zero hallucinations. No paid calls, dependencies or deployments.
+Versions: agent v32, gate/reviewer v21, grouped answers v4, writer v16; context v8 and
+control-pixel v3 remain unchanged. Start a fresh current-version run for a separately authorized live
+test; do not upgrade or resume an older run with changed components.
 
 ### Historical question-link presentation stability (agent v31)
 
@@ -26,7 +301,7 @@ Arbitrary question-prefix matching is no longer accepted. A supplement's explici
 truncated heading (`-:` or `...`) can match a longer main-form question only when the
 truncated heading is independently located in native PDF text. Image-only truncation,
 wrong roles, missing/forged receipts and pointers used as answer text still reject.
-Differently worded questions remain for Slice 2; this is not semantic-reuse completion.
+This source-navigation change alone does not establish semantic applicability; see Slice 2 above.
 
 Offline replay of `df859ab2...` now accepts 47 answers instead of 46. Q3 is newly written,
 Q1 and Q10 remain written, and no previously written answers are lost. The original run
@@ -37,7 +312,7 @@ answers, including Q3; its already-withheld Q1 is not retroactively answered.
 Validation: **1,480 passed, 42 skipped on Python 3.12 and 3.13**, including 38 new cases.
 No paid calls or model-quality evaluations were performed. Agent v31, gate v20 and
 writer v15 record the changed behavior; historical context v8 and control-pixel v3
-remain unchanged. Use a fresh v31 run for a separately authorized live test; do not
+remain unchanged. Use a fresh current-version run for a separately authorized live test; do not
 resume an older run with changed component versions.
 
 ### Historical-control pixel stability and label grounding (agent v30)

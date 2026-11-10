@@ -33,12 +33,18 @@ from bd_packet_builder.followup import (
 from bd_packet_builder.proposals import ModelAnswerValue, ModelProposal
 from bd_packet_builder.run import RunManifest
 
-GROUP_VERSION = "answer-groups-v3"
+GROUP_VERSION = "answer-groups-v11"
 GROUP_SIZE = 5
 MAX_GROUP_ATTEMPTS = 3
 GROUP_TIMEOUT_SECONDS = 180
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_VERIFICATION_REQUESTS = 20
+MAX_EVIDENCE_CONTINUATIONS = 2
+EVIDENCE_CONTINUATION = (
+    "The evidence phase is not finished: finish_evidence has not been called, and a text reply "
+    "does not end it. Continue with evidence tools if more approved evidence is needed, "
+    "otherwise call finish_evidence now."
+)
 ProposeGroup = Callable[[dict[str, Any]], Awaitable[str]]
 ANSWER_INSTRUCTIONS = (
     AGENT_INSTRUCTIONS
@@ -52,14 +58,21 @@ candidate_readings are untrusted observations, NOT verified citations. They pres
 context. When a needed fact is visible there but lacks a checked quote, return a narrow
 verification_requests entry instead of calling it missing business evidence. Use only discovered
 source/page pairs. For scans copy a short exact OCR quote and give the source subject.
-For an explicit USD minimum, request minimum_amount with an exact criterion_quote from this
-requirement/option, field_label and line_label. quote must be the amount alone. Code verifies
+For an explicit USD minimum, request minimum_amount with an exact criterion_quote from the
+assigned requirement/option containing that minimum and report line. Do not attach a criterion
+to a generic proof/attachment requirement that does not contain it. field_label is copied from
+the source report row, not the application question; line_label must occur in criterion_quote.
+quote must be the amount alone. Code verifies
 the same-row label/amount/line in OCR AND independent image text and compares Decimal values.
 For a current-evidence eligibility claim, one successful condition does not establish the others.
 The separate historical-eligibility entry governs checked historical draft selections:
 missing current proof of an individual condition must not silently disable that draft path.
 Application code verifies requests and returns verification_results to this group only.
 There are at most two follow-up rounds within three group calls and twenty requests per run.
+verification_budget gives the remaining group calls and verification allowance. If
+followup_allowed is false or requests_remaining is zero, return complete proposals with
+NO verification_requests. Retain already supported answers, including eligible historical
+drafts, and explain unresolved conditions. Never claim an unperformed verification succeeded.
 If evidence remains unresolved, give its specific failure reason. For compound requirements
 return condition_assessments for each condition, including not_searched, verification_failed,
 source_lacks_fact, contradictions and evidence-backed non-applicability. These are model
@@ -67,6 +80,9 @@ assessments, never trusted reviewer approvals. For a checked historical draft, u
 current-condition assessments are reviewer concerns, not a demand to withhold the prior answer.
 Use conflicting_evidence only for actual contradictory evidence or unresolved source readings,
 not an unsuccessful current corroboration attempt. A missing handoff quote is not missing evidence.
+Fields in a representative_bios field_requirements mapping are filled by code from the selected
+bio's printed card. Propose the best supported value, but never mark them conflicting because
+the bio lacks labels or history differs; code reconciles and reports differences.
 Do not include other requirements, signatures or signature dates. A saved proposal is not
 validated evidence or human approval. previous_errors are application feedback to correct.
 """
@@ -384,8 +400,36 @@ async def _attempt_group(
         return record
     if batch.verification_requests:
         if not can_followup or len(batch.verification_requests) > requests_remaining:
+            if set(ids) != assigned:
+                record.update(
+                    status="invalid_response", error={"code": "evidence_followup_limit_exceeded"}
+                )
+                return record
+            results = [
+                {
+                    "ok": False,
+                    "request": request.model_dump(mode="json"),
+                    "error": "evidence_followup_limit_exceeded",
+                }
+                for request in batch.verification_requests
+            ]
+            tools.answer_checkpoint(
+                name.replace(".json", "-verification.json"),
+                {"results": results, **tools.answer_verification_state()},
+            )
+            tools.answer_progress(
+                "Evidence follow-up limit reached; no verification performed. "
+                "Complete proposals will undergo final validation with explicit review concerns."
+            )
+            staged = json.loads(
+                tools.call(
+                    "stage_answers",
+                    _staging_response(batch, [*payload.get("verification_results", []), *results]),
+                )
+            )
             record.update(
-                status="invalid_response", error={"code": "evidence_followup_limit_exceeded"}
+                status="staged_unvalidated" if staged["ok"] else "invalid_response",
+                error=staged.get("error"),
             )
             return record
         prior_requests = [r["request"] for r in payload.get("verification_results", [])]
@@ -547,17 +591,26 @@ async def run_answer_groups(
             incomplete = True
             continue
         for attempt in range(len(records) + 1, MAX_GROUP_ATTEMPTS + 1):
-            payload = {
-                **_verification_handoff(tools, handoff, prefix),
-                "requirements": group,
-                "assigned_requirement_ids": plan["groups"][index],
-                "previous_errors": [r["error"] for r in records if r.get("error")],
-            }
             verification_used = sum(
                 len(json.loads(tools.answer_artifact(a.name))["requests"])
                 for a in tools.manifest().artifacts
                 if a.name.endswith("-verification-request.json")
             )
+            calls_remaining = min(
+                MAX_GROUP_ATTEMPTS - attempt + 1, plan["group_model_limit"] - attempts_used
+            )
+            requests_remaining = max(0, MAX_VERIFICATION_REQUESTS - verification_used)
+            payload = {
+                **_verification_handoff(tools, handoff, prefix),
+                "requirements": group,
+                "assigned_requirement_ids": plan["groups"][index],
+                "previous_errors": [r["error"] for r in records if r.get("error")],
+                "verification_budget": {
+                    "group_calls_remaining": calls_remaining,
+                    "requests_remaining": requests_remaining,
+                    "followup_allowed": calls_remaining > 1 and requests_remaining > 0,
+                },
+            }
             name = f"{prefix}{attempt}.json"
             attempts_used += 1
             record = await _attempt_group(
@@ -565,8 +618,8 @@ async def run_answer_groups(
                 propose,
                 payload,
                 name,
-                MAX_VERIFICATION_REQUESTS - verification_used,
-                attempt < MAX_GROUP_ATTEMPTS and attempts_used < plan["group_model_limit"],
+                requests_remaining,
+                calls_remaining > 1,
             )
             tools.answer_checkpoint(name, record)
             records.append(record)
@@ -616,9 +669,9 @@ async def run_grouped_packet_agent(
     """Keep agentic evidence discovery; code owns the answering and publication phases."""
     configure_client(client, tools.limits)
     # Reserve half the calls for discovery, including the SDK's final no-tools turn.
-    client.function_invocation_configuration["max_iterations"] = max(
-        1, tools.limits.max_turns // 2 - 1
-    )
+    # Continuations after a premature text reply share this one budget.
+    evidence_budget = max(1, tools.limits.max_turns // 2 - 1)
+    client.function_invocation_configuration["max_iterations"] = evidence_budget
     client.function_invocation_configuration["allow_concurrent_invocation"] = False
     client.compaction_strategy = None
     evidence_tools = [
@@ -636,20 +689,53 @@ async def run_grouped_packet_agent(
     )
     started = time.monotonic()
     if not resume and tools.manifest().status in ("created", "form_interpreted"):
-        try:
-            await agent.run(
-                "Collect approved evidence, then finish_evidence. Begin with get_run_status."
+        session = agent.create_session()
+        prompt = "Collect approved evidence, then finish_evidence. Begin with get_run_status."
+        continuations = 0
+        model_calls = 0
+        while True:
+            remaining = evidence_budget - model_calls
+            if remaining <= 0:
+                return tools.fail(
+                    "evidence_stopped_early",
+                    "Evidence phase ended without handoff; evidence model-call budget "
+                    f"({evidence_budget}) exhausted after {continuations} continuation(s).",
+                )
+            client.function_invocation_configuration["max_iterations"] = remaining
+            try:
+                response = await agent.run(prompt, session=session)
+            except AgentFrameworkException as error:
+                diagnostic = _technical_error(error)
+                return tools.fail(
+                    "evidence_model_failed",
+                    "Evidence model call failed: " + " -> ".join(diagnostic["causes"]),
+                )
+            # Each model call yields exactly one assistant message in the run's response.
+            model_calls += max(1, sum(m.role == "assistant" for m in response.messages))
+            status = tools.manifest().status
+            if status == "failed":
+                return tools.manifest()
+            if status == "evidence_collected":
+                break
+            if status not in ("created", "form_interpreted"):
+                return tools.fail("evidence_stopped_early", "Evidence phase ended without handoff.")
+            if continuations >= MAX_EVIDENCE_CONTINUATIONS:
+                return tools.fail(
+                    "evidence_stopped_early",
+                    f"Evidence phase ended without handoff after {continuations} continuation(s).",
+                )
+            if time.monotonic() - started >= tools.limits.max_seconds:
+                return tools.fail(
+                    "evidence_stopped_early",
+                    "Evidence phase ended without handoff; elapsed-time budget exhausted.",
+                )
+            continuations += 1
+            # The model's text is not logged; it may quote confidential source content.
+            tools.answer_progress(
+                "Evidence model ended its turn without finish_evidence; continuation "
+                f"{continuations}/{MAX_EVIDENCE_CONTINUATIONS}"
             )
-        except AgentFrameworkException as error:
-            diagnostic = _technical_error(error)
-            return tools.fail(
-                "evidence_model_failed",
-                "Evidence model call failed: " + " -> ".join(diagnostic["causes"]),
-            )
-        if tools.manifest().status == "failed":
-            return tools.manifest()
-        if tools.manifest().status != "evidence_collected":
-            return tools.fail("evidence_stopped_early", "Evidence phase ended without handoff.")
+            prompt = EVIDENCE_CONTINUATION
 
     answer_agent = Agent(
         client,

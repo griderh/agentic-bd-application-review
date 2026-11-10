@@ -205,6 +205,8 @@ def test_purpose_catalog_exposes_only_approved_supporting_families() -> None:
 
     assert documents["Bloomberg_League_Tables"]["routing"] == "retrieval-allowlisted"
     assert documents["bios"]["routing"] == "retrieval-allowlisted"
+    assert "historical assignments remain" in documents["bios"]["identity_matching"].lower()
+    assert "separate" in documents["bios"]["identity_matching"].lower()
     assert documents["Cover_Letters"]["routing"] == "navigation-only"
     cover = documents["Cover_Letters"]
     assert "unsigned" in " ".join(cover["inclusion_conditions"]).lower()

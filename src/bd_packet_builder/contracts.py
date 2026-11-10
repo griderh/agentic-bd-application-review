@@ -277,7 +277,7 @@ class HistoricalContextCitation(Contract):
 
 class HistoricalCorrespondence(Contract):
     target_question: Nonblank
-    assessment: Literal["applicable", "uncertain", "incompatible"]
+    assessment: Literal["applicable", "partially_applicable", "uncertain", "incompatible"]
     differences: Nonblank
     reason: Nonblank
 

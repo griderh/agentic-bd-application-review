@@ -299,6 +299,7 @@ def historical_issues(
     historical_policy: HistoricalReusePolicy = "conservative",
     calculation_date: date | None = None,
     verified_current_scans: tuple[OcrCitation, ...] = (),
+    require_applicability: bool = False,
 ) -> tuple[tuple[str, ...], EvidenceStatus]:
     """Check provenance and bounded reuse, not semantic equivalence or human approval."""
     sources = {s.source_id: s for s in inventory.sources}
@@ -320,11 +321,18 @@ def historical_issues(
     if basis.additional_contexts and not context_verified:
         issues.append("historical_composition_requires_checked_relationship")
     correspondence = basis.correspondence
+    semantic_reuse = require_applicability and historical_policy == "answer_first_review"
+    if semantic_reuse and correspondence is None:
+        issues.append("historical_question_correspondence_required")
     if correspondence is not None:
         if correspondence.target_question != requirement.instruction:
             issues.append("historical_target_question_mismatch")
         if correspondence.assessment == "incompatible":
             issues.append("historical_question_incompatible")
+        elif semantic_reuse and correspondence.assessment == "uncertain":
+            issues.append("historical_question_applicability_uncertain")
+        elif correspondence.assessment == "partially_applicable":
+            issues.append("historical_question_partially_applicable")
     if basis.category in ("tenure", "headcount", "eligibility") and (
         historical_policy != "answer_first_review"
     ):

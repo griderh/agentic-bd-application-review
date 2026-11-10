@@ -21,12 +21,14 @@ SUBJECT = "Example Firm"
 TEXT = f"Name of Firm: {SUBJECT}\nAs of: 2026-07-31\nNet capital $ {AMOUNT} [3750]"
 
 
-def prepared(tmp_path, monkeypatch, *, image_row=None, line_confidence=96):
+def prepared(
+    tmp_path, monkeypatch, *, image_row=None, line_confidence=96, question=QUESTION, text=TEXT
+):
     from bd_packet_builder import ocr
 
     buffer = BytesIO()
     canvas = Canvas(buffer, pagesize=(612, 792), invariant=True)
-    canvas.drawString(40, 732, QUESTION)
+    canvas.drawString(40, 732, question)
     canvas.save()
     mapper = Mock()
     mapper.map_pages.return_value = {
@@ -35,21 +37,21 @@ def prepared(tmp_path, monkeypatch, *, image_row=None, line_confidence=96):
                 {
                     "readable": True,
                     "explanation": None,
-                    "items": [visual_item("amount", QUESTION, "text", nbox(40, 70, 400, 90))],
+                    "items": [visual_item("amount", question, "text", nbox(40, 70, 400, 90))],
                 }
             )
         )
     }
-    setup = Setup(tmp_path, buffer.getvalue(), mapper=mapper, evidence_text=TEXT, scanned=True)
+    setup = Setup(tmp_path, buffer.getvalue(), mapper=mapper, evidence_text=text, scanned=True)
     reader = Mock()
     reader.transcribe.return_value = ScanTranscript(
         readable=True,
         subject=SUBJECT,
-        text=image_row or TEXT,
+        text=image_row or text,
         reporting_period=ReportingPeriod(start=date(2026, 7, 31), end=date(2026, 7, 31)),
     )
     rows = []
-    for line, words in enumerate(TEXT.splitlines(), 1):
+    for line, words in enumerate(text.splitlines(), 1):
         for word, token in enumerate(words.split(), 1):
             confidence = line_confidence if token == "[3750]" else 96
             rows.append(
@@ -82,6 +84,132 @@ def prepared(tmp_path, monkeypatch, *, image_row=None, line_confidence=96):
     )
     call(tools, "finish_evidence")
     return setup, tools, reader, source
+
+
+@pytest.mark.parametrize("case", ["valid", "wrong_field", "wrong_line", "wrong_requirement"])
+def test_minimum_amount_binds_criterion_to_issuer_and_field_to_source(tmp_path, monkeypatch, case):
+    question = (
+        "Provide most recent FOCUS report showing a minimum net capital of $10 million "
+        "on either line 3750 or line 3760 of the Report."
+    )
+    field = "Net capital (Line 8 minus Line 12)"
+    text = TEXT.replace("Net capital", field)
+    setup, tools, reader, source = prepared(tmp_path, monkeypatch, question=question, text=text)
+    handoff = json.loads(setup.artifact("answer_handoff.json"))
+    if case == "wrong_requirement":
+        handoff["requirements"][0]["instruction"] = "Attach proof of eligibility."
+    request = VerificationRequest(
+        requirement_id="p1.amount",
+        source_id=source,
+        page=1,
+        method="scan",
+        quote=AMOUNT,
+        expected_subject=SUBJECT,
+        minimum_amount={
+            "criterion_quote": question,
+            "field_label": "Unrelated capital" if case == "wrong_field" else field,
+            "line_label": "9999" if case == "wrong_line" else "3750",
+        },
+    )
+    result = tools.verify_answer_evidence(request, handoff)
+    assert result["ok"] == (case == "valid"), result
+    if case == "valid":
+        assert result["minimum_amount_result"]["meets_minimum"] is True
+        assert result["minimum_amount_result"]["field_label"] == field
+    else:
+        assert result["error"]
+    assert reader.transcribe.call_count == 1
+
+
+@pytest.mark.parametrize("outcome", ["proposed", "unsupported", "missing_evidence", "incomplete"])
+def test_final_followup_request_preserves_complete_proposals_without_new_verification(
+    tmp_path, monkeypatch, outcome
+):
+    setup, tools, reader, source = prepared(tmp_path, monkeypatch)
+    calls = []
+    verification_calls = Mock(wraps=tools.verify_answer_evidence)
+    monkeypatch.setattr(tools, "verify_answer_evidence", verification_calls)
+
+    async def propose(payload):
+        calls.append(payload)
+        request = {
+            "requirement_id": "p1.amount",
+            "source_id": source,
+            "page": 1,
+            "method": "scan",
+            "quote": SUBJECT,
+            "expected_subject": SUBJECT,
+        }
+        if len(calls) < 3:
+            return json.dumps({"proposals": [], "verification_requests": [request]})
+        proposals = []
+        if outcome in ("proposed", "unsupported"):
+            proposals = [
+                {
+                    "requirement_id": "p1.amount",
+                    "outcome": "proposed",
+                    "confidence": 0.9,
+                    "value": {
+                        "kind": "text",
+                        "value": AMOUNT if outcome == "unsupported" else SUBJECT,
+                    },
+                    "citations": [payload["verification_results"][0]["citation"]],
+                }
+            ]
+        elif outcome == "missing_evidence":
+            proposals = [
+                {
+                    "requirement_id": "p1.amount",
+                    "outcome": outcome,
+                    "explanation": "The monetary condition remains unresolved.",
+                }
+            ]
+        request["quote"] = AMOUNT
+        request["minimum_amount"] = {
+            "criterion_quote": QUESTION,
+            "field_label": "Net capital",
+            "line_label": "3750",
+        }
+        return json.dumps({"proposals": proposals, "verification_requests": [request]})
+
+    if outcome == "proposed":
+        dispatch = tools.call
+
+        def interrupt_before_submit(name, arguments):
+            if name == "submit_answers":
+                raise asyncio.CancelledError
+            return dispatch(name, arguments)
+
+        monkeypatch.setattr(tools, "call", interrupt_before_submit)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run_answer_groups(tools, propose))
+        fresh = setup.tools(scan_reader=reader)
+
+        async def unexpected(payload):
+            pytest.fail("Saved complete proposals must not be regenerated on resume.")
+
+        final = asyncio.run(run_answer_groups(fresh, unexpected, resume=True))
+    else:
+        final = asyncio.run(run_answer_groups(tools, propose))
+    assert final.status == ("failed" if outcome == "incomplete" else "published")
+    assert len(calls) == 3
+    assert [p["verification_budget"]["group_calls_remaining"] for p in calls] == [3, 2, 1]
+    assert [p["verification_budget"]["followup_allowed"] for p in calls] == [True, True, False]
+    assert verification_calls.call_count == 1
+    assert reader.transcribe.call_count == 1
+    record = json.loads(setup.artifact("answer-group-000-attempt-3.json"))
+    if outcome == "incomplete":
+        assert record["error"]["code"] == "evidence_followup_limit_exceeded"
+    else:
+        assert record["status"] == "staged_unvalidated"
+        blocked = json.loads(setup.artifact("answer-group-000-attempt-3-verification.json"))
+        assert blocked["results"][0]["error"] == "evidence_followup_limit_exceeded"
+        assert blocked["results"][0]["ok"] is False
+        summary = setup.artifact("reviewer-summary.txt").decode()
+        assert "evidence_followup_limit_exceeded" in summary
+        assert "Checked monetary condition:" not in summary
+        draft = json.loads(setup.artifact("draft.json"))
+        assert draft["written_requirements"] == (["p1.amount"] if outcome == "proposed" else [])
 
 
 @pytest.mark.parametrize("case", ["agrees", "wrong_row", "low_line_confidence"])

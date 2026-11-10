@@ -150,6 +150,11 @@ def test_composed_printed_identity_requires_exact_same_role_parts(
         "changed_condition",
         "forged_link_hash",
         "native_truncated_heading",
+        "native_truncated_midword",
+        "native_truncated_wrong_partial",
+        "native_punctuation_transposed",
+        "native_punctuation_decorated",
+        "image_only_punctuation_transposed",
         "image_only_truncated_heading",
     ],
 )
@@ -172,11 +177,27 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         monkeypatch,
         primary_answer="Blair Example" if change == "not_a_pointer" else "See supplement",
         historical_policy="answer_first_review",
-        native_questions=change == "native_truncated_heading",
+        native_questions=change
+        in (
+            "native_truncated_heading",
+            "native_truncated_midword",
+            "native_truncated_wrong_partial",
+            "native_punctuation_transposed",
+            "native_punctuation_decorated",
+        ),
         primary_question="3. Name"
         if change in ("omitted_answer_number", "number_punctuation", "conflicting_numbers")
         else "Name if authorized"
-        if change in ("native_truncated_heading", "image_only_truncated_heading")
+        if change
+        in (
+            "native_truncated_heading",
+            "native_truncated_midword",
+            "native_truncated_wrong_partial",
+            "image_only_truncated_heading",
+            "image_only_punctuation_transposed",
+            "native_punctuation_transposed",
+            "native_punctuation_decorated",
+        )
         else "Name",
         secondary_question={
             "different_question": "Title",
@@ -185,8 +206,20 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
             "conflicting_numbers": "4. Name",
             "changed_condition": "Name if authorized",
             "native_truncated_heading": "Name-:",
+            "native_truncated_midword": "Na-:",
+            "native_truncated_wrong_partial": "Nx-:",
+            "native_punctuation_transposed": "Name-:",
+            "native_punctuation_decorated": "Name-:",
+            "image_only_punctuation_transposed": "Name-:",
             "image_only_truncated_heading": "Name-:",
         }.get(change, "Name"),
+        secondary_image_question=(
+            "Name:-"
+            if change in ("native_punctuation_transposed", "image_only_punctuation_transposed")
+            else "Name?!:-"
+            if change == "native_punctuation_decorated"
+            else None
+        ),
         secondary_role="Backup representative"
         if change == "different_role"
         else "Primary representative",
@@ -198,6 +231,11 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         "conflicting_numbers",
         "changed_condition",
         "native_truncated_heading",
+        "native_truncated_midword",
+        "native_truncated_wrong_partial",
+        "native_punctuation_transposed",
+        "native_punctuation_decorated",
+        "image_only_punctuation_transposed",
         "image_only_truncated_heading",
     ):
         from bd_packet_builder import ocr
@@ -278,6 +316,12 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         proposal,
         (answer,) if change == "missing_receipt" else checks,
         {},
+        allow_disagreements=change
+        in (
+            "native_punctuation_transposed",
+            "native_punctuation_decorated",
+            "image_only_punctuation_transposed",
+        ),
     )
     accepted = change in (
         "none",
@@ -285,6 +329,9 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         "omitted_answer_number",
         "number_punctuation",
         "native_truncated_heading",
+        "native_truncated_midword",
+        "native_punctuation_transposed",
+        "native_punctuation_decorated",
     )
     assert (not issues and bool(snapshots)) == accepted
     if accepted:
@@ -305,6 +352,8 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
                 "changed_condition": "historical_question_link_question_mismatch",
                 "forged_link_hash": "historical_question_link_receipt_missing",
                 "image_only_truncated_heading": "historical_question_link_question_mismatch",
+                "native_truncated_wrong_partial": "historical_question_link_question_mismatch",
+                "image_only_punctuation_transposed": "historical_question_link_question_mismatch",
             }[change],
         )
     if change in (
@@ -313,7 +362,20 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         "number_punctuation",
         "conflicting_numbers",
         "changed_condition",
+        "native_punctuation_transposed",
+        "native_punctuation_decorated",
     ):
+        if change.startswith("native_punctuation"):
+            handoff = json.loads(setup.artifact("answer_handoff.json"))
+            association = next(
+                c
+                for c in handoff["historical_candidates"]
+                if c["context_citation"]["check_sha256"] == answer.context_citation.check_sha256
+            )
+            assert association["discrepancies"][0]["code"] == (
+                "historical_question_presentation_resolved"
+            )
+            assert answer.discrepancies[0].code == "historical_text_or_region_disagrees"
         target = next(
             r
             for r in json.loads(setup.artifact("form_interpretation.json"))["requirements"][
@@ -354,6 +416,9 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
         if accepted:
             summary = setup.artifact("reviewer-summary.txt").decode()
             assert "HISTORICAL - CONTINUITY UNCONFIRMED" in summary
+            if change.startswith("native_punctuation"):
+                assert "QUESTION PRESENTATION RESOLVED" in summary
+                assert "Neither reading is preferred" not in summary
         if change == "conflicting_numbers":
             request = DraftRequest.model_validate_json(setup.artifact("draft_request.json"))
             review = DraftReview.model_validate_json(setup.artifact("answer_review.json"))
@@ -487,6 +552,70 @@ def test_native_tenure_with_image_date_requires_independently_rechecked_signing_
     assert (not issues and bool(snapshots)) == (change == "none")
 
 
+@pytest.mark.parametrize(
+    ("ocr_question", "image_question", "resolved"),
+    [
+        ("Name-:", "Name:-", True),
+        ("Name:", "Name?!", True),
+        ("3. Name:", "Name?", True),
+        ("Name:", "(3) Name?", True),
+        ("Name:", "NAME;", True),
+        ("Name:", "Name if authorized", False),
+        ("3. Name", "4. Name", False),
+        ("Capital $10.5 million", "Capital $105 million", False),
+        ("Rule 15c3-1", "Rule 15c31", False),
+        ("Value -5", "Value 5", False),
+    ],
+)
+def test_question_presentation_is_resolved_in_handoff_without_changing_receipts(
+    tmp_path, monkeypatch, ocr_question, image_question, resolved
+):
+    setup, tools, reader, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        secondary_question=ocr_question,
+        secondary_image_question=image_question,
+        historical_policy="answer_first_review",
+    )
+    reading = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    candidate = reading["associations"][1]
+    call(tools, "finish_evidence")
+    checks = json.loads(setup.artifact("historical_context_checks.json"))["checks"]
+    # Receipts retain original evidence; resolution is derived for the answering handoff.
+    matching = next(c for c in checks if c["field"]["question"]["text"] == image_question)
+    if matching["discrepancies"]:
+        assert matching["discrepancies"][0]["code"] == "historical_text_or_region_disagrees"
+    differences = candidate["discrepancies"]
+    if differences:
+        assert (differences[0]["code"] == "historical_question_presentation_resolved") == resolved
+    handoff = json.loads(setup.artifact("answer_handoff.json"))
+    assert handoff["historical_candidates"][1] == candidate
+    assert reader.transcribe.call_count == 1
+
+
+@pytest.mark.parametrize("image_question", ["Name:-", "(3) Name?!", "NAME;"])
+def test_selected_control_presentation_does_not_spend_a_focused_reread(
+    tmp_path, monkeypatch, image_question
+):
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_question="Name-:",
+        primary_image_question=image_question,
+        control_state="selected",
+        historical_policy="answer_first_review",
+    )
+    request, review = validated_page(setup, tools, prior, current)
+    assert review.decisions[0].decision == "draft_verified", review.decisions[0].reason
+    assert reader.transcribe.call_count == 1
+    handoff = json.loads(setup.artifact("answer_handoff.json"))
+    assert handoff["historical_candidates"][0]["printed_resolutions"] == []
+    assert any(
+        d["code"] == "historical_question_presentation_resolved"
+        for d in handoff["historical_candidates"][0]["discrepancies"]
+    )
+
+
 def box(left: int, top: int, right: int, bottom: int) -> dict:
     return dict(left=left, top=top, right=right, bottom=bottom)
 
@@ -504,6 +633,7 @@ def setup_page(
     repeated_answer: bool = False,
     question_prefix: str = "",
     primary_question: str = "Name",
+    primary_image_question: str | None = None,
     primary_answer: str = NAME,
     control_state: str | None = None,
     second_control: bool = False,
@@ -512,6 +642,7 @@ def setup_page(
     control_on_right: bool = False,
     secondary_role: str = "Backup representative",
     secondary_question: str = "Name",
+    secondary_image_question: str | None = None,
     secondary_answer: str = "Blair Example",
     primary_role: str = "Primary representative",
     evidence_text: str = EVIDENCE_TEXT,
@@ -521,6 +652,10 @@ def setup_page(
     unboxed_control: bool = False,
     check_rise: int = 21,
     native_questions: bool = False,
+    draft_schema_version: int = 1,
+    primary_ocr_answer: str | None = None,
+    primary_ocr_confidence: int = 96,
+    primary_image_answer: str | None = None,
 ):
     setup = Setup(tmp_path, blank_pdf(), evidence_text=evidence_text, scanned=scanned_current)
     target = setup.evidence_root / PRIOR
@@ -555,7 +690,10 @@ def setup_page(
         canvas.line(280, 710, 288, 718)
         canvas.line(280, 718, 288, 710)
     if scanned_answer:
-        canvas.drawString((470 if right_column else 180) + primary_x_offset, 710, primary_answer)
+        for index, line in enumerate(primary_answer.splitlines()):
+            canvas.drawString(
+                (470 if right_column else 180) + primary_x_offset, 710 - index * 12, line
+            )
         canvas.drawString(180, 570, NAME if repeated_answer else secondary_answer)
     canvas.save()
     with (
@@ -573,7 +711,8 @@ def setup_page(
             for index, line in enumerate(primary_write_in.splitlines()):
                 canvas.drawString(240 + primary_x_offset, 710 - index * 12, line)
         if not scanned_answer:
-            canvas.drawString(470 if right_column else 180, 710, primary_answer)
+            for index, line in enumerate(primary_answer.splitlines()):
+                canvas.drawString(470 if right_column else 180, 710 - index * 12, line)
             if second_control:
                 canvas.drawString(300, 710, "No")
             canvas.drawString(180, 570, NAME if repeated_answer else secondary_answer)
@@ -608,15 +747,23 @@ def setup_page(
                 "text": (
                     question_prefix + " " + primary_question
                     if question_prefix
-                    else primary_question
+                    else primary_image_question or primary_question
                 ),
                 "box": box(60, 95, 140, 120),
             },
             "role": {"text": primary_role, "box": box(60, 55, 350, 80)},
-            "answer": {"text": primary_answer, "box": box(290, 95, 480, 120)},
+            "answer": {
+                "text": primary_image_answer or primary_answer,
+                "box": box(
+                    290, 95, 480, 120 + 15 * ((primary_image_answer or primary_answer).count("\n"))
+                ),
+            },
         },
         {
-            "question": {"text": secondary_question, "box": box(60, 270, 140, 295)},
+            "question": {
+                "text": secondary_image_question or secondary_question,
+                "box": box(60, 270, 140, 295),
+            },
             "role": {"text": secondary_role, "box": box(60, 230, 350, 255)},
             "answer": {
                 "text": NAME if repeated_answer else secondary_answer,
@@ -640,7 +787,9 @@ def setup_page(
         fields[0]["answer"] = fields[1]["answer"]
     if right_column:
         fields[0]["question"]["box"] = box(660, 95, 750, 120)
-        fields[0]["answer"]["box"] = box(780, 95, 960, 120)
+        fields[0]["answer"]["box"] = box(
+            780, 95, 960, 120 + 15 * ((primary_image_answer or primary_answer).count("\n"))
+        )
     if competing_header:
         fields.append(
             {
@@ -683,6 +832,12 @@ def setup_page(
         ("Avery" if repeated_answer else secondary_answer.split()[0], 760, 915),
         ("Example" if repeated_answer else secondary_answer.split()[1], 980, 915),
     ]
+    if primary_ocr_answer is not None:
+        words[3:5] = [
+            (word, (1960 if right_column else 760) + 140 * i, 330 + 50 * line_index)
+            for line_index, line in enumerate(primary_ocr_answer.splitlines())
+            for i, word in enumerate(line.split())
+        ]
     if competing_header:
         words[2:2] = [("Desk", 1375, 170), ("manager", 1600, 170)]
     if primary_x_offset:
@@ -691,16 +846,25 @@ def setup_page(
         "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
         "left\ttop\twidth\theight\tconf\ttext\n"
     )
+
+    def word_confidence(text, x, y):
+        if primary_ocr_answer is not None and y == 330 and x >= 760:
+            return primary_ocr_confidence
+        return 89 if repeated_answer and text in ("Avery", "Example") else confidence
+
     tsv = header + "".join(
-        f"5\t1\t1\t1\t{i + 1}\t1\t{x}\t{y}\t180\t40\t"
-        f"{89 if repeated_answer and text in ('Avery', 'Example') else confidence}\t{text}\n"
+        f"5\t1\t1\t1\t{i + 1}\t1\t{x}\t{y}\t180\t40\t{word_confidence(text, x, y)}\t{text}\n"
         for i, (text, x, y) in enumerate(words)
     )
     monkeypatch.setattr(
         "bd_packet_builder.ocr._execute",
         lambda command, *_: "tesseract 5.5.0\n" if "--version" in command else tsv,
     )
-    tools = setup.tools(scan_reader=reader, evidence_limits=evidence_limits)
+    tools = setup.tools(
+        scan_reader=reader,
+        evidence_limits=evidence_limits,
+        draft_schema_version=draft_schema_version,
+    )
     call(tools, "interpret_form")
     sources = call(tools, "list_sources")["sources"]
     prior = next(s for s in sources if s["family"] == "historical_reference")
@@ -1210,7 +1374,7 @@ def test_disputed_readings_preserve_both_without_selecting_an_unverified_winner(
     assert json.loads(setup.artifact("draft.json"))["written_requirements"] == []
 
 
-def validated_page(setup, tools, prior, current, expected_answered=1):
+def validated_page(setup, tools, prior, current, expected_answered=1, answer=NAME):
     result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
     first = result["associations"][0]
     citation = call(
@@ -1227,7 +1391,7 @@ def validated_page(setup, tools, prior, current, expected_answered=1):
         "requirement_id": "p1.name",
         "outcome": "proposed",
         "confidence": 0.9,
-        "value": {"kind": "text", "value": NAME},
+        "value": {"kind": "text", "value": answer},
         "citations": [first["answer_citation"]],
         "historical_basis": {
             "category": "contact",
@@ -1250,6 +1414,96 @@ def validated_page(setup, tools, prior, current, expected_answered=1):
     request = DraftRequest.model_validate_json(raw)
     review = DraftReview.model_validate_json(setup.artifact("answer_review.json"))
     return request, review
+
+
+@pytest.mark.parametrize("ocr_problem", ["low_confidence", "missing_continuation", "table_order"])
+def test_native_verified_narrative_is_not_vetoed_by_weaker_layout_signals(
+    tmp_path, monkeypatch, ocr_problem
+):
+    answer = (
+        "City A; 555-0101\nCity B; 555-0102"
+        if ocr_problem == "table_order"
+        else "Managing Director\nInstitutional Sales"
+    )
+    ocr_answer = {
+        "low_confidence": answer,
+        "missing_continuation": answer.splitlines()[0],
+        "table_order": "City A; City B;\n555-0101 555-0102",
+    }[ocr_problem]
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_answer=answer,
+        primary_ocr_answer=ocr_answer,
+        primary_ocr_confidence=80 if ocr_problem == "low_confidence" else 96,
+        historical_policy="answer_first_review",
+    )
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    candidate = result["associations"][0]
+    assert candidate["candidate_answer"] == answer
+    assert "evidence_kind" not in candidate["answer_citation"]
+    assert "answer_layout" not in candidate
+    _, review = validated_page(setup, tools, prior, current, answer=answer)
+    assert review.decisions[0].decision == "draft_verified"
+    call(tools, "assemble_packet")
+    call(tools, "publish_results")
+    text = " ".join(
+        page.extract_text() for page in PdfReader(BytesIO(setup.artifact("packet.pdf"))).pages
+    )
+    for line in answer.splitlines():
+        assert line in text
+    assert "HISTORICAL - CONTINUITY UNCONFIRMED" in setup.artifact("reviewer-summary.txt").decode()
+    assert reader.transcribe.call_count == 1
+
+
+def test_native_verified_narrative_with_imperfect_ocr_reaches_the_supplement(tmp_path, monkeypatch):
+    answer = "Managing Director\nInstitutional Sales"
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_answer=answer,
+        primary_ocr_answer=answer,
+        primary_ocr_confidence=80,
+        historical_policy="answer_first_review",
+    )
+    request, review = validated_page(setup, tools, prior, current, answer=answer)
+    raw = request.model_dump(mode="json")
+    requirement = raw["requirements"]["requirements"][0]
+    requirement["kind"] = "narrative"
+    raw["requirements"]["requirements"] = [requirement]
+    mapping = raw["layout"]["responses"][0]
+    mapping["requirement"] = requirement
+    mapping["narrative_region"] = mapping["text_region"]
+    mapping["text_region"] = None
+    raw["layout"]["responses"] = [mapping]
+    raw["proposals"]["proposals"] = raw["proposals"]["proposals"][:1]
+    raw["proposals"]["proposals"][0]["value"] = {"kind": "narrative", "value": answer}
+    request = DraftRequest.model_validate_json(json.dumps(raw))
+    data = request.model_dump_json().encode()
+    gated = validate_answers(
+        setup.evidence_root,
+        request,
+        hashlib.sha256(data).hexdigest(),
+        historical_context_checks=review.historical_context_checks,
+    )
+    assert gated.decisions[0].decision == "draft_verified"
+    blank = setup.evidence_root / request.source
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    blank.write_bytes(setup.blank)
+    path = Path("outputs/native-narrative.json")
+    (setup.evidence_root / path).write_bytes(data)
+    output = publish_draft(
+        setup.evidence_root, path, data, request, gated, gated.model_dump_json().encode(), None
+    )
+    report = json.loads((output / "draft.json").read_bytes())
+    assert report["placements"]["p1.name"]["mode"] == "supplement"
+    assert report["render_checks"]["supplement_pages_rendered_and_text_checked"] == 1
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+    packet = PdfReader(output / "draft-packet.pdf")
+    for line in answer.splitlines():
+        assert line in packet.pages[1].extract_text()
+    assert "See Supplemental Answers, p1.name, packet page 2." in packet.pages[0].extract_text()
+    assert reader.transcribe.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -2061,6 +2315,355 @@ def test_historical_scanned_narrative_uses_relationship_not_scalar_receipt(tmp_p
         historical_context_checks=review.historical_context_checks,
     )
     assert gated.decisions[0].decision == "draft_verified"
+
+
+NARRATIVE = "Agency bond desk"
+
+
+def narrative_dispute(
+    tmp_path, monkeypatch, *, native=False, outcome="resolved", limit=None, confidence=96
+):
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        scanned_answer=not native,
+        historical_policy="answer_first_review",
+        evidence_limits=limit,
+        primary_answer=NARRATIVE,
+        primary_ocr_answer=NARRATIVE,
+        primary_ocr_confidence=confidence,
+    )
+    initial = reader.transcribe.return_value.model_dump(mode="json")
+    # Omit an interior word from the image reading, not the source or local OCR.
+    initial["historical_fields"][0]["answer"]["text"] = "Agency desk"
+    initial = ScanTranscript.model_validate_json(json.dumps(initial))
+    focused = ScanTranscript(
+        readable=outcome != "unreadable",
+        subject=None,
+        text=(
+            NARRATIVE
+            if outcome in ("resolved", "unreadable")
+            else "Treasury desk"
+            if outcome == "third_reading"
+            else "Agency desk"
+        ),
+        reporting_period=None,
+    )
+    reader.transcribe.side_effect = [initial, focused]
+    return setup, tools, reader, prior, current
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_plain_answer_dispute_is_recovered_before_answering(tmp_path, monkeypatch, native):
+    setup, tools, reader, prior, _ = narrative_dispute(tmp_path, monkeypatch, native=native)
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] == NARRATIVE
+    assert first["printed_reading_issues"] == []
+    assert len(first["printed_resolutions"]) == 1
+    assert first["discrepancies"][0]["code"] == "historical_printed_text_resolved"
+    assert reader.transcribe.call_count == (1 if native else 2)
+    # Blind: only image bytes, never the alternative readings or suggested answer.
+    assert all(len(c.args) == 1 and not c.kwargs for c in reader.transcribe.call_args_list)
+    call(tools, "finish_evidence")
+    receipt = HistoricalContextCheck.model_validate_json(
+        json.dumps(json.loads(setup.artifact("historical_context_checks.json"))["checks"][0])
+    )
+    assert receipt.field.answer.text == "Agency desk"
+    assert receipt.effective_field.answer.text == NARRATIVE
+    # A restarted answering worker consumes persisted receipts, without another model call.
+    restarted = setup.tools(scan_reader=reader)
+    assert restarted.answer_handoff()["historical_candidates"][0]["candidate_answer"] == NARRATIVE
+    assert reader.transcribe.call_count == (1 if native else 2)
+
+
+def test_focused_recovery_keeps_corroborated_low_confidence_words_without_an_extent_veto(
+    tmp_path, monkeypatch
+):
+    from bd_packet_builder import ocr
+
+    _, tools, reader, prior, _ = narrative_dispute(tmp_path, monkeypatch)
+    execute = ocr._execute
+
+    def low_confidence(command, *args):
+        output = execute(command, *args)
+        if "--version" in command:
+            return output
+        rows = []
+        for line in output.splitlines():
+            fields = line.split("\t")
+            if len(fields) == 12 and fields[-1] == "Agency":
+                fields[10] = "68"
+            rows.append("\t".join(fields))
+        return "\n".join(rows) + "\n"
+
+    monkeypatch.setattr(ocr, "_execute", low_confidence)
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    candidate = result["associations"][0]
+    assert candidate["candidate_answer"] == NARRATIVE
+    assert candidate["printed_resolutions"][0]["status"] == "resolved"
+    assert "answer_layout" not in candidate
+    assert candidate["printed_reading_issues"] == []
+    assert reader.transcribe.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("outcome", "max_pages", "issue", "calls"),
+    [
+        ("disagrees", 12, "answer:disagrees", 2),
+        ("unreadable", 12, "answer:disagrees", 2),
+        ("third_reading", 12, "answer:disagrees", 2),
+        ("resolved", 1, "answer:budget_exhausted", 1),
+    ],
+)
+def test_plain_answer_recovery_never_chooses_an_unverified_reading(
+    tmp_path, monkeypatch, outcome, max_pages, issue, calls
+):
+    _, tools, reader, prior, _ = narrative_dispute(
+        tmp_path,
+        monkeypatch,
+        outcome=outcome,
+        limit=EvidenceLimits(max_ocr_pages=max_pages),
+    )
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] is None
+    assert first["printed_resolutions"] == []
+    assert first["printed_reading_issues"] == [issue]
+    assert reader.transcribe.call_count == calls
+    assert (
+        call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1}) == result
+    )
+    assert reader.transcribe.call_count == calls
+
+
+def recovered_narrative_draft(tmp_path, monkeypatch, *, outcome="resolved", max_pages=12):
+    setup, tools, reader, prior, current = narrative_dispute(
+        tmp_path, monkeypatch, outcome=outcome, limit=EvidenceLimits(max_ocr_pages=max_pages)
+    )
+    request, review = validated_page(
+        setup,
+        tools,
+        prior,
+        current,
+        answer=NARRATIVE,
+        expected_answered=int(outcome == "resolved" and max_pages > 1),
+    )
+    raw = request.model_dump(mode="json")
+    requirement = raw["requirements"]["requirements"][0]
+    requirement["kind"] = "narrative"
+    raw["requirements"]["requirements"] = [requirement]
+    mapping = raw["layout"]["responses"][0]
+    mapping["requirement"] = requirement
+    mapping["narrative_region"] = {**mapping["text_region"], "bottom": 600.0}
+    mapping["text_region"] = None
+    raw["layout"]["responses"] = [mapping]
+    raw["proposals"]["proposals"][0]["value"] = {"kind": "narrative", "value": NARRATIVE}
+    raw["proposals"]["proposals"] = raw["proposals"]["proposals"][:1]
+    request = DraftRequest.model_validate_json(json.dumps(raw))
+    digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+    gated = validate_answers(
+        setup.evidence_root,
+        request,
+        digest,
+        historical_context_checks=review.historical_context_checks,
+    )
+    return setup, reader, request, gated
+
+
+@pytest.mark.parametrize("tamper", ["none", "crop_hash", "transcription", "confidence"])
+def test_recovered_narrative_survives_gate_writer_and_rejects_tampering(
+    tmp_path, monkeypatch, tamper
+):
+    setup, reader, request, review = recovered_narrative_draft(tmp_path, monkeypatch)
+    assert review.decisions[0].decision == "draft_verified"
+    checks = review.historical_context_checks
+    if tamper in ("crop_hash", "transcription"):
+        raw = checks[0].model_dump(mode="json")
+        reading = raw["printed_readings"][0]
+        if tamper == "crop_hash":
+            reading["crop_sha256"] = "0" * 64
+        else:
+            reading["focused"]["text"] = "Agency desk"
+        checks = (HistoricalContextCheck.model_validate_json(json.dumps(raw)),)
+        basis = request.proposals.proposals[0].historical_basis
+        assert basis is not None
+        proposal = request.proposals.proposals[0].model_copy(
+            update={
+                "historical_basis": basis.model_copy(
+                    update={"prior_question": checks[0].context_citation}
+                )
+            }
+        )
+        request = request.model_copy(
+            update={"proposals": request.proposals.model_copy(update={"proposals": (proposal,)})}
+        )
+    elif tamper == "confidence":
+        artifact = setup.evidence_root / checks[0].question.artifact_path
+        data = json.loads(artifact.read_bytes())
+        data["words"][4]["confidence"] = 20
+        artifact.write_text(json.dumps(data))
+    digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+    gated = validate_answers(setup.evidence_root, request, digest, historical_context_checks=checks)
+    assert (gated.decisions[0].decision == "draft_verified") == (tamper == "none")
+    # The writer must recheck even a stale positive review.
+    stale = review.model_copy(
+        update={"request_sha256": digest, "historical_context_checks": checks}
+    )
+    blank = setup.evidence_root / request.source
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    blank.write_bytes(setup.blank)
+    request_path = Path("outputs/recovered-narrative.json")
+    request_bytes = request.model_dump_json().encode()
+    (setup.evidence_root / request_path).write_bytes(request_bytes)
+    output = publish_draft(
+        setup.evidence_root,
+        request_path,
+        request_bytes,
+        request,
+        stale,
+        stale.model_dump_json().encode(),
+        None,
+    )
+    report = json.loads((output / "draft.json").read_bytes())
+    assert (report["answers"][0]["status"] == "written_to_draft") == (tamper == "none")
+    text = PdfReader(output / "draft-packet.pdf").pages[0].extract_text()
+    assert (NARRATIVE in text) == (tamper == "none")
+    if tamper == "none":
+        summary = (output / "reviewer-summary.txt").read_text()
+        assert "PRINTED-WORDING CHECK: answer; status=resolved" in summary
+        assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+    assert reader.transcribe.call_count == 2
+
+
+def test_recovered_narrative_source_mutation_is_a_technical_failure(tmp_path, monkeypatch):
+    from bd_packet_builder.inventory import InventoryError
+
+    setup, _, request, review = recovered_narrative_draft(tmp_path, monkeypatch)
+    path = setup.evidence_root / PRIOR
+    path.write_bytes(path.read_bytes() + b"\n")
+    with pytest.raises(InventoryError, match="Archive source changed"):
+        validate_answers(
+            setup.evidence_root,
+            request,
+            review.request_sha256,
+            historical_context_checks=review.historical_context_checks,
+        )
+
+
+def test_low_confidence_unmatched_word_stays_disputed_even_after_reread(tmp_path, monkeypatch):
+    _, tools, reader, prior, _ = narrative_dispute(tmp_path, monkeypatch, confidence=89)
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] is None
+    assert first["printed_reading_issues"] == ["answer:disagrees"]
+    assert reader.transcribe.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("outcome", "max_pages", "status"),
+    [("disagrees", 12, "disagrees"), ("resolved", 1, "budget_exhausted")],
+)
+def test_unresolved_narrative_is_blank_with_recovery_outcome_in_summary(
+    tmp_path, monkeypatch, outcome, max_pages, status
+):
+    setup, reader, request, review = recovered_narrative_draft(
+        tmp_path, monkeypatch, outcome=outcome, max_pages=max_pages
+    )
+    assert review.decisions[0].decision == "withhold"
+    blank = setup.evidence_root / request.source
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    blank.write_bytes(setup.blank)
+    raw = request.model_dump_json().encode()
+    request_path = Path("outputs/unresolved-narrative.json")
+    (setup.evidence_root / request_path).write_bytes(raw)
+    output = publish_draft(
+        setup.evidence_root,
+        request_path,
+        raw,
+        request,
+        review,
+        review.model_dump_json().encode(),
+        None,
+    )
+    report = json.loads((output / "draft.json").read_bytes())
+    assert report["answers"][0]["status"] == "blank"
+    summary = (output / "reviewer-summary.txt").read_text()
+    assert f"PRINTED-WORDING CHECK: answer; status={status}" in summary
+    assert NARRATIVE not in PdfReader(output / "draft-packet.pdf").pages[0].extract_text()
+    assert reader.transcribe.call_count == (1 if max_pages == 1 else 2)
+
+
+@pytest.mark.parametrize("part", ["question", "role"])
+def test_plain_answer_recovery_does_not_resolve_a_disputed_association(tmp_path, monkeypatch, part):
+    _, tools, reader, prior, _ = narrative_dispute(tmp_path, monkeypatch)
+    initial = reader.transcribe.side_effect
+    transcript = next(initial).model_dump(mode="json")
+    transcript["historical_fields"][0][part]["text"] = (
+        "Account number" if part == "question" else "Account manager"
+    )
+    reader.transcribe.side_effect = [ScanTranscript.model_validate_json(json.dumps(transcript))]
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] is None
+    assert first["printed_resolutions"] == []
+    assert any(d["part"] == part for d in first["discrepancies"])
+    assert reader.transcribe.call_count == 1
+
+
+def test_v8_plain_answer_receipts_replay_without_new_recovery(tmp_path, monkeypatch):
+    setup, tools, _, prior, _ = narrative_dispute(tmp_path, monkeypatch)
+    call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    call(tools, "finish_evidence")
+    raw = json.loads(setup.artifact("historical_context_checks.json"))["checks"][0]
+    raw["version"] = "historical-page-context-v8"
+    raw["printed_readings"] = []
+    raw["discrepancies"][0]["code"] = "historical_text_or_region_disagrees"
+    raw["discrepancies"][0]["selection_reason"] = (
+        "Neither reading is preferred. Compare the localized alternatives with "
+        "independent identity-linked evidence before choosing a value. "
+        "If the difference cannot be resolved, leave the field blank."
+    )
+    legacy = HistoricalContextCheck.model_validate_json(json.dumps(raw))
+    payload = json.dumps(raw, separators=(",", ":"), ensure_ascii=False).encode()
+    assert legacy.context_citation.check_sha256 == hashlib.sha256(payload).hexdigest()
+    from bd_packet_builder.history import with_historical_sources
+    from bd_packet_builder.inventory import build_inventory
+
+    inventory = with_historical_sources(
+        setup.evidence_root,
+        build_inventory(setup.evidence_root),
+        setup.store.load(setup.manifest.run_id).request.historical_archive,
+    )
+    artifact = (setup.evidence_root / legacy.question.artifact_path).read_bytes()
+    assert legacy.printed_readings == ()
+    assert legacy.answer_disputed
+    assert legacy.recheck(setup.evidence_root, inventory, artifact, allow_disagreements=True)
+
+
+def test_v9_recovery_receipt_keeps_its_hash_and_replays_without_layout_checks(
+    tmp_path, monkeypatch
+):
+    from bd_packet_builder.history import with_historical_sources
+    from bd_packet_builder.inventory import build_inventory
+
+    setup, tools, _, prior, _ = narrative_dispute(tmp_path, monkeypatch)
+    call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    call(tools, "finish_evidence")
+    raw = json.loads(setup.artifact("historical_context_checks.json"))["checks"][0]
+    raw["version"] = "historical-page-context-v9"
+    raw["prompt_version"] = "scan-cross-check-v6"
+    payload = json.dumps(raw, separators=(",", ":"), ensure_ascii=False).encode()
+    legacy = HistoricalContextCheck.model_validate_json(payload)
+    assert legacy.context_citation.check_sha256 == hashlib.sha256(payload).hexdigest()
+    assert not legacy.answer_disputed
+    inventory = with_historical_sources(
+        setup.evidence_root,
+        build_inventory(setup.evidence_root),
+        setup.store.load(setup.manifest.run_id).request.historical_archive,
+    )
+    artifact = (setup.evidence_root / legacy.question.artifact_path).read_bytes()
+    assert legacy.recheck(setup.evidence_root, inventory, artifact, allow_disagreements=True)
 
 
 def test_role_answer_swap_is_withheld_by_page_geometry(

@@ -41,13 +41,18 @@ from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.reconciliation import RequirementAssessment
 from bd_packet_builder.scan import ExhibitImageCheck, ScanCheck
 
-GATE_VERSION = "answer-gate-v20"
-GATE_REVIEWER = "application_validation_gate_v20"
+GATE_VERSION = "answer-gate-v24"
+GATE_REVIEWER = "application_validation_gate_v22"
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
 def _normalized(text: str) -> str:
     return " ".join(text.casefold().split())
+
+
+def _lines_as_list(text: str) -> str:
+    # A value printed across several lines (e.g. a stacked title) may be written as "a, b".
+    return ", ".join(line.strip() for line in text.splitlines() if line.strip())
 
 
 def validate_answers(
@@ -200,6 +205,7 @@ def validate_answers(
                 historical_policy=request.historical_policy,
                 calculation_date=request.calculation_date,
                 verified_current_scans=tuple(c for c, _ in context_snapshots),
+                require_applicability=request.schema_version == 2,
             )
             issues.extend(history_issues)
             for citation in proposal.citations:
@@ -242,7 +248,11 @@ def validate_answers(
             if (
                 isinstance(value, TextValue)
                 and not context_verified
-                and not any(_normalized(value.value) in _normalized(q) for q in quotes)
+                and not any(
+                    _normalized(value.value) in _normalized(variant)
+                    for q in quotes
+                    for variant in (q, _lines_as_list(q))
+                )
             ):
                 issues.append("text_value_not_in_cited_evidence")
         unique = tuple(dict.fromkeys(issues))

@@ -132,6 +132,55 @@ issuer-specific synonym lists to solve this case.
 
 ### Slice 2 - Make semantic applicability explicit in the existing answer contract
 
+**Mid-word truncation follow-up:** gate v23/writer v18 accept a truncated heading whose final
+word is cut off (`public-:` before `public-sector`) only when all earlier words match exactly and
+every existing native/pointer/source/role check passes.
+
+**Source-presentation follow-up:** agent v34/grouped answers v6/gate v22/writer v17
+share a question-only presentation comparator upstream and in source navigation. Punctuation,
+case, wrapping and missing question labels do not become unresolved factual conflicts when
+substantive wording agrees. Conflicting explicit labels, values, conditions and identifiers
+remain protected. Resolved discrepancies are derived handoff annotations; source readings,
+context-v8 hashes and schema-2 proposals stay immutable. Truncated headings retain independent
+native-region confirmation and pointer/source/role checks. This is source-fidelity handling,
+not an expansion of semantic reuse eligibility or partial writing.
+Validation: 1,564 passed, 46 skipped on each Python target, including 57 new synthetic cases;
+lint, format and strict types pass. No paid evaluation or fresh Q10 coverage measurement.
+
+**Implementation status:** implemented in agent v32, gate/reviewer v21, grouped answers v4
+and writer v16. New agent requests use schema 2; explicit legacy requests can retain schema 1.
+Under `answer_first_review`, source-backed proposals must include an exact-target assessment.
+Applicable extractive answers retain continuity warnings without a mandatory current
+corroboration prerequisite. Partial/uncertain/incompatible/missing assessments withhold
+individual answers and report explanations and gaps internally; partial writing is not enabled.
+Existing conservative-policy behavior is unchanged. The new `partially_applicable` label
+withholds under all schemas/policies; it cannot bypass the deferred partial-writing work.
+
+The existing handoff already carries target instructions, checked historical question/answer
+associations and current evidence. Correspondence is produced and archived in the same
+grouped answer call, then rechecked by the final gate and independent writer. No extra
+semantic judge, dependency, call or retrieval mechanism was added.
+
+The lexical audit retains source-only question/supplement navigation and literal-value
+checks. A disputed historical selected-control question can still require source-reading
+reconciliation bound to a verified native target; semantic correspondence does not bypass
+that restriction. Multi-piece composition retains its existing same-source/role relationships.
+Cross-packet composition and structured partial-coverage spans remain Slice 3 work.
+
+Validation: 16 new offline contract cases include all assessments, missing correspondence,
+grouped schema-2 publication/archiving, target mismatch, altered receipt, role mismatch,
+period mismatch, current contradiction, legacy/conservative compatibility and prevention of
+partial-writing bypass through those compatibility paths. Gate plus
+independent-writer cases verify extraction, blank behavior and separate continuity/applicability
+review messages. Full suites: **1,496 passed, 46 skipped on Python 3.12 and 3.13**; Ruff
+lint/format, strict mypy on both targets and whitespace checks pass.
+Offline gate replay preserves all 48 latest accepted answers (`f1833520...`) and all 46
+previously accepted answers plus Slice 1's Q3 (`df859ab2...`) under both request schemas;
+original artifact hashes remain unchanged. Four synthetic model-evaluation cases were
+prepared before the prompt change but **not executed**. These offline results establish
+contracts and replay compatibility, not model semantic quality or zero hallucinations.
+Use a fresh versioned run for separately authorized paid validation.
+
 **Purpose:** implement new-form reuse, rather than just make identical forms less brittle.
 
 1. Reuse `HistoricalCorrespondence`; require a target-bound assessment for historical proposals

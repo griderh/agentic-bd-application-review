@@ -2,6 +2,120 @@
 
 Status: implementation roadmap, rebaselined October 28, 2026.
 
+**Slice 4 withdrawn (agent v39/groups v11):** the business owner approved removing the new
+layout veto after v38 run `a3fec3e3...` withheld Q3/Q10/Q11/Q12 and generated no supplement.
+Restore scan v6/context v9/gate v24/writer v19: remove layout-based approval, completeness
+schema/prompt additions and related reporting. Preserve Slices 1-3, narrative rereading,
+historical safeguards and evidence-phase continuation. Existing native/image/OCR verification
+remains responsible for answers; weaker layout signals no longer add a blanket veto.
+Synthetic regression coverage includes native-backed narratives with low-confidence or partial
+OCR, table order, actual supplemental rendering and corroborated focused recovery.
+Do not rewrite or resume v38/context-v10 runs; restart workers and start a fresh run.
+No paid calls. Broader multiline extraction is deferred pending a demonstrated failure.
+Rollback validation: 1,689 passed, 51 skipped on each Python target (3.12 and 3.13);
+Ruff lint/format, strict mypy and whitespace checks pass. Model quality remains unverified
+until the fresh real-packet run.
+Next: fresh paid packet verification of the restored baseline before further development.
+
+**Evidence-phase continuation (groups v9):** a model text reply before `finish_evidence` no
+longer fails the run immediately. Code resumes the same local conversation with a fixed prompt
+at most twice, within the original evidence model-call and elapsed-time budgets; repeated stops
+fail explicitly. Model text is not logged. Validation: 1,683 passed, 51 skipped on each Python
+target; Ruff, strict mypy and whitespace checks pass. Three new offline cases; no paid calls.
+
+**Historical narrative recovery (agent v37/groups v8/context v9):** extend existing bounded
+printed-wording recovery to plain historical answer text, including narratives, before handing
+candidates to answering. Require an established question/role relationship; preserve selected
+control checks. Try localized source-native text, otherwise one blind answer-region reread
+within the shared scan budget. Accept only OCR corroboration under existing confidence checks.
+Disagreement, unreadability, insufficient confidence and budget exhaustion remain explicit
+unresolved outcomes, not permission to choose either reading. Retain original readings and
+hashed receipts; gate/writer replay without new calls. Context v8 hashes and control-only
+behavior remain compatible. This resolves transcription only, not current continuity,
+applicability, financial periods or missing support. No paid calls or edits to original runs.
+Validation: 1,680 passed, 51 skipped on each Python target; Ruff lint/format, strict mypy and
+whitespace checks pass. Seventeen new offline cases cover recovered and unresolved narrative
+output, shared budgets, native recovery, replay, low confidence and tampering. Two new
+synthetic narrative transcription evaluation cases remain unexecuted (0/2); no live model
+quality claim is made.
+Slice 4 was withdrawn above; confirm the restored baseline and narrative recovery in a fresh run.
+
+**Representative details, Slice 3 (writer v19):** implemented. Short single-box text answers,
+issuer-form fields and write-ins keep 10 pt when they fit, otherwise use the largest size down to
+a 6 pt minimum (approved by the business owner) that fits, wrapping within the reviewed box
+height. Only answers that do not fit at 6 pt use the supplement. Placements record fit, size and
+line count; the internal summary lists non-standard fits for legibility review. Rendered checks
+are unchanged and accept PDFium's line-ending hyphen marker inline. Validation: 1,663 passed,
+49 skipped on Python 3.12 and 3.13; Ruff, strict mypy clean; 0 paid evaluations executed.
+Next: one fresh live run covering Slices 2 and 3.
+
+**Representative details, Slice 2 (agent v36/gate v24/groups v7/source context v7/bios v2):**
+implemented. Discovery maps each representative's text title/telephone/email requirements to
+the bio link. Code extracts the printed name/title/contact card as exact rechecked spans and,
+at submission, deterministically reconciles mapped fields: bio titles take precedence; contacts
+keep a prior answer containing a bio value (phones keyed by digits, email exact
+case-insensitive) and report historical-only details such as mobile numbers; otherwise the bio
+value is used. Every selected bio is attached once with a manifest reason. Card absence is a
+review exception; a post-selection bio change fails the run. Reconciliation is recorded in
+`representative_contacts.json` and the internal summary, never as currency confirmation. The
+gate accepts multiline quotes rendered with ", " separators. Validation: 1,658 passed,
+49 skipped on Python 3.12 and 3.13; Ruff, strict mypy clean; 0 paid evaluations executed.
+Slice 3 (above) then added inline short-field placement and wrapping.
+
+**Representative details, Slice 1 (November 9, 2026; agent v35):** add bounded, typed
+representative-to-bio identity resolution to discovery, not a second employee database or agent.
+Keep application role assignment separate from biography identity: require explicit source
+assignment or a rechecked historical name/role receipt, preserving unconfirmed continuity.
+Match complete native subject headings or independently verified OCR identity/subject evidence;
+never select by filename, similar names or incidental prose mentions. Record source hashes,
+deduplicate identical bytes and hold distinct matching versions for review rather than choosing
+by filename/date. Missing/ambiguous/unverified/budget-limited results and recognizable omitted
+representative-name requirements are explicit per-role review exceptions. Persist links in
+private evidence artifacts, answering handoff and the internal summary; do not approve answers
+or claim current currency. Existing source boundaries, budgets and source-change failures apply.
+Source context v6 reflects separate role evidence rather than demanding a current roster to
+record a historical identity link. Full offline validation: 1,616 passed, 49 skipped on each
+Python target; Ruff lint/format, strict mypy and whitespace checks passed. Python 3.13 used a
+fresh pinned-requirements venv with clean `pip check`. Autonomous model selection is unmeasured;
+no paid calls or original-run modifications were made.
+Three opt-in synthetic role-selection evaluation cases were added; 0/3 executed.
+
+Slice 2 (above) then coupled bio-grounded title/contact selection with mandatory attachment.
+Compare contacts individually, preserving historical-only mobile details without treating absence
+as contradiction. Then add safe inline short-field placement, general multiline historical
+extraction improvements and end-to-end rendered-packet validation. Slice 1 intentionally does not
+change field values, attachment inclusion requirements, font sizing or narrative overflow.
+
+**Mid-word truncated headings (gate v23/writer v18):** a truncated supplement heading may end
+inside its final word (`public-:` for `public-sector`). Earlier words must match exactly, the final
+partial word must be a prefix and the full question must be longer; all native, pointer, numbering,
+source and role checks remain.
+
+**General question presentation (agent v34/grouped answers v6/gate v22/writer v17):**
+share question presentation comparison across extraction handoff and source navigation.
+Resolve punctuation/case/wrapping/omitted-number differences upstream as derived annotations,
+not new source transcriptions; preserve original context-v8 receipts and hashes. Explicit
+conflicting labels, substantive wording, numeric values/signs/operators/units and identifiers
+remain significant. Truncation permits varied terminal dash/ellipsis punctuation but still
+requires native source-region confirmation and existing pointer/source/role checks.
+Do not use presentation normalization for answer values or semantic approval.
+Synthetic tests cover handoff, selected controls without extra rereads, and gate/writer output.
+Validation: 1,564 passed, 46 skipped on both Python targets; Ruff, strict mypy and whitespace
+checks pass. No paid calls, scripts or original-run edits; fresh autonomous Q10 output remains
+unmeasured. Start a fresh run after component changes.
+
+**Q1 follow-up correction (agent v33/grouped answers v5):** keep the minimum criterion
+and report-line selection tied to the assigned application question, but validate the
+report field label against the source row rather than requiring it in the issuer wording.
+Preserve source/subject/row/unit checks. Answer calls expose their remaining budgets.
+Complete proposals returned with blocked follow-up requests retain explicit verification
+failure notes and undergo the normal gate/writer; unverified content stays unsupported.
+Incomplete responses still fail for recovery. No increase to call/request limits.
+Eleven regression cases cover the two failures and their safety/replay boundaries.
+Validation: 1,507 passed, 46 skipped on both Python runtimes; Ruff, strict mypy and
+whitespace checks pass. No paid calls, ad hoc scripts or saved-run edits. Fresh runs
+are required after the version change; the exhausted `b5f81fc6...` group cannot resume.
+
 **Next grounding increment (November 6, 2026):** follow the
 [semantic reuse development plan](semantic-grounding-development-plan.md). Separate source
 fidelity, semantic applicability, partial coverage, reuse eligibility and currency. Reuse
@@ -10,7 +124,16 @@ agent/retrieval subsystem. Slice 1 is implemented (agent v31/gate v20/writer v15
 is separate from substantive wording, and only native-verified explicit supplemental
 truncation permits a longer linked question. Saved-run replay restores Q3 without losing
 Q1/Q10 or other written answers. Both Python suites pass 1,480 tests with 42 opt-in skips.
-Semantic applicability and partial coverage remain unimplemented; continue with Slice 2.
+Slice 2 is implemented (agent v32/gate v21/grouped answers v4/writer v16). New schema-2
+`answer_first_review` proposals require exact-target correspondence assessed in the existing
+answer call; applicable extractive content can be written with unconfirmed continuity.
+Partial, uncertain, incompatible or missing correspondence is an explicit per-answer exception.
+Source fidelity, business prohibitions and deterministic role/period/conflict checks remain.
+Schema-1 replay/conservative behavior is preserved. Saved-run replay retains all 48 latest
+accepted answers under both schemas and preserves Slice 1's Q3 recovery. Validation:
+1,496 passed, 46 skipped on each Python target; Ruff, strict mypy and whitespace checks pass.
+No paid model evaluation ran; semantic-quality effectiveness is unmeasured. Continue with
+Slice 3 for partial extractive writing, followed by the remaining wiring/evaluation slices.
 
 **Historical-control pixel stability and label grounding (v30):** evaluate rectangle, circle and connected-check
 evidence together within a bounded hint neighborhood. Anchor intact circles to pixel
