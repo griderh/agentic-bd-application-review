@@ -226,7 +226,7 @@ def extract_evidence(
         data = read_source_bytes(root, inventory, source.source_id)
         pages: list[PageEvidence] = []
         flags: tuple[str, ...] = ()
-        if source.format != "pdf" or source.page_count is None:
+        if source.page_count is None:
             flags = ("native_text_unavailable",)
         else:
             if source.page_count > limits.max_pages_per_document:

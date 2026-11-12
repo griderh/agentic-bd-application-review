@@ -268,7 +268,7 @@ def resolve_representative_bio(
         listing = tools.list_sources(family="bios")
         for source in listing.sources:
             digest = next(s.sha256 for s in inventory.sources if s.source_id == source.source_id)
-            if source.format != "pdf" or source.page_count is None:
+            if source.page_count is None:
                 issues.append("bio_identity_reading_unverified")
                 continue
             identity: Citation | OcrCitation | None = None

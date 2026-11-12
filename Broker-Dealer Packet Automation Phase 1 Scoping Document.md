@@ -112,6 +112,21 @@ The agent reads only from designated, named folders, and picks the applicable ve
 5. If an explicit requirement cannot be met, the agent continues with available, relevant approved documentation where it can be used without misrepresenting the answer. The reviewer summary quotes the requirement, identifies the document and period actually used, and explains the mismatch or missing evidence. Unsupported answers remain blank; no unsupported certification of compliance is entered.
 6. The agent records the file name, period, and path of every document used, including any mismatch with the issuer's request.
 
+**Snapshot identification and version clarification (sponsor approved November 12, 2026):**
+For approved screenshot/image/PDF supplements, establish contextual relevance from recognizable
+visible contents, not full numerical transcription. A visible reporting year, full printed date
+or exact legal subject is not universally required for attachment identification. Missing those
+details alone does not prevent inclusion when the document's relevance is established.
+Among contextually comparable snapshots, prefer PDF CreationDate for PDFs and genuine capture
+metadata for images, falling back to unambiguous dated filenames. This narrowly supersedes the
+mismatch-only metadata rule above for snapshots, not financial reporting-period selection.
+Creation time is an accepted version-ranking heuristic, not proof of capture, publication,
+freshness or reporting period. Do not discard a relevant older candidate solely because a newer
+unidentified file exists, or override explicit content contradictions with a timestamp.
+Keep official period reports separately from relevant supplements. Unresolved relevance, date
+ordering and unmet explicit issuer requirements remain reviewer exceptions. Recognizing and
+attaching a document never verifies its unreadable figures or authorizes unsupported answers.
+
 Financial reporting beyond the FOCUS report and audited financials sits outside the agent's folders. When a request asks for it, the agent flags the request and the business owner decides.
 
 **Evidence-first clarification (October 21, 2026):** the earlier fact-sheet references in this scope describe a derived view of supported facts, not a workbook humans must populate or maintain. The application extracts facts needed by the current application from approved supporting documents, verifies deterministic values and context where possible, and asks humans only to resolve missing, conflicting or ambiguous evidence. An Excel view is optional for inspection/export, not a required input or parallel source of truth. Keep machine-readable facts, checks, source versions and correction history in a separate internal JSON archive; do not generate a new Excel workbook on every run.

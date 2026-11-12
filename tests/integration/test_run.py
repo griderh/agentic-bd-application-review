@@ -161,6 +161,7 @@ def test_run_ids_are_unique_and_isolated(store: FileRunStore) -> None:
     [
         ("answer_groups_incomplete", "Answer group needs recovery.", True),
         ("answer_validation_failed", "Submission validation failed.", True),
+        ("packet_assembly_failed", "Assembly cannot resume from evidence collection.", False),
         (
             "tool_execution_failed",
             "submit_answers failed unexpectedly (ValidationError); the run was stopped.",

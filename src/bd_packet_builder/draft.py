@@ -147,7 +147,8 @@ def conditional_applicability(
     )
 
 
-MAX_PACKET_PAGES = 100
+MAX_PACKET_PAGES = 200
+MAX_INPUT_PAGES = 100
 BANNER_HEIGHT = 24
 RENDER_SCALE = 2
 MAX_RENDER_PIXELS = 12_000_000
@@ -1063,7 +1064,7 @@ def _writable(mapped: MappedResponse) -> list[PageBox | NarrativeRegion]:
 
 def _validate_pdf(data: bytes, *, blank: bool) -> PdfReader:
     reader = PdfReader(BytesIO(data))
-    if reader.is_encrypted or not reader.pages or len(reader.pages) > MAX_PACKET_PAGES:
+    if reader.is_encrypted or not reader.pages or len(reader.pages) > MAX_INPUT_PAGES:
         raise DraftError("Draft input is encrypted, empty or exceeds the page limit")
     if blank and any(
         field.get("/V") not in (None, "", "/Off") for field in (reader.get_fields() or {}).values()
@@ -1120,10 +1121,25 @@ def selected_inventory(root: Path, request: DraftRequest) -> Inventory:
     selected: list[SourceRecord] = []
     for expected in request.sources:
         source = next((s for s in inventory.sources if s.path == expected.path), None)
-        if source is None or source.sha256 != expected.sha256 or source.format != "pdf":
-            raise DraftError("Draft supporting source is missing, changed or not a PDF")
+        if source is None or source.sha256 != expected.sha256 or source.page_count is None:
+            raise DraftError("Draft supporting source is missing, changed or has no readable page")
         selected.append(source)
     return Inventory(inventory.created_at, tuple(selected), ())
+
+
+def order_attachment_sources(
+    sources: tuple[SourceRecord, ...], checklist_source_ids: tuple[str, ...] = ()
+) -> tuple[SourceRecord, ...]:
+    """Keep families together, positioning checklist-linked families before other support."""
+    by_id = {source.source_id: source for source in sources}
+    families = dict.fromkeys(
+        [
+            *(by_id[identity].family for identity in checklist_source_ids if identity in by_id),
+            *(source.family for source in sources),
+        ]
+    )
+    ranks = {family: index for index, family in enumerate(families)}
+    return tuple(sorted(sources, key=lambda source: ranks[source.family]))
 
 
 def _draw_text(canvas: Canvas, placement: TextPlacement) -> None:
@@ -1426,7 +1442,14 @@ def publish_draft(
     if any(sources[i].family == "historical_reference" for i in request.attachments):
         raise DraftError("Historical packets must never be submission attachments")
     attachment_ids = [
-        identity for identity in request.attachments if identity in review.attachment_source_ids
+        source.source_id
+        for source in order_attachment_sources(
+            tuple(
+                sources[identity]
+                for identity in request.attachments
+                if identity in review.attachment_source_ids
+            )
+        )
     ]
     attachments = [
         (sources[identity], read_source_bytes(root, inventory, identity))
@@ -1453,11 +1476,14 @@ def publish_draft(
         exhibit_data.append((exhibit, data, _validate_pdf(data, blank=False)))
     exhibit_page_count = sum(len(r.pages) for _, _, r in exhibit_data)
     form_count = len(reader.pages) + sum(len(form.pages) for _, _, form in additional_forms_data)
-    if (
+    base_page_count = (
         form_count + exhibit_page_count + sum(len(r.pages) for _, r in attachment_readers)
-        > MAX_PACKET_PAGES
-    ):
-        raise DraftError("Draft packet exceeds its total page budget")
+    )
+    if base_page_count > MAX_PACKET_PAGES:
+        raise DraftError(
+            "Draft packet exceeds its total page budget "
+            f"({base_page_count} > {MAX_PACKET_PAGES} pages before supplemental answers)"
+        )
     decisions = {d.requirement_id: d for d in review.decisions}
     mappings = {m.requirement.requirement_id: m for m in request.layout.responses}
     texts: list[TextPlacement] = []
@@ -1506,15 +1532,12 @@ def publish_draft(
         if full is None:
             raise DraftError("Answer has an unbreakable word that cannot fit")
         count = max(1, math.ceil(len(full) / SUPPLEMENT_LINES))
-        if (
-            supplement_page_count
-            + count
-            + form_count
-            + exhibit_page_count
-            + sum(len(r.pages) for _, r in attachment_readers)
-            > MAX_PACKET_PAGES
-        ):
-            raise DraftError("Answer exceeds the bounded supplemental page budget")
+        total_pages = base_page_count + supplement_page_count + count
+        if total_pages > MAX_PACKET_PAGES:
+            raise DraftError(
+                "Answer exceeds the bounded supplemental page budget "
+                f"({total_pages} > {MAX_PACKET_PAGES} total packet pages)"
+            )
         supplement_starts[identity] = supplement_page_count + 1
         supplement_page_count += count
         supplements.append((identity, full))
@@ -2144,7 +2167,7 @@ def publish_draft(
     payload: dict[str, object] = {
         "domain_knowledge": knowledge_context(),
         "schema_version": 1,
-        "writer_version": "reviewed-draft-overlay-v19",
+        "writer_version": "reviewed-draft-overlay-v20",
         "created_at": datetime.now(UTC).isoformat(),
         "status": "incomplete_draft_not_for_submission",
         "mode": request.mode,

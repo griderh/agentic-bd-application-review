@@ -66,7 +66,7 @@ def test_evidence_tool_order_includes_attachment_planning_and_continuation_guida
     normalized_instructions = " ".join(AGENT_INSTRUCTIONS.split())
     assert "plan_supporting_document" in ordered_workflow
     assert "plan_supporting_documents" in ordered_workflow
-    assert AGENT_VERSION == "packet-agent-v46"
+    assert AGENT_VERSION == "packet-agent-v50"
     assert GROUP_VERSION == "answer-groups-v13"
     assert "not a subset exempt from a decision" in normalized_instructions
     assert "exactly one decision for every candidate" in normalized_instructions
@@ -102,6 +102,39 @@ def test_grouped_answering_persists_proposals_and_publishes_through_gate(tmp_pat
         calls[0]["source_context"]["domain_knowledge"]["sha256"] == application["reference_sha256"]
     )
     assert "supporting-documents" in setup.artifact("reviewer-summary.txt").decode()
+
+
+def test_assembly_failure_resumes_validated_artifacts_without_answer_or_mapping_calls(
+    tmp_path, monkeypatch
+):
+    from bd_packet_builder import draft
+
+    setup, tools, proposal = ready(tmp_path)
+
+    async def propose(payload):
+        return json.dumps({"proposals": [proposal]})
+
+    with monkeypatch.context() as limited:
+        limited.setattr(draft, "MAX_PACKET_PAGES", 1)
+        failed = asyncio.run(run_answer_groups(tools, propose))
+    assert failed.failure.code == "packet_assembly_failed"
+    assert failed.failure.during_status == "answers_validated"
+    saved_request = setup.artifact("draft_request.json")
+    saved_review = setup.artifact("answer_review.json")
+    mapper_calls = setup.mapper.calls
+
+    async def unexpected_proposal(payload):
+        pytest.fail("Assembly recovery must not generate answers or make model calls")
+
+    recovered_tools = setup.tools()
+    result = asyncio.run(run_answer_groups(recovered_tools, unexpected_proposal, resume=True))
+
+    assert result.status == "published"
+    assert setup.artifact("draft_request.json") == saved_request
+    assert setup.artifact("answer_review.json") == saved_review
+    assert setup.mapper.calls == mapper_calls
+    assert recovered_tools.trace == ["assemble_packet ok", "publish_results ok"]
+    assert [s.to_status for s in result.steps if s.step == "answer_resume"] == ["answers_validated"]
 
 
 @pytest.mark.parametrize("limit", ["group", "run_calls", "verification"])

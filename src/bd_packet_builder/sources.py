@@ -14,6 +14,9 @@ SelectionFlag = Literal[
     "requested_period_unavailable",
 ]
 Cadence = Literal["monthly", "annual"]
+VersionDateBasis = Literal["pdf_creation", "image_capture", "filename"]
+_SNAPSHOT_ISO = re.compile(r"(?<!\d)(20\d{2})-(\d{2})-(\d{2})(?!\d)")
+_SNAPSHOT_DOTTED = re.compile(r"(?<!\d)(\d{2})\.(\d{2})\.(\d{2})(?!\d)")
 _YEAR = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
 _PERIOD = re.compile(r"(?<!\d)(20\d{2})[-_](0[1-9]|1[0-2])(?!\d|[-_]\d)")
 _MONTH_NAMES = (
@@ -35,6 +38,25 @@ class DocumentSelection:
     path: Path | None
     period: date | None
     flags: tuple[SelectionFlag, ...] = ()
+
+
+def filename_snapshot_date(path: Path) -> tuple[date | None, tuple[str, ...]]:
+    """Explicit day dates only; the approved dotted filename convention uses 20YY."""
+    iso = list(_SNAPSHOT_ISO.finditer(path.stem))
+    dotted = list(_SNAPSHOT_DOTTED.finditer(path.stem))
+    if len(iso) + len(dotted) > 1:
+        return None, ("filename_date_ambiguous",)
+    if not iso and not dotted:
+        return None, ()
+    try:
+        if iso:
+            year, month, day = (int(part) for part in iso[0].groups())
+        else:
+            month, day, year = (int(part) for part in dotted[0].groups())
+            year += 2000
+        return date(year, month, day), ()
+    except ValueError:
+        return None, ("filename_date_invalid",)
 
 
 def select_document(

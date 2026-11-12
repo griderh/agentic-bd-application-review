@@ -96,6 +96,159 @@ for this implementation; synthetic recovery tests are not model-quality evaluati
 Validation on Python 3.12: full offline suite **1,718 passed, 57 skipped**; Ruff lint/format,
 strict mypy and whitespace checks pass. No paid model calls were made.
 
+**Attachment revisions and supplied images (agent v47/attachment-plan-v4).** Run
+`63842a8b36c74b249a399d5d4f5eb0cf` lost two supports.
+- The representative's BrokerCheck report was left `review_required`. All candidate decisions
+  were recorded before representative resolution, and decisions could not be revised.
+- The 2026 Bloomberg screenshot is a PNG, and attachments accepted only PDFs.
+
+Changes, all general with no issuer- or file-specific rule:
+- **Reconsideration checkpoint.** A strict representatives-first ordering would deadlock with the
+  candidate-coverage gate, so `finish_evidence` instead rejects once while source-backed
+  `review_required` decisions have not been reconsidered. The message lists source IDs only.
+- **One logged revision.** A `review_required` decision can be revised once, to `include` or
+  `exclude`. The revision is recorded in `attachment_revisions` and the manifest's `revisions`,
+  and appears in content-free progress and application logs.
+- **Period guidance.** Pair the most recent official full-period document with the latest
+  in-progress-period supplement. Among near-identical snapshots, choose the latest printed date.
+- **Supplied images.** Verified PNG/JPEG sources present as one deterministic PDF page at the
+  single source-read boundary. The PDF-only checks now require readable pages instead.
+
+Validation: TDD cases covering revision, reconsideration, guidance, image inventory and image
+attachment rendering first failed as expected, except the changed-image rejection test, which
+already passed. The full Python 3.12 suite passed **1,724 tests, 57 skipped**, and Ruff, strict
+mypy and whitespace checks pass. A local metadata check on the real Bloomberg PNG confirmed one
+page with byte-identical repeat reads. A fresh v47 run is still needed to confirm live model
+behavior; no paid calls were made. Follow-up, not implemented: when no printed date exists, fall
+back to embedded PDF or EXIF dates, recording which basis was used.
+
+**Narrow attachment visual inspection (agent v48/attachment-plan-v5).** The sponsor narrowed the
+follow-up after run `f39c2014c5484f359c7a3d0461af13cc` recognized the current-year supplement but
+left it unresolved because OCR could not establish its title/period. Prefer one visual attempt
+and an actionable reviewer exception over a larger automatic recovery framework.
+
+- Expose `inspect_attachment_page(source_id, page)` using the existing blind image reader and
+  shared cache/budgets, without an OCR-quote prerequisite. One visual reading per requested page;
+  no new model, dependency, crop recovery or alternative-source search.
+- Label results as untrusted attachment-identification observations, not verified answer evidence.
+  Return explicit unreadable, disabled and exhausted-budget outcomes; preserve technical failures.
+- Persist inspection records through evidence handoff and assembly, and retain inspected page
+  references after assembly restart. Log only safe source/page/status metadata.
+- For unresolved source-backed attachment decisions, show the source, requirement links,
+  relevance/limitation, inspected pages and visual status in the separate reviewer summary.
+  Ask the reviewer to inspect the page and choose Include, Exclude or Leave unresolved.
+  This is a manual review aid, not chat, approval capture or a new publication veto.
+- Keep the prior reconsideration mechanism and final include/exclude decision model-driven.
+  General fallback/version-comparison machinery and metadata-date extraction remain deferred.
+
+TDD: the seven initial visual-reading regressions failed before implementation. Coverage includes
+PDF/PNG reading without OCR, shared-cache reuse, unreadable/disabled/exhausted-budget outcomes,
+freshness, page/output budgets, safe logs, no answer-evidence promotion, actionable review questions
+and assembly restart. Two new opt-in synthetic action-selection evaluations are unexecuted (0/2),
+separate from the existing recommendation cases (0/6). No paid model calls were made.
+The empty-reading regression also established that an unreadable page with no remaining visual
+budget must still permit a review exception rather than blocking evidence completion.
+Validation: full offline suite **1,733 passed, 59 skipped**; Ruff lint/format, strict mypy and
+whitespace checks pass. Live visual-reading and recommendation quality remain unverified.
+
+**Sponsor-approved packet cap and assembly-only recovery.** Run
+`4bbcaf4876bc4f11aa1a820421016222` failed assembly because 5 form pages plus 96 attachment pages
+already exceeded the former 100-page total limit. Raise the aggregate cap to **200 pages** while
+retaining **100 pages per input PDF**, existing byte/render limits and answer-grounding checks.
+Count all forms, approved exhibits, attachments and supplemental answers. Budget errors expose
+the required/allowed counts; supplemental overflow still withholds only the affected answer.
+
+Explicit local recovery now recognizes `packet_assembly_failed` only from `answers_validated`
+with saved request/review artifacts. Recheck component compatibility, source versions, artifact
+hashes and OCR evidence; restore the validated stage and run assembly/publication only, preserving
+immutable answer artifacts and making no model calls. Other answer-recovery behavior is unchanged.
+
+The actual saved run recovered to a **105-page incomplete draft**, with 48 written requirements,
+13 selected supporting sources and all 65 pre-existing artifacts unchanged. The 2026 Bloomberg
+PNG is on page 25 and FY2025 table on page 26; each page renders identically to its source.
+The newer weekly PDF remains review-required. Rendering checks report zero changed pixels outside
+allowed form regions, not semantic approval. No paid calls, signing or external submission.
+
+TDD cases first reproduced the 200-page rejection and unsupported assembly recovery.
+Validation: **1,739 passed, 59 skipped** in the full offline suite; Ruff lint/format, strict mypy
+and whitespace checks pass. Exact 200/201-page boundaries, supplemental overflow, 101-page input
+rejection and model-free assembly recovery are covered.
+
+**Checklist-aware attachment grouping (writer v20).** Keep related supporting documents
+contiguous using existing catalog families, not new document-specific classifications.
+Use saved included-document plans, attachment proposals/citations and trusted assessment links
+to place families at their earliest interpreted attachment requirement in checklist page/order.
+Non-attachment questions do not confer checklist priority. Put unlinked families afterward in
+first-appearance order and preserve selected document order within each family.
+
+Persist the ordered attachment list in the normal draft request; no new model/tool schema,
+metadata service or paid call is needed, including after an evidence-handoff restart.
+Group approved inputs before building pagination, narrative references and PDF bookmarks.
+Old saved requests receive first-appearance grouping only; do not infer missing checklist links
+or mutate published runs. Selection, grounding, signing and publication boundaries are unchanged.
+
+Three new offline regressions first failed on the previous implementation. They cover checklist
+priority across an evidence-handoff restart and actual grouped PDF pages, bookmark destinations,
+short/supplemental evidence references, stable within-family order and omitted unapproved inputs.
+The affected draft/attachment/agent/grouped suites passed **197 tests**; the full offline suite
+passed **1,742 tests, 59 skipped**. Ruff lint/format, strict mypy and whitespace checks pass.
+This is deterministic presentation validation, not model-quality evaluation.
+No paid calls were made.
+
+**Snapshot version dates (agent v49/attachment-plan-v6).** The sponsor accepts newest PDF
+creation time as a practical version-selection heuristic for comparable approved snapshots,
+not proof of capture/publication. Read content to establish subject/scope/reporting year;
+do not demand a full printed publication date merely to choose a current-year supplement.
+
+- Parse explicit ISO and dotted `MM.DD.YY` filename dates (`20YY` convention) in the existing
+  source helper; read PDF CreationDate and EXIF original-capture metadata at the inventory boundary.
+  No file-mtime fallback, new dependency, model call or inspection retry.
+- Expose optional version dates, timezone-aware timestamps, their basis and filename dates
+  through existing source summaries. PDF creation wins for PDFs; image capture wins for images;
+  unambiguous filenames supply the fallback. Read original bytes before presentation conversion.
+- Preserve reporting-period rules and source freshness checks. Record missing/malformed/ambiguous
+  metadata and incompatible capture dates explicitly. Unknown timezones remain unknown;
+  calendar-only same-day ordering stays unresolved.
+- A PDF created after its filename date is not inherently inconsistent; expose the accepted
+  re-export risk in existing manifest/reviewer outputs. Keep genuinely unreadable content and
+  explicit unmet issuer date requirements unresolved; metadata does not verify figures.
+- Version changed guidance/results; do not silently upgrade earlier runs or overwrite their packets.
+
+Fifteen initial metadata/parser/audit regressions failed before implementation; an additional
+undated-source case preserves explicit unknowns. The affected source/inventory/evidence/
+attachment/grouped/live suites passed **229 tests, one skipped**; Ruff lint/format and strict
+mypy pass. The full offline suite passed **1,757 tests, 61 skipped**; whitespace checks pass.
+Local read-only metadata checks distinguish the July 13 PNG filename date from
+the July 14 PDF creation timestamp. Two new paid recommendation cases are unexecuted (0/2);
+existing recommendation cases remain 0/6 and inspection-routing cases 0/2. No paid calls.
+Live selection and image-reading quality still require an explicitly authorized fresh run.
+
+**Contextual snapshot identification (agent v50/scan v7).** Approved clarification removes
+v49's blanket visible-year prerequisite for attaching/comparing relevant snapshots.
+The same image request now returns optional identification (description plus exact visible
+cues) independently of full transcription readability. Cues must occur in the transcription;
+this is a consistency check, not independent proof of visual accuracy or relevance.
+The existing inspection exposes `identified` without changing `transcript.readable=false`.
+The agent uses the observation and current context to decide relevance before reusing existing
+creation/capture/filename metadata. No automatic fallback, retry, new tool or date subsystem.
+
+Unidentified material, explicit content contradictions and ambiguous version order remain
+review exceptions. Missing year alone is not a blocker; metadata never supplies an unprinted
+period or verifies figures. Official period reports remain separate from supplements.
+Answer/OCR verification, immutable source checks, cache/budgets and packet grouping are unchanged.
+The scope now explicitly records the narrow snapshot exception to its older metadata rule.
+Start a fresh compatible run; do not rewrite older packets or manufacture identification on restore.
+
+Five initial synthetic identification regressions failed before implementation. Existing
+attachment publication/restart coverage also exercises partial readability with no year or
+exact subject. Six new paid cases cover selection with absent years/partial readability,
+older equivalent versions, unrelated/conflicting newer content and actual rendered synthetic
+identification images. Paid evaluation remains **0/6 executed**; no paid calls were made.
+Live screenshot recognition and packet inclusion require separate explicit authorization.
+Validation: affected scan/evidence/attachment/grouped/live suites **181 passed, 17 skipped**;
+full offline suite **1,763 passed, 67 skipped**. Ruff lint/format, strict mypy and whitespace
+checks pass.
+
 **Historical narrative recovery (agent v37/groups v8/context v9):** extend existing bounded
 printed-wording recovery to plain historical answer text, including narratives, before handing
 candidates to answering. Require an established question/role relationship; preserve selected

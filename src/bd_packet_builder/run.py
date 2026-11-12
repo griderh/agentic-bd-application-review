@@ -493,22 +493,38 @@ class FileRunStore:
                     "submit_answers failed unexpectedly (ValidationError);"
                 )
             )
+            assembly_failure = (
+                failure is not None
+                and failure.code == "packet_assembly_failed"
+                and failure.during_status == "answers_validated"
+                and {"draft_request.json", "answer_review.json"}
+                <= {a.name for a in manifest.artifacts}
+            )
             if (
                 manifest.status != "failed"
                 or failure is None
-                or failure.code not in ("answer_groups_incomplete", "answer_validation_failed")
-                and not legacy_submission_validation_failure
-                or failure.during_status != "evidence_collected"
+                or not (
+                    assembly_failure
+                    or (
+                        failure.during_status == "evidence_collected"
+                        and (
+                            failure.code in ("answer_groups_incomplete", "answer_validation_failed")
+                            or legacy_submission_validation_failure
+                        )
+                    )
+                )
             ):
                 raise RunTransitionError(
-                    "Only checkpointed answer or submission-validation failures can resume"
+                    "Only checkpointed answer or submission-validation failures, "
+                    "or validated packet-assembly failures, can resume"
                 )
             if len(manifest.steps) >= manifest.limits.max_steps:
                 raise RunLimitError("Run step limit exceeded")
             now = self._now()
+            status: RunStatus = "answers_validated" if assembly_failure else "evidence_collected"
             updated = _rebuild(
                 manifest,
-                status="evidence_collected",
+                status=status,
                 failure=None,
                 updated_at=now,
                 steps=(
@@ -516,7 +532,7 @@ class FileRunStore:
                     StepRecord(
                         step="answer_resume",
                         from_status="failed",
-                        to_status="evidence_collected",
+                        to_status=status,
                         completed_at=now,
                     ),
                 ),

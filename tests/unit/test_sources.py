@@ -3,7 +3,26 @@ from pathlib import Path
 
 import pytest
 
+import bd_packet_builder.sources as sources
 from bd_packet_builder.sources import select_document
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected", "flags"),
+    [
+        ("Snapshot_2026-07-14.pdf", date(2026, 7, 14), ()),
+        ("2026 ytd.Callables.07.13.26.png", date(2026, 7, 13), ()),
+        ("Snapshot.02.30.26.pdf", None, ("filename_date_invalid",)),
+        ("Snapshot_2026-07-13_2026-07-14.pdf", None, ("filename_date_ambiguous",)),
+        ("Snapshot_07-08-26.pdf", None, ()),
+        ("Snapshot_FY2026.pdf", None, ()),
+    ],
+)
+def test_snapshot_filename_dates_do_not_change_reporting_period_selection(
+    filename: str, expected: date | None, flags: tuple[str, ...]
+) -> None:
+    assert sources.filename_snapshot_date(Path(filename)) == (expected, flags)
+    assert select_document([Path("FOCUS_2026-07.pdf")]).period == date(2026, 7, 1)
 
 
 def test_latest_period_not_input_order() -> None:

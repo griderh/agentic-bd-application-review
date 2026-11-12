@@ -283,7 +283,7 @@ def test_prepare_snapshots_evidence_and_records_agent_and_model_versions(
         "bd_agreements/supporting_data/Firm/Firm profile.pdf"
     ]
     versions = {v.name: v.version for v in manifest.versions}
-    assert versions["agent"] == "packet-agent-v46"
+    assert versions["agent"] == "packet-agent-v50"
     assert versions["answer-workflow"] == "answer-groups-v13"
     assert versions["historical-context"] == "historical-page-context-v9"
     assert versions["historical-controls"] == "historical-control-pixels-v3"
@@ -291,7 +291,7 @@ def test_prepare_snapshots_evidence_and_records_agent_and_model_versions(
     assert versions["domain-knowledge"] == "domain-knowledge-v2"
     assert len(versions["domain-knowledge-sha256"]) == 64
     assert versions["reading-budget"] == "full-questionnaire-v1"
-    assert versions["scan-prompt"] == "scan-cross-check-v6"
+    assert versions["scan-prompt"] == "scan-cross-check-v7"
     assert manifest.request.historical_policy == "conservative"
     assert versions["model"] == "test"
 

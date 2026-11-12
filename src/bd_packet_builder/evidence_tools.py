@@ -8,11 +8,12 @@ restarts mid-run must reconstruct the used amounts.
 """
 
 from contextlib import closing
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
 import pypdfium2 as pdfium
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 
 from bd_packet_builder.contracts import (
     Contract,
@@ -36,7 +37,8 @@ from bd_packet_builder.inventory import (
 from bd_packet_builder.ocr import OcrError, run_ocr
 from bd_packet_builder.retrieval import default_catalog, read_page
 from bd_packet_builder.run import EvidenceSnapshot
-from bd_packet_builder.scan import ScanEvidence, ScanVerificationError
+from bd_packet_builder.scan import ScanEvidence, ScanTranscript, ScanVerificationError
+from bd_packet_builder.sources import VersionDateBasis
 
 Trust = Literal["untrusted_document_text"]
 _UNRELIABLE_NATIVE = frozenset(
@@ -82,6 +84,10 @@ class SourceSummary(Contract):
     flags: tuple[str, ...]
     historical_issuer: str | None = None
     completed_on: str | None = None
+    version_date: date | None = None
+    version_timestamp: Annotated[datetime, AwareDatetime] | None = None
+    version_date_basis: VersionDateBasis | None = None
+    filename_date: date | None = None
 
 
 class SelectionSummary(Contract):
@@ -124,6 +130,19 @@ class PageRead(Contract):
     text: str
     issues: tuple[str, ...]
     citable: bool
+    content_trust: Trust = "untrusted_document_text"
+
+
+class AttachmentPageInspection(Contract):
+    source_id: Sha256
+    source_sha256: Sha256
+    page: Annotated[int, Field(ge=1)]
+    status: Literal["readable", "identified", "unreadable", "not_enabled", "budget_exhausted"]
+    render_sha256: Sha256 | None = None
+    transcript: ScanTranscript | None = None
+    scope: Literal["attachment_identification_only_not_answer_evidence"] = (
+        "attachment_identification_only_not_answer_evidence"
+    )
     content_trust: Trust = "untrusted_document_text"
 
 
@@ -233,10 +252,15 @@ class EvidenceTools:
         )
         self._page_cache: dict[tuple[str, int, bool], tuple[PageRead, bool]] = {}
         self._ocr_artifacts: dict[tuple[str, int], str] = {}
+        self._attachment_inspections: dict[tuple[str, int], AttachmentPageInspection] = {}
 
     @property
     def attachments(self) -> tuple[str, ...]:
         return tuple(self._attachments)
+
+    @property
+    def attachment_inspections(self) -> tuple[AttachmentPageInspection, ...]:
+        return tuple(self._attachment_inspections.values())
 
     @property
     def reading_usage(self) -> dict[str, int]:
@@ -268,8 +292,8 @@ class EvidenceTools:
 
     def _pdf(self, source_id: str, page: int | None = None) -> SourceRecord:
         source = self._source(source_id)
-        if source.format != "pdf" or source.page_count is None:
-            raise ToolInputError("Only readable PDF sources are available")
+        if source.page_count is None:
+            raise ToolInputError("Only sources with readable pages are available")
         if page is not None and (type(page) is not int or not 1 <= page <= source.page_count):
             raise ToolInputError("Page is outside the source")
         return source
@@ -314,6 +338,12 @@ class EvidenceTools:
                 period=s.period,
                 period_basis=s.period_basis,
                 flags=s.flags,
+                version_date=date.fromisoformat(s.version_date) if s.version_date else None,
+                version_timestamp=(
+                    datetime.fromisoformat(s.version_timestamp) if s.version_timestamp else None
+                ),
+                version_date_basis=s.version_date_basis,
+                filename_date=date.fromisoformat(s.filename_date) if s.filename_date else None,
                 historical_issuer=self._historical[s.path].issuer
                 if s.path in self._historical
                 else None,
@@ -392,7 +422,7 @@ class EvidenceTools:
         scanned = 0
         truncated = False
         for source in self._inventory.sources:
-            if source.family != folder or source.format != "pdf" or source.page_count is None:
+            if source.family != folder or source.page_count is None:
                 continue
             data = read_source_bytes(self._root, self._inventory, source.source_id)
             try:
@@ -512,6 +542,57 @@ class EvidenceTools:
         self._spend_chars(len(result.text))
         if used_ocr:
             self._ocr += 1
+        return result
+
+    def inspect_attachment_page(self, source_id: str, page: int) -> AttachmentPageInspection:
+        """One cached visual attempt per approved attachment page, independent of OCR."""
+        self._tick()
+        source = self._pdf(source_id, page)
+        if source.family not in {
+            d.folder
+            for d in default_catalog().supporting_documents
+            if d.routing == "retrieval-allowlisted"
+        }:
+            raise ToolInputError(
+                "Visual attachment inspection requires approved standalone support"
+            )
+        read_source_bytes(self._root, self._inventory, source_id)
+        key = source_id, page
+        result = self._attachment_inspections.get(key)
+        if result is None:
+            if key not in self._pages:
+                if len(self._pages) >= self._limits.max_pages_read:
+                    raise ToolLimitError("Evidence distinct-page read limit reached")
+                self._pages.add(key)
+            result = AttachmentPageInspection(
+                source_id=source_id,
+                source_sha256=source.sha256,
+                page=page,
+                status="not_enabled",
+            )
+            if self._scan_evidence is not None:
+                try:
+                    transcript, digest = self._scan_evidence.inspect_attachment_page(
+                        source_id, page
+                    )
+                except ScanVerificationError as error:
+                    if str(error) != "scan_verification_budget_exhausted":
+                        raise ToolInputError(str(error)) from None
+                    result = result.model_copy(update={"status": "budget_exhausted"})
+                else:
+                    result = result.model_copy(
+                        update={
+                            "status": "readable"
+                            if transcript.readable and transcript.text.strip()
+                            else "identified"
+                            if transcript.identification is not None
+                            else "unreadable",
+                            "render_sha256": digest,
+                            "transcript": transcript,
+                        }
+                    )
+            self._attachment_inspections[key] = result
+        self._spend_chars(len(result.model_dump_json()))
         return result
 
     def locate_quote(self, source_id: str, page: int, quote: str) -> QuoteLocation:

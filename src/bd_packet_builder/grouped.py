@@ -539,6 +539,21 @@ class _EvidenceBoundary(FunctionMiddleware):
             raise MiddlewareTermination(result="Evidence phase ended; application owns next step.")
 
 
+def _finalize_packet(tools: PacketAgentTools, *, submit: bool = True) -> RunManifest:
+    submission = (("submit_answers", '{"proposals":[]}'),) if submit else ()
+    for tool, args in (
+        *submission,
+        ("assemble_packet", "{}"),
+        ("publish_results", "{}"),
+    ):
+        result = json.loads(tools.call(tool, args))
+        if not result["ok"]:
+            if tools.manifest().status == "failed":
+                return tools.manifest()
+            return tools.fail("group_finalization_failed", "Answer validation or assembly failed.")
+    return tools.manifest()
+
+
 async def run_answer_groups(
     tools: PacketAgentTools, propose: ProposeGroup, *, resume: bool = False
 ) -> RunManifest:
@@ -572,6 +587,9 @@ async def run_answer_groups(
     ):
         raise ValueError("Answer plan or component versions changed; start a new run")
     tools.prepare_answer_recovery(resume=resume)
+    if tools.manifest().status == "answers_validated":
+        tools.answer_progress("Assembly recovery: reusing saved validated answers; no model calls.")
+        return _finalize_packet(tools, submit=False)
     for start in range(0, len(retained), 10):
         result = json.loads(
             tools.call("stage_answers", _json({"proposals": retained[start : start + 10]}))
@@ -734,17 +752,7 @@ async def run_answer_groups(
             "Answer groups require recovery. Private proposals and validation diagnostics "
             "are saved; no packet was published. Explicit resume retries unfinished groups only.",
         )
-    for tool, args in (
-        ("submit_answers", '{"proposals":[]}'),
-        ("assemble_packet", "{}"),
-        ("publish_results", "{}"),
-    ):
-        result = json.loads(tools.call(tool, args))
-        if not result["ok"]:
-            if tools.manifest().status == "failed":
-                return tools.manifest()
-            return tools.fail("group_finalization_failed", "Answer validation or assembly failed.")
-    return tools.manifest()
+    return _finalize_packet(tools)
 
 
 async def run_grouped_packet_agent(

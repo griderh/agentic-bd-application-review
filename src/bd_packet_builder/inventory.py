@@ -9,6 +9,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
@@ -16,14 +17,28 @@ from uuid import uuid4
 
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_raw
+from PIL import Image, UnidentifiedImageError
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen.canvas import Canvas
 
 from bd_packet_builder.local_inputs import LocalInputError, read_local_input
-from bd_packet_builder.sources import Cadence, filename_period, select_document
+from bd_packet_builder.sources import (
+    Cadence,
+    VersionDateBasis,
+    filename_period,
+    filename_snapshot_date,
+    select_document,
+)
 
 _SUPPORT = Path("bd_agreements/supporting_data")
 _FAMILIES: dict[str, Cadence] = {"Focus_Reports": "monthly", "Audited_Financials": "annual"}
 _EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".doc", ".docx"}
 _MAX_BYTES = 64 * 1024 * 1024
+IMAGE_FORMATS = frozenset({"png", "jpg", "jpeg"})
+_MAX_IMAGE_PIXELS = 40_000_000
+# Supplied images are fitted to a US Letter box so appended pages match the packet scale.
+_IMAGE_PAGE_BOX = (612.0, 792.0)
+_PDF_DATE = re.compile(r"(?:D:)?(\d{8})(\d{6})?(Z|[+-]\d{2}'?\d{2}'?)?")
 
 
 class InventoryError(ValueError):
@@ -43,6 +58,10 @@ class SourceRecord:
     period_precision: Cadence | None
     period_basis: str | None
     flags: tuple[str, ...]
+    version_date: str | None = None
+    version_timestamp: str | None = None
+    version_date_basis: VersionDateBasis | None = None
+    filename_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,17 +152,99 @@ def _period_label(period: date, cadence: Cadence) -> str:
     return str(period.year) if cadence == "annual" else period.strftime("%Y-%m")
 
 
-def _pdf_pages(data: bytes) -> tuple[int | None, tuple[str, ...]]:
+def _pdf_pages(data: bytes) -> tuple[int | None, tuple[str, ...], str | None]:
     try:
         with pdfium.PdfDocument(data) as document:
             if pdfium_raw.FPDF_GetSecurityHandlerRevision(document) >= 0:
-                return None, ("encrypted_pdf",)
+                return None, ("encrypted_pdf",), None
             count = len(document)
             if count < 1:
-                return None, ("unreadable_pdf",)
-            return count, ()
+                return None, ("unreadable_pdf",), None
+            return count, (), document.get_metadata_value("CreationDate") or None
     except pdfium.PdfiumError:
-        return None, ("unreadable_pdf",)
+        return None, ("unreadable_pdf",), None
+
+
+def _version_time(
+    moment: datetime, offset: str | None, invalid_flag: str
+) -> tuple[str | None, str | None, tuple[str, ...]]:
+    if offset is None:
+        return moment.date().isoformat(), None, ("version_timezone_unknown",)
+    zone = offset.replace("'", "")
+    if zone != "Z" and re.fullmatch(r"[+-](?:[01]\d|2[0-3]):?[0-5]\d", zone) is None:
+        return None, None, (invalid_flag,)
+    aware = datetime.fromisoformat(moment.isoformat() + zone)
+    return moment.date().isoformat(), aware.isoformat(), ()
+
+
+def _pdf_creation_date(raw: str | None) -> tuple[str | None, str | None, tuple[str, ...]]:
+    if raw is None:
+        return None, None, ()
+    match = _PDF_DATE.fullmatch(raw)
+    if match is None:
+        return None, None, ("pdf_creation_date_invalid",)
+    day, time, zone = match.groups()
+    try:
+        moment = datetime.strptime(day + (time or ""), "%Y%m%d%H%M%S" if time else "%Y%m%d")
+    except ValueError:
+        return None, None, ("pdf_creation_date_invalid",)
+    if not time:
+        if zone:
+            return None, None, ("pdf_creation_date_invalid",)
+        return moment.date().isoformat(), None, ()
+    return _version_time(moment, zone, "pdf_creation_date_invalid")
+
+
+def _image_capture_date(data: bytes) -> tuple[str | None, str | None, tuple[str, ...]]:
+    with Image.open(BytesIO(data)) as image:
+        exif = image.getexif()
+        nested = exif.get_ifd(34665) if 34665 in exif else {}
+        raw = nested.get(36867, exif.get(36867))
+        offset = nested.get(36881, exif.get(36881))
+    if raw is None:
+        return None, None, ()
+    if not isinstance(raw, str) or (offset is not None and not isinstance(offset, str)):
+        return None, None, ("image_capture_date_invalid",)
+    try:
+        moment = datetime.strptime(raw.rstrip("\x00"), "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None, None, ("image_capture_date_invalid",)
+    return _version_time(moment, offset, "image_capture_date_invalid")
+
+
+def _open_image(data: bytes) -> Image.Image:
+    with Image.open(BytesIO(data)) as probe:
+        width, height = probe.size
+        if probe.format not in ("PNG", "JPEG") or not 0 < width * height <= _MAX_IMAGE_PIXELS:
+            raise InventoryError("Image source is unreadable or exceeds the pixel limit")
+        probe.verify()
+    image = Image.open(BytesIO(data))
+    image.load()
+    return image
+
+
+def _image_pages(data: bytes) -> tuple[int | None, tuple[str, ...]]:
+    try:
+        _open_image(data).close()
+    except (InventoryError, UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        return None, ("unreadable_image",)
+    return 1, ("image_presented_as_pdf_page",)
+
+
+def _image_pdf(data: bytes) -> bytes:
+    """Deterministically present a supplied image as one PDF page; no content is altered."""
+    try:
+        with _open_image(data) as image, image.convert("RGB") as rgb:
+            scale = min(_IMAGE_PAGE_BOX[0] / rgb.width, _IMAGE_PAGE_BOX[1] / rgb.height)
+            size = (rgb.width * scale, rgb.height * scale)
+            output = BytesIO()
+            canvas = Canvas(output, pagesize=size, invariant=1, pageCompression=1)
+            canvas.drawImage(ImageReader(rgb), 0, 0, width=size[0], height=size[1])
+            canvas.showPage()
+            canvas.save()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        raise InventoryError("Image source could not be presented as a page") from None
+    return output.getvalue()
 
 
 def _record(root: Path, relative: str) -> SourceRecord:
@@ -155,16 +256,43 @@ def _record(root: Path, relative: str) -> SourceRecord:
     cadence = _FAMILIES.get(family)
     period = filename_period(path, cadence=cadence) if cadence else None
     flags = ["content_date_unverified"]
+    filename_day, filename_flags = filename_snapshot_date(path)
+    filename_date = filename_day.isoformat() if filename_day is not None else None
+    flags.extend(filename_flags)
+    version_date = None
+    version_timestamp = None
+    version_basis: VersionDateBasis | None = None
     if cadence is None:
         flags.append("period_not_configured")
     elif period is None:
         flags.append("unparseable_period")
     if path.suffix.lower() == ".pdf":
-        pages, pdf_flags = _pdf_pages(data)
+        pages, pdf_flags, creation = _pdf_pages(data)
         flags.extend(pdf_flags)
+        version_date, version_timestamp, date_flags = _pdf_creation_date(creation)
+        flags.extend(date_flags)
+        if version_date is not None:
+            version_basis = "pdf_creation"
+            if filename_date is not None and version_date < filename_date:
+                flags.append("pdf_creation_precedes_filename_date")
+    elif path.suffix.lower()[1:] in IMAGE_FORMATS:
+        pages, image_flags = _image_pages(data)
+        flags.extend(image_flags)
+        if pages is not None:
+            version_date, version_timestamp, date_flags = _image_capture_date(data)
+            flags.extend(date_flags)
+            if version_date is not None:
+                version_basis = "image_capture"
+                if filename_date is not None and version_date != filename_date:
+                    flags.append("capture_filename_date_mismatch")
     else:
         pages = None
         flags.append("page_reference_unavailable")
+    if version_date is None and filename_date is not None:
+        version_date = filename_date
+        version_basis = "filename"
+    if version_date is None:
+        flags.append("version_date_unavailable")
     return SourceRecord(
         source_id=identity,
         path=relative,
@@ -177,6 +305,10 @@ def _record(root: Path, relative: str) -> SourceRecord:
         period_precision=cadence,
         period_basis="filename_only" if period is not None else None,
         flags=tuple(flags),
+        version_date=version_date,
+        version_timestamp=version_timestamp,
+        version_date_basis=version_basis,
+        filename_date=filename_date,
     )
 
 
@@ -299,7 +431,11 @@ def resolve_reference(
 
 
 def read_source_bytes(root: Path, inventory: Inventory, source_id: str) -> bytes:
-    """Read a known source version through the same path and freshness boundary."""
+    """Read a known source version through the same path and freshness boundary.
+
+    Verified PNG/JPEG sources are returned as their deterministic one-page PDF presentation,
+    so every page reader, OCR check and packet attachment sees the same page.
+    """
     source = next((s for s in inventory.sources if s.source_id == source_id), None)
     if source is None:
         raise InventoryError("Reference has an unknown source identity")
@@ -317,6 +453,8 @@ def read_source_bytes(root: Path, inventory: Inventory, source_id: str) -> bytes
         data = _snapshot(root.resolve(strict=True), source.path)
     if hashlib.sha256(data).hexdigest() != source.sha256:
         raise InventoryError("Referenced source changed after inventory")
+    if source.format in IMAGE_FORMATS and source.page_count is not None:
+        return _image_pdf(data)
     return data
 
 

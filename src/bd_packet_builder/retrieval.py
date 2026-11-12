@@ -908,7 +908,7 @@ def retrieve_evidence(
             issues.extend(flags)
             if selected is None:
                 continue
-            if selected.format != "pdf" or selected.page_count is None:
+            if selected.page_count is None:
                 issues.append("unsupported_or_unreadable_source")
                 continue
             chosen.append(selected)

@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+from PIL import Image
 from reportlab.pdfgen.canvas import Canvas
 
 import bd_packet_builder.retrieval as retrieval
@@ -17,6 +19,7 @@ from bd_packet_builder.evidence_tools import (
 from bd_packet_builder.inventory import Inventory, InventoryError, build_inventory
 from bd_packet_builder.ocr import OcrError
 from bd_packet_builder.run import EvidenceItem, EvidenceSnapshot
+from bd_packet_builder.scan import ScanEvidence, ScanTranscript
 
 SUPPORT = "bd_agreements/supporting_data"
 LONG = "CRD: 001234. This fictional registration record is a synthetic test source. " * 2
@@ -53,6 +56,167 @@ def seed(root: Path) -> None:
     pdf(root, "FINRA_Certification/registration.pdf", [LONG, "Second page with SIPC wording."])
     pdf(root, "Focus_Reports/FOCUS_2026-08.pdf", [LONG])
     pdf(root, "Insperex_Public_Funds/overview.pdf", ["Insperex provides public finance services."])
+
+
+@pytest.mark.parametrize("image", [False, True])
+def test_attachment_visual_reading_needs_no_ocr_and_reuses_the_shared_image_cache(
+    tmp_path: Path, image: bool
+) -> None:
+    seed(tmp_path)
+    if image:
+        path = tmp_path / SUPPORT / "Insperex_Public_Funds/snapshot.png"
+        with Image.new("RGB", (400, 200), "white") as supplied:
+            supplied.save(path)
+    inventory = build_inventory(tmp_path)
+    source = next(
+        s
+        for s in inventory.sources
+        if s.family == "Insperex_Public_Funds" and s.format == ("png" if image else "pdf")
+    )
+    reader = Mock()
+    reader.transcribe.return_value = ScanTranscript(
+        readable=True,
+        subject="Example LLC",
+        text="Example LLC Market Overview\nYear to date through July 14, 2026",
+        reporting_period=None,
+    )
+    scans = ScanEvidence(
+        tmp_path, inventory, reader, endpoint="test", deployment="test", max_pages=1
+    )
+    tool = EvidenceTools(tmp_path, inventory, snapshot_of(inventory), scan_evidence=scans)
+
+    result = tool.inspect_attachment_page(source.source_id, 1)
+    again = tool.inspect_attachment_page(source.source_id, 1)
+    shared = scans.transcribe_page(source.source_id, 1, result.render_sha256)
+    other_tool = EvidenceTools(tmp_path, inventory, snapshot_of(inventory), scan_evidence=scans)
+    assert other_tool.inspect_attachment_page(source.source_id, 1) == result
+
+    assert result == again
+    assert result.status == "readable"
+    assert result.transcript == shared == reader.transcribe.return_value
+    assert result.source_sha256 == source.sha256
+    assert result.scope == "attachment_identification_only_not_answer_evidence"
+    reader.transcribe.assert_called_once()
+    assert reader.transcribe.call_args.args[0].startswith(b"\x89PNG")
+    assert tool.reading_usage["distinct_pages"] == 1
+    assert tool.reading_usage["independent_image_pages"] == 1
+    assert tool.reading_usage["ocr_pages"] == 0
+    assert tool.attachments == ()
+    assert scans.checks == scans.exhibit_checks == []
+    with pytest.raises(ToolInputError, match="OCR"):
+        tool.verify_scan_quote(source.source_id, 1, "Example LLC", "Example LLC")
+    (tmp_path / source.path).write_bytes(b"Changed after the visual reading")
+    with pytest.raises(InventoryError, match="changed"):
+        tool.inspect_attachment_page(source.source_id, 1)
+
+
+@pytest.mark.parametrize("outcome", ["unreadable", "not_enabled", "budget_exhausted"])
+def test_attachment_visual_reading_has_explicit_terminal_outcomes(
+    tmp_path: Path, outcome: str
+) -> None:
+    seed(tmp_path)
+    inventory = build_inventory(tmp_path)
+    source = next(s for s in inventory.sources if s.family == "Insperex_Public_Funds")
+    reader = Mock()
+    reader.transcribe.return_value = ScanTranscript(
+        readable=False, subject=None, text="", reporting_period=None
+    )
+    scans = ScanEvidence(
+        tmp_path,
+        inventory,
+        reader,
+        endpoint="test",
+        deployment="test",
+        max_pages=0 if outcome == "budget_exhausted" else 1,
+    )
+    tool = EvidenceTools(
+        tmp_path,
+        inventory,
+        snapshot_of(inventory),
+        scan_evidence=None if outcome == "not_enabled" else scans,
+    )
+
+    first = tool.inspect_attachment_page(source.source_id, 1)
+    assert tool.inspect_attachment_page(source.source_id, 1) == first
+    assert first.status == outcome
+    assert reader.transcribe.call_count == (1 if outcome == "unreadable" else 0)
+    assert tool.attachments == ()
+
+
+@pytest.mark.parametrize("identified", [True, False])
+def test_partial_visual_text_identifies_an_attachment_only_with_explicit_visible_cues(
+    tmp_path: Path, identified: bool
+) -> None:
+    seed(tmp_path)
+    inventory = build_inventory(tmp_path)
+    source = next(s for s in inventory.sources if s.family == "Insperex_Public_Funds")
+    reader = Mock()
+    reader.transcribe.return_value = ScanTranscript.model_validate(
+        {
+            "readable": False,
+            "subject": None,
+            "text": "Market Overview\nAgency trading",
+            "reporting_period": None,
+            "identification": {
+                "description": "Agency market overview",
+                "visible_cues": ("Market Overview", "Agency trading"),
+            }
+            if identified
+            else None,
+        }
+    )
+    scans = ScanEvidence(
+        tmp_path, inventory, reader, endpoint="test", deployment="test", max_pages=1
+    )
+    tool = EvidenceTools(tmp_path, inventory, snapshot_of(inventory), scan_evidence=scans)
+    result = tool.inspect_attachment_page(source.source_id, 1)
+    assert result.status == ("identified" if identified else "unreadable")
+    assert result.transcript.readable is False
+    assert result.transcript.reporting_period is None
+    assert result.source_sha256 == source.sha256
+    assert result.scope == "attachment_identification_only_not_answer_evidence"
+    assert tool.inspect_attachment_page(source.source_id, 1) == result
+    readings = list(scans.candidate_readings)
+    restored = ScanEvidence(
+        tmp_path, inventory, reader, endpoint="test", deployment="test", max_pages=1
+    )
+    restored.restore_readings(readings, scans.pages_attempted)
+    restored_tool = EvidenceTools(
+        tmp_path, inventory, snapshot_of(inventory), scan_evidence=restored
+    )
+    assert restored_tool.inspect_attachment_page(source.source_id, 1) == result
+    reader.transcribe.assert_called_once()
+    assert scans.checks == []
+    assert tool.attachments == ()
+
+
+@pytest.mark.parametrize("limit", ["pages", "characters"])
+def test_attachment_visual_inspection_respects_shared_page_and_output_budgets(
+    tmp_path: Path, limit: str
+) -> None:
+    seed(tmp_path)
+    inventory = build_inventory(tmp_path)
+    source = next(s for s in inventory.sources if s.family == "Insperex_Public_Funds")
+    reader = Mock()
+    reader.transcribe.return_value = ScanTranscript(
+        readable=True, subject=None, text="Synthetic overview", reporting_period=None
+    )
+    scans = ScanEvidence(tmp_path, inventory, reader, endpoint="test", deployment="test")
+    tool = EvidenceTools(
+        tmp_path,
+        inventory,
+        snapshot_of(inventory),
+        scan_evidence=scans,
+        limits=EvidenceLimits(max_chars_returned=1)
+        if limit == "characters"
+        else EvidenceLimits(max_pages_read=1),
+    )
+    if limit == "pages":
+        other = next(s for s in inventory.sources if s.source_id != source.source_id)
+        tool.read_page(other.source_id, 1)
+    with pytest.raises(ToolLimitError):
+        tool.inspect_attachment_page(source.source_id, 1)
+    assert reader.transcribe.call_count == (1 if limit == "characters" else 0)
 
 
 def source_id(listing: object, folder: str) -> str:

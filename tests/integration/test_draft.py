@@ -8,7 +8,13 @@ import pypdfium2 as pdfium
 import pytest
 from reportlab.pdfgen.canvas import Canvas
 
-from bd_packet_builder.draft import DraftRequest, MarkPlacement, TextPlacement, run_draft
+from bd_packet_builder.draft import (
+    DraftError,
+    DraftRequest,
+    MarkPlacement,
+    TextPlacement,
+    run_draft,
+)
 from bd_packet_builder.gate import GATE_REVIEWER, run_application_draft, validate_answers
 from bd_packet_builder.inventory import build_inventory
 from bd_packet_builder.layout import PageBox
@@ -1035,6 +1041,116 @@ def test_attachment_order_drives_actual_final_page_references(tmp_path: Path) ->
     assert "CRD: 001234" in strings[2]
 
 
+@pytest.mark.parametrize("long", [False, True])
+def test_related_attachments_stay_together_with_correct_pages_and_bookmarks(
+    tmp_path: Path, long: bool
+) -> None:
+    from pypdf import PdfReader
+
+    request, review, data = prepare(tmp_path, long=long)
+    proof_id = data["attachments"][0]
+    additions = [
+        ("FINRA_Certification/omitted.pdf", "UNAPPROVED REPORT"),
+        ("bios/z.pdf", "BIO Z FIRST"),
+        ("Bloomberg_League_Tables/current.pdf", "CURRENT LEAGUE TABLE"),
+        ("bios/a.pdf", "BIO A SECOND"),
+        ("FINRA_Certification/person.pdf", "REPRESENTATIVE REPORT"),
+        ("Bloomberg_League_Tables/annual.pdf", "ANNUAL LEAGUE TABLE"),
+    ]
+    for relative, label in additions:
+        make_pdf(tmp_path / "bd_agreements/supporting_data" / relative, [(40, 740, label)])
+    sources = {
+        s.path.removeprefix("bd_agreements/supporting_data/"): s
+        for s in build_inventory(tmp_path).sources
+    }
+    data["sources"].extend(
+        dict(path=sources[path].path, sha256=sources[path].sha256) for path, _ in additions
+    )
+    selected = [sources[path].source_id for path, _ in additions]
+    data["attachments"] = [selected[0], selected[1], proof_id, *selected[2:]]
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    reviewed = json.loads(review.read_bytes())
+    reviewed["attachment_source_ids"].remove(selected[0])
+    review.write_text(json.dumps(reviewed))
+
+    output = execute(tmp_path, request, review)
+    report = json.loads((output / "draft.json").read_bytes())
+    sections = report["pagination"]["sections"]
+    expected_ids = [selected[1], selected[3], proof_id, selected[4], selected[2], selected[5]]
+    assert [s["section_id"] for s in sections if s["role"] == "evidence"] == expected_ids
+    evidence_start = sum(s["page_count"] for s in sections if s["role"] != "evidence")
+    expected_labels = [
+        "BIO Z FIRST",
+        "BIO A SECOND",
+        "CRD: 001234",
+        "REPRESENTATIVE REPORT",
+        "CURRENT LEAGUE TABLE",
+        "ANNUAL LEAGUE TABLE",
+    ]
+    with pdfium.PdfDocument(str(output / "draft-packet.pdf")) as document:
+        assert len(document) == evidence_start + len(expected_labels)
+        for index, label in enumerate(expected_labels, start=evidence_start):
+            with closing(document[index]) as page, closing(page.get_textpage()) as text:
+                assert label in text.get_text_bounded()
+        reference_page = 1 if long else 0
+        with closing(document[reference_page]) as page, closing(page.get_textpage()) as text:
+            assert f"packet page {evidence_start + 3}" in text.get_text_bounded()
+    reader = PdfReader(output / "draft-packet.pdf")
+    assert [
+        (bookmark.title, reader.get_destination_page_number(bookmark))
+        for bookmark in reader.outline
+    ] == [
+        (f"Evidence {identity[:12]}", evidence_start + index)
+        for index, identity in enumerate(expected_ids)
+    ]
+    assert report["unapproved_attachments_omitted"] == [selected[0]]
+
+
+@pytest.mark.parametrize(
+    ("attachment_pages", "long", "error"),
+    [
+        ((99, 99), False, None),
+        ((100, 99), False, "total page budget"),
+        ((99, 99), True, "supplemental page budget"),
+        ((101,), False, "page limit"),
+    ],
+)
+def test_packet_allows_200_pages_including_supplements_but_inputs_remain_bounded(
+    tmp_path: Path, attachment_pages: tuple[int, ...], long: bool, error: str | None
+) -> None:
+    from tests.integration.test_inventory import write_pdf
+
+    request, review, data = prepare(tmp_path, long=long)
+    paths = []
+    for index, pages in enumerate(attachment_pages):
+        relative = f"bd_agreements/supporting_data/SIPC_list/part-{index}.pdf"
+        write_pdf(tmp_path / relative, pages=pages)
+        paths.append(relative)
+    selected = [s for s in build_inventory(tmp_path).sources if s.path in paths]
+    data["sources"].extend(dict(path=s.path, sha256=s.sha256) for s in selected)
+    data["attachments"].extend(s.source_id for s in selected)
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+
+    if error is not None and error != "supplemental page budget":
+        with pytest.raises(DraftError, match=error):
+            execute(tmp_path, request, review)
+        assert not list((tmp_path / "outputs").glob("draft-*/draft-packet.pdf"))
+    else:
+        output = execute(tmp_path, request, review)
+        with pdfium.PdfDocument(str(output / "draft-packet.pdf")) as document:
+            assert len(document) == 200
+        report = json.loads((output / "draft.json").read_text())
+        services = next(a for a in report["answers"] if a["requirement_id"] == "services")
+        if long:
+            assert services["status"] == "blank"
+            assert any("202 > 200" in issue for issue in services["issues"])
+            assert "supplemental page budget" in (output / "reviewer-summary.txt").read_text()
+        else:
+            assert services["status"] == "written_to_draft"
+
+
 @pytest.mark.parametrize("problem", ["unknown-folder", "traversal", "output-symlink"])
 def test_draft_enforces_local_input_and_output_boundaries(tmp_path: Path, problem: str) -> None:
     request, review, data = prepare(tmp_path)
@@ -1327,3 +1443,28 @@ def test_gate_only_attaches_evidence_that_supports_written_answers(tmp_path: Pat
     manifest = run_gate(tmp_path, request)
     assert manifest["written_requirements"] == []
     assert manifest["pagination"]["sections"][-1]["role"] == "form"
+
+
+def test_supplied_image_attachment_is_appended_as_one_rendered_page(tmp_path: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    request, review, data = prepare(tmp_path)
+    path = Path("bd_agreements/supporting_data/SIPC_list/screenshot.png")
+    (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+    with Image.new("RGB", (400, 160), "white") as image:
+        ImageDraw.Draw(image).rectangle((20, 20, 380, 140), fill="black")
+        image.save(tmp_path / path, format="PNG")
+    source = next(s for s in build_inventory(tmp_path).sources if s.path == path.as_posix())
+    data["sources"].append(dict(path=source.path, sha256=source.sha256))
+    data["attachments"].insert(0, source.source_id)
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+
+    output = execute(tmp_path, request, review)
+
+    with pdfium.PdfDocument(str(output / "draft-packet.pdf")) as document:
+        assert len(document) == 3
+        width, height = document[1].get_size()
+        with closing(document[1].render(scale=0.5).to_pil()) as rendered:
+            assert rendered.convert("L").getextrema()[0] < 50
+    assert width / height == pytest.approx(400 / 160, rel=0.01)

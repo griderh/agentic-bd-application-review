@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from bd_packet_builder.scan import ScanTranscript, ScanVerificationError, check_agreement
 
@@ -45,3 +46,37 @@ def test_unreadable_or_unknown_subject_never_passes() -> None:
     )
     with pytest.raises(ScanVerificationError, match="scan_page_unreadable"):
         check_agreement(transcript, "Example LLC", "CRD: 001234")
+
+
+def test_identification_does_not_make_uncertain_numerical_text_verified() -> None:
+    transcript = ScanTranscript.model_validate(
+        {
+            "readable": False,
+            "subject": "Example LLC",
+            "text": "Bloomberg\nCallable League Table\nExample LLC\nVolume: uncertain",
+            "reporting_period": None,
+            "identification": {
+                "description": "Bloomberg callable league table",
+                "visible_cues": ("Bloomberg", "Callable League Table"),
+            },
+        }
+    )
+    with pytest.raises(ScanVerificationError, match="scan_page_unreadable"):
+        check_agreement(transcript, "Example LLC", "Example LLC")
+
+
+@pytest.mark.parametrize("cue", ["FY2026", "League Table"])
+def test_identification_rejects_cues_missing_from_visible_transcription(cue: str) -> None:
+    with pytest.raises(ValidationError, match="identification_cue_not_transcribed"):
+        ScanTranscript.model_validate(
+            {
+                "readable": False,
+                "subject": None,
+                "text": "An indistinct chart",
+                "reporting_period": None,
+                "identification": {
+                    "description": "Market table",
+                    "visible_cues": (cue,),
+                },
+            }
+        )

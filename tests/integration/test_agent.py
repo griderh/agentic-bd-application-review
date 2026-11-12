@@ -909,6 +909,7 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "search_pages",
         "index_source",
         "read_page",
+        "inspect_attachment_page",
         "locate_quote",
         "verify_scan_quote",
         "read_historical_page",
@@ -924,6 +925,7 @@ def test_tool_specs_are_typed_and_expose_no_path_or_shell_inputs(setup: Setup) -
         "publish_results",
     }
     assert specs["stage_answers"].parameters()["properties"]["proposals"]["maxItems"] == 10
+    assert set(specs["inspect_attachment_page"].parameters()["properties"]) == {"source_id", "page"}
     assert (
         "review_required"
         in specs["plan_supporting_document"].parameters()["properties"]["disposition"]["enum"]

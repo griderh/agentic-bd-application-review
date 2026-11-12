@@ -25,6 +25,102 @@ def write_pdf(path: Path, *, pages: int = 2) -> None:
             writer.write(stream)
 
 
+@pytest.mark.parametrize(
+    ("created", "expected", "timestamp", "basis", "flag"),
+    [
+        (
+            "D:20260714094116-04'00'",
+            "2026-07-14",
+            "2026-07-14T09:41:16-04:00",
+            "pdf_creation",
+            None,
+        ),
+        ("D:20260715120000Z", "2026-07-15", "2026-07-15T12:00:00+00:00", "pdf_creation", None),
+        ("D:20260714094116", "2026-07-14", None, "pdf_creation", "version_timezone_unknown"),
+        ("D:20260230094116Z", "2026-07-13", None, "filename", "pdf_creation_date_invalid"),
+        (None, "2026-07-13", None, "filename", None),
+    ],
+)
+def test_snapshot_pdf_creation_dates_rank_versions_without_changing_reporting_periods(
+    tmp_path: Path,
+    created: str | None,
+    expected: str,
+    timestamp: str | None,
+    basis: str,
+    flag: str | None,
+) -> None:
+    path = tmp_path / "bd_agreements/supporting_data/Bloomberg_League_Tables/Snapshot.07.13.26.pdf"
+    path.parent.mkdir(parents=True)
+    with PdfWriter() as writer:
+        writer.add_blank_page(width=612, height=792)
+        if created is not None:
+            writer.add_metadata({"/CreationDate": created})
+        with path.open("wb") as stream:
+            writer.write(stream)
+    before = path.read_bytes()
+    source = build_inventory(tmp_path).sources[0]
+    assert source.version_date == expected
+    assert source.version_timestamp == timestamp
+    assert source.version_date_basis == basis
+    assert source.filename_date == "2026-07-13"
+    assert source.period is None
+    assert "capture_filename_date_mismatch" not in source.flags
+    if flag:
+        assert flag in source.flags
+    assert path.read_bytes() == before
+    output = publish_inventory(tmp_path, build_inventory(tmp_path))
+    assert (
+        json.loads((output / "inventory.json").read_bytes())["sources"][0]["version_date"]
+        == expected
+    )
+
+
+@pytest.mark.parametrize("capture", [None, "2026:07:14 09:24:11", "invalid"])
+def test_snapshot_images_prefer_capture_metadata_and_do_not_use_conversion_or_file_times(
+    tmp_path: Path, capture: str | None
+) -> None:
+    from PIL import Image
+
+    from bd_packet_builder.inventory import read_source_bytes
+
+    path = tmp_path / "bd_agreements/supporting_data/Bloomberg_League_Tables/Snapshot.07.13.26.png"
+    path.parent.mkdir(parents=True)
+    exif = Image.Exif()
+    if capture is not None:
+        exif[36867] = capture
+        exif[36881] = "-04:00"
+    with Image.new("RGB", (100, 100), "white") as image:
+        image.save(path, exif=exif)
+    os.utime(path, (1, 1))
+    inventory = build_inventory(tmp_path)
+    source = inventory.sources[0]
+    expected = "2026-07-14" if capture and capture != "invalid" else "2026-07-13"
+    assert source.version_date == expected
+    assert source.version_date_basis == (
+        "image_capture" if capture and capture != "invalid" else "filename"
+    )
+    if capture == "invalid":
+        assert "image_capture_date_invalid" in source.flags
+    elif capture is not None:
+        assert source.version_timestamp == "2026-07-14T09:24:11-04:00"
+        assert "capture_filename_date_mismatch" in source.flags
+    assert read_source_bytes(tmp_path, inventory, source.source_id).startswith(b"%PDF")
+    assert build_inventory(tmp_path).sources[0].version_date == expected
+
+
+def test_undated_snapshot_keeps_version_date_unknown(tmp_path: Path) -> None:
+    from PIL import Image
+
+    path = tmp_path / "bd_agreements/supporting_data/Bloomberg_League_Tables/snapshot.png"
+    path.parent.mkdir(parents=True)
+    with Image.new("RGB", (100, 100), "white") as image:
+        image.save(path)
+    source = build_inventory(tmp_path).sources[0]
+    assert source.version_date is None
+    assert source.version_date_basis is None
+    assert "version_date_unavailable" in source.flags
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     support = tmp_path / "bd_agreements/supporting_data"
@@ -373,3 +469,52 @@ def test_cli_inventory_prints_only_counts_and_output_location(
     assert "inventory.json" in output.out
     assert "Synthetic representative" not in output.out
     assert output.err == ""
+
+
+def write_png(path: Path, size: tuple[int, int] = (300, 120)) -> None:
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.new("RGB", size, "white") as image:
+        image.save(path, format="PNG")
+
+
+def test_supplied_image_source_is_presented_as_one_deterministic_pdf_page(root: Path) -> None:
+    import pypdfium2 as pdfium
+
+    from bd_packet_builder.inventory import read_source_bytes
+
+    path = root / "bd_agreements/supporting_data/bios/Synthetic screenshot.png"
+    write_png(path)
+    inventory = build_inventory(root)
+    source = next(s for s in inventory.sources if s.path.endswith(".png"))
+
+    first = read_source_bytes(root, inventory, source.source_id)
+    second = read_source_bytes(root, inventory, source.source_id)
+
+    assert source.format == "png"
+    assert source.page_count == 1
+    assert source.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert "image_presented_as_pdf_page" in source.flags
+    assert "page_reference_unavailable" not in source.flags
+    assert first == second
+    with pdfium.PdfDocument(first) as document:
+        assert len(document) == 1
+        width, height = document[0].get_size()
+    assert width / height == pytest.approx(300 / 120, rel=0.01)
+    assert resolve_reference(root, inventory, EvidenceReference(source.source_id, 1)) == source
+    with pytest.raises(InventoryError, match="page"):
+        resolve_reference(root, inventory, EvidenceReference(source.source_id, 2))
+
+
+def test_changed_image_source_is_rejected_before_rendering(root: Path) -> None:
+    from bd_packet_builder.inventory import read_source_bytes
+
+    path = root / "bd_agreements/supporting_data/bios/Synthetic screenshot.png"
+    write_png(path)
+    inventory = build_inventory(root)
+    source = next(s for s in inventory.sources if s.path.endswith(".png"))
+    write_png(path, size=(301, 120))
+
+    with pytest.raises(InventoryError, match="changed"):
+        read_source_bytes(root, inventory, source.source_id)
