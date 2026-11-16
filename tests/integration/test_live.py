@@ -283,11 +283,11 @@ def test_prepare_snapshots_evidence_and_records_agent_and_model_versions(
         "bd_agreements/supporting_data/Firm/Firm profile.pdf"
     ]
     versions = {v.name: v.version for v in manifest.versions}
-    assert versions["agent"] == "packet-agent-v50"
-    assert versions["answer-workflow"] == "answer-groups-v13"
-    assert versions["historical-context"] == "historical-page-context-v9"
+    assert versions["agent"] == "packet-agent-v52"
+    assert versions["answer-workflow"] == "answer-groups-v16"
+    assert versions["historical-context"] == "historical-page-context-v11"
     assert versions["historical-controls"] == "historical-control-pixels-v3"
-    assert versions["question-reading"] == "question-reading-v2"
+    assert versions["question-reading"] == "question-reading-v3"
     assert versions["domain-knowledge"] == "domain-knowledge-v2"
     assert len(versions["domain-knowledge-sha256"]) == 64
     assert versions["reading-budget"] == "full-questionnaire-v1"
@@ -306,8 +306,10 @@ def test_run_live_requires_explicit_paid_authorization(tmp_path: Path, evidence_
     assert store.load(manifest.run_id).status == "created"
 
 
-@pytest.mark.parametrize("version_name", ["domain-knowledge", "domain-knowledge-sha256"])
-def test_recovery_rejects_changed_knowledge(tmp_path, evidence_root, version_name):
+@pytest.mark.parametrize(
+    "version_name", ["domain-knowledge", "domain-knowledge-sha256", "agent", "answer-workflow"]
+)
+def test_recovery_rejects_changed_versioned_configuration(tmp_path, evidence_root, version_name):
     from bd_packet_builder.live import validate_resume_configuration
 
     runs = tmp_path / "runs"

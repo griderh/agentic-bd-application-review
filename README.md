@@ -9,6 +9,209 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 ## Development status
 
+### Supplemental-answer presentation (writer v21)
+
+Form redirects now use readable labels such as **Question 10**, taken from the printed
+question number rather than an internal requirement ID. Unnumbered fields use **Response N**
+in requirement order; these are response labels, not invented issuer question numbers.
+Stable audit IDs remain unchanged in requests, decisions and manifests.
+
+Supplemental answers flow onto shared Letter pages in requirement order, using left-aligned
+11-point text, one-inch side margins, bold headings, paragraph spacing and numbered footers.
+Single source-wrapped newlines reflow; blank paragraphs and explicit hyphen/asterisk/numbered
+list items retain their separation. Long answers continue with labeled headings. Evidence
+notes follow each completed answer; form redirects point to its actual first packet page.
+Final evidence references account for consolidated supplements and additional issuer forms.
+Every supplemental answer fragment and evidence note is text-checked before publication,
+and each supplemental page is rendered once.
+
+Only the writer version advances to v21. Extraction, model prompts, answer values, evidence
+rules, signatures policy and dependencies are unchanged. Existing packets are not rewritten.
+Restart the app/worker and generate a fresh packet to see the new presentation.
+
+Validation: targeted suites **321 passed**; full offline suites **1,883 passed, 69 skipped**
+on each of Python 3.12 and 3.13. Ruff lint/format, strict mypy and whitespace checks passed.
+Synthetic shared/continuation pages were visually inspected. Inline and additional-form PDFs
+without supplements retain their exact prior bytes. No live model-quality evaluation or
+existing-packet regeneration was performed.
+
+### Repeated role-specific question anchors (question reading v3)
+
+Repeated inline choice questions can now be verified against their separate mapped response
+rows, rather than being rejected solely because the same wording appears twice on a page.
+This fixes the primary/backup trading-and-quoting question failure in run `59bac591...`.
+
+The verifier requires the exact blank hash, complete one-to-one mappings for all copies,
+native option labels, one native question per bounded control/label row and disjoint anchors.
+Missing, duplicate, overlapping, out-of-bounds or mismatched mappings remain unresolved.
+No role is guessed from requirement IDs or model explanations. Existing historical role,
+selected-control, source, crop and independent gate/writer checks remain required.
+Unique questions keep their existing behavior; unsupported repeated layouts are not generalized
+by relaxing the duplicate rule.
+
+The same verifier runs during evidence collection, answer validation and independent writing.
+Only question reading advances to v3; agent v52, answer groups v16, context v11, prompts,
+historical receipt hashes, schemas and dependencies are unchanged. Restart workers before the
+next live validation and use a fresh question-reading-v3 run; existing runs are not upgraded.
+
+Read-only replay of `59bac591...` recovered exactly the two withheld page-one choices.
+The other **67 decisions**, including Q12, and all proposal values/citations stayed unchanged.
+Seven inspected run artifacts retained their hashes. No model calls or packet regeneration.
+This is deterministic contract verification, not a new live-quality evaluation.
+Validation: targeted suites **312 passed, 1 skipped**; full offline suites **1,880 passed,
+69 skipped** on each of Python 3.12 and 3.13. Ruff lint/format, strict mypy and whitespace
+checks passed.
+The isolated layout comparison remains next.
+
+### Narrow narrative recovery eligibility (historical context v11)
+
+Matching historical question wording with low OCR confidence no longer prevents a disputed
+plain answer from entering the existing bounded native/focused recovery. The question warning
+is retained. Substantive question/role disagreement, uncertain roles, ambiguous geometry and
+disputed controls retain their existing restrictions. Answer corroboration/confidence checks,
+source and crop hashes, shared budgets and independent gate/writer checks are unchanged.
+This permits investigation, not automatic acceptance of either reading.
+
+Context v11 records this behavior; v10 remains withdrawn. Earlier context v8/v9 receipts retain
+their original hashes and replay behavior. Agent v52, answer groups v16, prompts, schemas,
+dependencies and extraction engines are unchanged. Restart workers before the next live run
+and use a fresh context-v11 run, not an upgrade or rewrite of an existing run.
+
+Validation: ten regression cases failed before implementation. Targeted historical/live tests:
+**225 passed, 1 skipped**. Full offline suites: **1,867 passed, 69 skipped** on each of Python
+3.12 and 3.13; Ruff lint/format, strict mypy and whitespace checks passed.
+
+Read-only inspection of Q12 in `6a891a92...` now enters native recovery without a model call,
+retains the question warning and leaves all seven inspected run artifacts unchanged.
+The recovered native passage is **283 characters**, versus **358** in the original visual
+reading and **280** in OCR. Native support for that passage is not proof of complete narrative
+coverage. No packet was regenerated, no paid calls were made, and complete Q12 recovery is
+not claimed. Proceed to the isolated layout comparison rather than widening this fix.
+
+### Exact historical choice evidence binding (agent v52, answer groups v16)
+
+The grouped workflow can replace a misplaced native citation with the answer receipt from the
+proposal's exact, unique current-run historical relationship, including its check hash. This
+handles a correct selected answer whose cited text differs from its checked receipt, without
+guessing from repeated labels such as "No". Identical cached relationships are deduplicated.
+
+The new binding is limited to single-choice answers without write-ins or composed historical
+contexts. It requires the same source/page, a checked selected control, an undisputed answer,
+matching role/context and exact support for the unchanged selected option. Ambiguity, wrong
+context hashes, source/page/value mismatches and supplied invalid OCR hashes are not repaired.
+The source/hash, applicability, gate and independent writer checks remain unchanged. Historical
+answers remain visibly unconfirmed for current continuity, not newly approved business facts.
+
+Raw responses stay immutable; canonical receipts and content-free binding paths support replay
+without another model call. No prompts, schemas, retries, dependencies or extraction engines changed.
+
+Validation: **20 focused binding cases passed**; full offline suites **1,855 passed, 69 skipped**
+on each of Python 3.12 and 3.13. Ruff lint/format, strict mypy and whitespace checks passed.
+
+Read-only replay of `74c5124d...`: Q6, Q7 and Q8 passed the unchanged gate after exactly three
+bindings; the other **66 decisions**, all answer values/historical bases and **seven inspected
+artifacts** remained unchanged. No model calls or packet writes were made. This does not resolve
+the separate page-one checkbox or Q12 narrative-extraction issues and is not a live-quality result.
+
+Restart long-running workers and start a fresh agent-v52/groups-v16 run. Existing runs and
+packets are not upgraded or rewritten. Document Intelligence comparison remains a separate next step.
+
+### Proposal resilience (agent v52, answer groups v15)
+
+A malformed individual answer no longer discards valid peers or necessarily blocks the packet.
+Within a valid, bounded response envelope, code retains valid proposals and requests at most one
+targeted correction per group for the affected requirement IDs. This shares the existing
+three-attempt, run-call and elapsed-time limits with JSON retries and evidence follow-up.
+Durable request markers prevent interruption/resume from resetting either retry allowance.
+
+Supporting-reference labels can be canonicalized to the exact, unique whitespace-equivalent
+substring of the proposed answer. Answer values and source quotations are never rewritten.
+Remaining attributable errors leave the field blank with a code-owned
+`technical_review_required` disposition and explicit actions in the separate reviewer summary,
+not a false finding that business evidence is missing. Valid peers still undergo the normal
+gate/writer checks; unresolved parents do not clear conditional questions or dependent checklists.
+
+Unparseable/unsafe envelopes, unknown or duplicate identities, transport failures, changed sources,
+storage/rendering failures and unsafe publication remain blocking. No evidence checks are relaxed.
+Original responses remain immutable; canonical responses and exception-completion checkpoints
+support replay without regenerating valid peers.
+
+Validation: eight initial regressions failed before implementation; full offline suites
+**1,835 passed, 69 skipped** on each of Python 3.12 and 3.13, with Ruff lint/format and strict mypy
+passing. The original `f0306966...` group passes schema validation after one reference-label
+canonicalization in a read-only check; this is not semantic approval or a recovered run.
+Paid correction evaluation: **0/2 cases executed**, not a model-quality pass.
+
+Restart long-running workers and start a fresh agent-v52/groups-v15 run. Existing runs are not
+upgraded or rewritten. No paid calls, old-run recovery, reviewer chat, new dependencies or
+cover-letter implementation are included.
+
+### Behavior-preserving cleanup, Slice 3 (writer assembly)
+
+The draft writer now delegates additional issuer-form preparation, packet-section construction,
+supplemental-answer PDF rendering and final PDF merging to four typed private helpers in the
+existing module. Evidence validation, answer acceptance, page budgets, rendered-output checks,
+input snapshot rechecks and atomic publication retain their existing behavior and order.
+The coordinator is 878 lines rather than 998; this separates responsibilities, not business rules.
+
+Three synthetic packet-byte and manifest fingerprints were captured before extraction and remain
+unchanged (only the manifest's creation timestamp is excluded). Three additional-form refusal
+cases also passed before and after extraction. Mechanically inlining the helpers reproduces the
+exact pre-cleanup writer AST; every other original writer definition is unchanged.
+
+Validation: targeted suites **392 passed**; full offline suites **1,811 passed, 67 skipped** on
+each of Python 3.12 and 3.13. Ruff lint/format, strict mypy and whitespace checks pass.
+Agent v51, answer groups v14, writer v20, prompts, schemas, dependencies and recovery contracts
+are unchanged. No paid calls, real-packet rewrites or cover-letter implementation; a live
+post-cleanup comparison has not been run.
+
+### Exact native-page citation offsets (answer groups v14)
+
+When a model supplies incorrect citation offsets, the grouped workflow still prefers a unique
+checked receipt. If none exists, it can now derive the offsets from the same approved source/page's
+retained, citable native text. The quote must occur exactly once, including overlapping matches,
+and retained page text/source hashes must be consistent. Identical cached readings are deduplicated.
+No fuzzy matching, quote rewriting, source/page correction or OCR offset conversion is performed.
+
+Derived offsets are not verified answers: existing source/hash, period, historical-context and
+gate/writer checks remain required. Raw model responses remain unchanged; canonical citations
+and resolved-path audit records support saved-group replay without regeneration.
+
+Restart long-running workers and start a fresh run using agent v51/answer groups v14.
+The failed v13 run `0d8fdb52...` was checked read-only, not resumed or rewritten. Its corrected
+citation independently resolves against the source with the original snapshot hash. Prompts,
+schemas, retries and dependencies are unchanged; no paid calls or existing packet changes.
+
+Validation: four regressions failed before implementation. Full offline suites report
+**1,805 passed, 67 skipped** on each of Python 3.12 and 3.13; Ruff lint/format, strict mypy and
+whitespace checks pass. Tests cover refusal cases, canonical/raw artifacts, replay and actual
+written/blank PDF output. Live end-to-end model quality remains unverified.
+
+### Citation-derived historical tenure dates (agent v51)
+
+Historical tenure arithmetic now derives its signing date from the existing signing-date
+citation using the explicit-date parser, rather than trusting the model's duplicate `signed_on`
+value. The staged proposal records that canonical date. This prevents a model-generated year
+such as 7147 or 7202 from defeating a supported citation to 2026; it does not guess missing dates.
+Missing, invalid, multiple or genuinely future cited dates remain rejected.
+
+Parsing is not verification. Approved-source, same-packet signing context, native/OCR receipts
+and final gate/writer checks still control whether an answer can be written. Fabricated quotes,
+wrong sources, conflicting signing dates and unresolved OCR discrepancies remain blocked.
+Original model responses remain unchanged in private group artifacts; canonical proposals are
+saved with the draft request. Normalization emits a safe progress/log event with the requirement
+ID and `evidence_status=unvalidated`, never the date, citation text or personal details.
+
+This is a behavior fix, separate from cleanup. Prompts, schemas and retry limits are unchanged;
+no new dependencies or paid calls. Restart long-running workers and start a fresh v51 run.
+Older runs, including `9d30a4d1...`, are not silently upgraded or resumable under v51.
+Existing run artifacts and packets were not rewritten.
+
+Validation: nine regressions failed before implementation; full offline suite **1,787 passed,
+67 skipped** on both Python 3.12 and 3.13. Ruff lint/format, strict mypy and whitespace checks
+pass. The original failed proposal also normalizes in a read-only offline check, not a resumed
+or published run. Live end-to-end verification remains unexecuted.
+
 ### Slice 4 withdrawn: restore the verified-answer baseline
 
 The v38 run `a3fec3e3...` exposed a regression: Slice 4's answer-layout veto withheld Q3,
@@ -1246,8 +1449,9 @@ or scanned-source checks and passes `verification_results` back to the affected 
 No arbitrary paths, external actions or additional agents are exposed. At most two follow-up
 rounds fit within the existing three attempts per group, configured cumulative group-call limit
 and shared image/tool/time limits; there are at most 20 verification requests per run. Transport
-errors, timeouts and schema/grounding failures still require explicit recovery rather than
-automatic retries.
+errors and timeouts still require explicit recovery. Invalid group envelopes remain blocking;
+attributable proposal errors use the bounded correction/technical-review policy described above.
+Grounding failures continue to withhold unsupported answers.
 
 For an explicit USD minimum, a request can include `minimum_amount`: exact issuer
 `criterion_quote`, `field_label` and `line_label`, with the amount alone as its quote.
@@ -1269,7 +1473,7 @@ evidence verification, approve a packet or establish that every criterion was co
 
 Issuer-criterion matching ignores whitespace and PDF line wrapping only; spelling, case and
 punctuation must still match. This avoids rejecting an unchanged quotation split across lines.
-With `answer-groups-v13`, syntactically malformed or unfinished model JSON gets **one automatic
+Introduced with `answer-groups-v13`, syntactically malformed or unfinished model JSON gets **one automatic
 retry per group**, provided the existing three-attempt, cumulative model-call and elapsed-time
 budgets allow it. The retry generates a fresh response from the same requirements and checked
 evidence, with validation feedback; it does not repair or salvage the malformed response.
@@ -1284,7 +1488,7 @@ byte size and the SDK completion reason (`stop`, `length`, `tool_calls`, `conten
 unavailable/unknown); retry request/result checkpoints identify the failed attempt being retried.
 These diagnostics never copy answers or document text into operational logs. Retry markers survive
 interruption and explicit resume; resume does not reset the automatic retry allowance.
-Start a fresh run for v13; older answer plans are not upgraded or rewritten in place.
+Start a fresh agent-v52/groups-v15 run; older answer plans are not upgraded or rewritten in place.
 
 Each follow-up saves an immutable request marker before execution and a private result afterward.
 Recovery reuses completed verification results and cached image readings, retaining successful
@@ -1296,6 +1500,9 @@ Synthetic paid protocol/grounding cases are opt-in with `BD_RUN_EVIDENCE_FOLLOWU
 and the existing `BD_FOUNDRY_ENDPOINT` / `BD_FOUNDRY_DEPLOYMENT` variables. Run
 `python -m pytest -q tests/integration/test_evidence_followup_eval.py` only when paid calls are
 authorized. Offline fixtures establish contracts and rendering behavior, not model-quality metrics.
+Two targeted-correction cases are separately opt-in with `BD_RUN_PROPOSAL_REPAIR_EVAL=1`,
+the same Foundry variables and the same test command. They check a supported correction and an
+unsupported answer remaining unresolved, without replacing an already retained peer.
 
 ### Navigating the readable run artifacts
 
@@ -1315,7 +1522,8 @@ For a missing answer, trace **group response → gate decision → final draft a
 | `answer_handoff.json` | Discovery observations and checked evidence supplied to answering; not answer approval. |
 | `answer-plan.json` | Stable groups of up to five questions, handoff hash, versions and call/follow-up limits. |
 | `answer-group-NNN-attempt-N-request.json` | Durable marker for a model answering attempt, including the retry origin when applicable. |
-| `answer-group-NNN-attempt-N.json` | Private original response, byte size, completion reason, retry origin and intake diagnostics. `staged_unvalidated` is structural acceptance only. |
+| `answer-group-NNN-attempt-N.json` | Private original/canonical responses, byte size, completion reason, retry origin and per-proposal diagnostics. `staged_unvalidated` is structural acceptance only. |
+| `answer-group-NNN-completion.json` | Canonical staging response and technical exceptions after bounded correction; saved before staging for idempotent replay. |
 | `answer-group-NNN-attempt-N-verification-request.json` | Requested follow-up operations recorded before execution. |
 | `answer-group-NNN-attempt-N-verification.json` | Verification results, deterministic minimum comparisons and cached reading/budget state. |
 | `draft_request.json` | Combined proposals, requirements, layout and sources sent to gate/writer. |
@@ -1602,6 +1810,41 @@ are **0/6 executed**; no paid calls were made. Offline tests do not establish ac
 recognition or guarantee inclusion in a live packet.
 Validation: affected suites **181 passed, 17 skipped**; full offline suite **1,763 passed,
 67 skipped**. Ruff lint/format, strict mypy and whitespace checks pass.
+
+**Behavior-preserving cleanup, Slice 1:** internal reviewer-summary formatting now lives in
+`reviewer_summary.py`, separate from source/artifact reads, PDF work and publication.
+The writer passes prepared results, pagination and support-audit values; the agent passes
+existing supporting-document and representative review data. Wording, section order and
+newlines are unchanged. Three synthetic characterization cases captured exact pre-extraction
+summary bytes, including unresolved support after process restart and conditional answers.
+Existing historical/OCR/rendering and recovery tests remain in place.
+
+This is formatting extraction only: agent v50, prompt/tool contracts, saved run formats,
+answer decisions, PDF checks and publication safeguards are unchanged. Existing compatible
+runs do not require a version upgrade for this refactor. No paid calls, new dependencies or
+cover-letter functionality. Evidence-handoff simplification and broader writer decomposition
+were deferred to separate cleanup slices; Slice 2 is recorded below.
+Validation: affected suites **222 passed**; full offline suite **1,766 passed, 67 skipped**
+on each supported Python target (3.12 and 3.13). Ruff lint/format, strict mypy on both targets
+and whitespace checks pass. Agent prompt/version/tool definitions and all non-assembly agent
+methods were also checked unchanged against the starting commit.
+
+**Behavior-preserving cleanup, Slice 2:** evidence completion now separates coverage and
+reconsideration checks, typed selection-payload construction, artifact snapshotting and ordered
+answer-handoff construction. Shared selection values are serialized once and reused explicitly,
+preserving each saved payload's field order. OCR artifact reads, hash checks, mandatory bio
+deduplication, exception ordering and the single evidence-completion transition remain intact.
+Three synthetic characterization cases passed before and after extraction, preserving exact
+artifact bytes and restart context for native evidence and selected/missing representative bios.
+
+Agent v50, prompts, tool contracts, saved formats and recovery behavior remain unchanged.
+No paid calls, new dependencies, existing-packet rewrites or cover-letter implementation.
+Broader writer decomposition remains unstarted.
+Validation: affected suites **222 passed**; full offline suite **1,769 passed, 67 skipped**
+on each supported Python target (3.12 and 3.13). Ruff lint/format, strict mypy on both targets
+and whitespace checks pass. Structural comparison against the pre-Slice-2 baseline confirms
+unchanged existing top-level contracts/registration and all original agent methods except
+evidence completion.
 
 Existing trusted reviewer assessments can be passed to a fresh run:
 

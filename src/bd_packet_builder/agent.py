@@ -22,7 +22,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol, TypedDict
 
 from agent_framework import (
     Agent,
@@ -96,6 +96,11 @@ from bd_packet_builder.representatives import (
 )
 from bd_packet_builder.retrieval import default_catalog, source_context
 from bd_packet_builder.review import AnswerProposals
+from bd_packet_builder.reviewer_summary import (
+    representative_bio_summary,
+    representative_contact_summary,
+    supporting_document_summary,
+)
 from bd_packet_builder.run import (
     EvidenceSnapshot,
     ReviewException,
@@ -114,7 +119,17 @@ from bd_packet_builder.scan import (
 )
 from bd_packet_builder.visual import VisualPage
 
-AGENT_VERSION = "packet-agent-v50"
+
+class _EvidenceSelectionPayload(TypedDict):
+    attachments: list[str]
+    historical_exhibits: list[dict[str, Any]]
+    attachment_plan: list[dict[str, Any]]
+    attachment_revisions: list[dict[str, object]]
+    attachment_inspections: list[dict[str, Any]]
+    representative_bios: list[dict[str, Any]]
+
+
+AGENT_VERSION = "packet-agent-v52"
 AGENT_INSTRUCTIONS = """You complete one broker-dealer application packet by calling tools.
 You have no other capabilities: no shell, files, browsing, email or submission.
 
@@ -1717,6 +1732,9 @@ class PacketAgentTools:
                 interpretation.requirements.requirements
                 if interpretation.requirements is not None
                 else (),
+                mappings=interpretation.layout.responses
+                if interpretation.layout is not None
+                else (),
             )
         return tools.read_historical_page(args.source_id, args.page).model_dump(mode="json")
 
@@ -1780,6 +1798,81 @@ class PacketAgentTools:
         }
 
     def _finish_evidence(self, _m: RunManifest, _args: Contract) -> object:
+        self._validate_evidence_completion()
+        interpretation = self._interpretation()
+        unreviewed_representatives = [
+            r.requirement_id
+            for r in (
+                interpretation.requirements.requirements
+                if interpretation.requirements is not None
+                else ()
+            )
+            if r.kind in ("text", "identifier")
+            and re.search(r"\bname\b", r.instruction, re.I)
+            and re.search(
+                r"\b(representative|sales\s+associate|backup)\b",
+                r.instruction + " " + interpretation.navigation_context.get(r.requirement_id, ""),
+                re.I,
+            )
+            and r.requirement_id not in self._representative_bios
+        ]
+        candidates = [
+            *(self._evidence.candidate_readings if self._evidence is not None else ()),
+            *(self._scans.candidate_readings if self._scans is not None else ()),
+        ]
+        selection = self._evidence_selection_payload()
+        artifacts = self._evidence_artifacts(selection, candidates, unreviewed_representatives)
+        handoff = self._evidence_handoff(
+            interpretation, selection, candidates, unreviewed_representatives
+        )
+        artifacts["answer_handoff.json"] = _envelope(handoff).encode()
+        self._store.advance(
+            self._run_id,
+            step="finish_evidence",
+            expected_status="form_interpreted",
+            to_status="evidence_collected",
+            artifacts=artifacts,
+            exceptions=tuple(
+                ReviewException(
+                    code="representative_" + result.status,
+                    requirement_id=result.request.role_requirement_id,
+                    message=(
+                        f"Representative bio resolution: {result.status}; "
+                        "review the private identity-link artifact. No assignment or currency "
+                        "approval is implied."
+                    ),
+                )
+                for result in self._representative_bios.values()
+                if result.status != "selected"
+            )
+            + tuple(
+                ReviewException(
+                    code="representative_bio_not_reviewed",
+                    requirement_id=identity,
+                    message="Representative name field has no bio identity resolution. "
+                    "Form navigation is only a review hint, not proof of role assignment.",
+                )
+                for identity in unreviewed_representatives
+            )
+            + tuple(
+                ReviewException(
+                    code="supporting_document_" + item.disposition,
+                    requirement_id=(
+                        item.requirement_ids[0] if len(item.requirement_ids) == 1 else None
+                    ),
+                    message=_short(
+                        f"{item.family} ({', '.join(item.requirement_ids)}): {item.reason} "
+                        f"Limitation: {item.limitation}"
+                    ),
+                )
+                for item in self._attachment_plan
+                if item.disposition in ("unavailable", "human_component", "review_required")
+            ),
+        )
+        self._completion_handoff = handoff
+        return handoff
+
+    def _validate_evidence_completion(self) -> None:
         if self._require_attachment_coverage:
             if self._attachment_candidate_sources is None:
                 raise ToolInputError(
@@ -1829,27 +1922,8 @@ class PacketAgentTools:
                 "exclude with a new rationale, or resubmit it unchanged if it remains "
                 "undecidable; then call finish_evidence again."
             )
-        interpretation = self._interpretation()
-        unreviewed_representatives = [
-            r.requirement_id
-            for r in (
-                interpretation.requirements.requirements
-                if interpretation.requirements is not None
-                else ()
-            )
-            if r.kind in ("text", "identifier")
-            and re.search(r"\bname\b", r.instruction, re.I)
-            and re.search(
-                r"\b(representative|sales\s+associate|backup)\b",
-                r.instruction + " " + interpretation.navigation_context.get(r.requirement_id, ""),
-                re.I,
-            )
-            and r.requirement_id not in self._representative_bios
-        ]
-        candidates = [
-            *(self._evidence.candidate_readings if self._evidence is not None else ()),
-            *(self._scans.candidate_readings if self._scans is not None else ()),
-        ]
+
+    def _evidence_selection_payload(self) -> _EvidenceSelectionPayload:
         attachments = self._evidence.attachments if self._evidence is not None else ()
         for resolution in self._representative_bios.values():
             # Bios that ground a representative are mandatory supporting documents, once each.
@@ -1863,13 +1937,30 @@ class PacketAgentTools:
                 ),
             } & set(attachments):
                 attachments = (*attachments, linked)
-        checks = self._scans.checks if self._scans is not None else []
         attachment_inspections = [
             reading.model_dump(mode="json")
             for reading in (
                 self._evidence.attachment_inspections if self._evidence is not None else ()
             )
         ]
+        return {
+            "attachments": list(attachments),
+            "historical_exhibits": [e.model_dump(mode="json") for e in self._historical_exhibits],
+            "attachment_plan": [p.model_dump(mode="json") for p in self._attachment_plan],
+            "attachment_revisions": list(self._attachment_revisions),
+            "attachment_inspections": attachment_inspections,
+            "representative_bios": [
+                r.model_dump(mode="json") for r in self._representative_bios.values()
+            ],
+        }
+
+    def _evidence_artifacts(
+        self,
+        selection: _EvidenceSelectionPayload,
+        candidates: list[dict[str, object]],
+        unreviewed_representatives: list[str],
+    ) -> dict[str, bytes]:
+        checks = self._scans.checks if self._scans is not None else []
         context_checks = (
             self._evidence.historical_context.checks
             if self._evidence is not None and self._evidence.historical_context is not None
@@ -1880,26 +1971,11 @@ class PacketAgentTools:
                 {
                     "version": BIO_RESOLUTION_VERSION,
                     "unreviewed_requirement_ids": unreviewed_representatives,
-                    "resolutions": [
-                        r.model_dump(mode="json") for r in self._representative_bios.values()
-                    ],
+                    "resolutions": selection["representative_bios"],
                 }
             ).encode(),
             "domain_knowledge.json": _envelope(knowledge_context()).encode(),
-            "evidence_selection.json": _envelope(
-                {
-                    "attachments": list(attachments),
-                    "historical_exhibits": [
-                        e.model_dump(mode="json") for e in self._historical_exhibits
-                    ],
-                    "attachment_plan": [p.model_dump(mode="json") for p in self._attachment_plan],
-                    "attachment_revisions": list(self._attachment_revisions),
-                    "attachment_inspections": attachment_inspections,
-                    "representative_bios": [
-                        r.model_dump(mode="json") for r in self._representative_bios.values()
-                    ],
-                }
-            ).encode(),
+            "evidence_selection.json": _envelope(selection).encode(),
             "scan_checks.json": _envelope(
                 {
                     "checks": [c.model_dump(mode="json") for c in checks],
@@ -1956,7 +2032,16 @@ class PacketAgentTools:
             if _sha256(data) != digest:
                 raise _Failed("scan_artifact_changed", "OCR evidence changed before selection.")
             artifacts[f"ocr-{digest}.json"] = data
-        handoff: dict[str, object] = {
+        return artifacts
+
+    def _evidence_handoff(
+        self,
+        interpretation: FormInterpretation,
+        selection: _EvidenceSelectionPayload,
+        candidates: list[dict[str, object]],
+        unreviewed_representatives: list[str],
+    ) -> dict[str, object]:
+        return {
             "calculation_date": str(
                 self.manifest().request.as_of or self.manifest().created_at.date()
             ),
@@ -1966,15 +2051,13 @@ class PacketAgentTools:
             "retained_proposals": [
                 p.model_dump(mode="json") for p in self._pending_answers.values()
             ],
-            "attachments": list(attachments),
-            "attachment_plan": [p.model_dump(mode="json") for p in self._attachment_plan],
-            "attachment_revisions": list(self._attachment_revisions),
-            "attachment_inspections": attachment_inspections,
-            "representative_bios": [
-                r.model_dump(mode="json") for r in self._representative_bios.values()
-            ],
+            "attachments": selection["attachments"],
+            "attachment_plan": selection["attachment_plan"],
+            "attachment_revisions": selection["attachment_revisions"],
+            "attachment_inspections": selection["attachment_inspections"],
+            "representative_bios": selection["representative_bios"],
             "unreviewed_representative_requirements": unreviewed_representatives,
-            "historical_exhibits": [e.model_dump(mode="json") for e in self._historical_exhibits],
+            "historical_exhibits": selection["historical_exhibits"],
             "native_quote_citations": self._native_quotes,
             "sources": list(self._source_metadata.values()),
             "issuer": self.manifest().request.issuer,
@@ -2056,52 +2139,6 @@ class PacketAgentTools:
                 "supplement's checked answer parts."
             ),
         }
-        artifacts["answer_handoff.json"] = _envelope(handoff).encode()
-        self._store.advance(
-            self._run_id,
-            step="finish_evidence",
-            expected_status="form_interpreted",
-            to_status="evidence_collected",
-            artifacts=artifacts,
-            exceptions=tuple(
-                ReviewException(
-                    code="representative_" + result.status,
-                    requirement_id=result.request.role_requirement_id,
-                    message=(
-                        f"Representative bio resolution: {result.status}; "
-                        "review the private identity-link artifact. No assignment or currency "
-                        "approval is implied."
-                    ),
-                )
-                for result in self._representative_bios.values()
-                if result.status != "selected"
-            )
-            + tuple(
-                ReviewException(
-                    code="representative_bio_not_reviewed",
-                    requirement_id=identity,
-                    message="Representative name field has no bio identity resolution. "
-                    "Form navigation is only a review hint, not proof of role assignment.",
-                )
-                for identity in unreviewed_representatives
-            )
-            + tuple(
-                ReviewException(
-                    code="supporting_document_" + item.disposition,
-                    requirement_id=(
-                        item.requirement_ids[0] if len(item.requirement_ids) == 1 else None
-                    ),
-                    message=_short(
-                        f"{item.family} ({', '.join(item.requirement_ids)}): {item.reason} "
-                        f"Limitation: {item.limitation}"
-                    ),
-                )
-                for item in self._attachment_plan
-                if item.disposition in ("unavailable", "human_component", "review_required")
-            ),
-        )
-        self._completion_handoff = handoff
-        return handoff
 
     def answer_handoff(self) -> dict[str, Any]:
         """Load the immutable checked evidence context, including after process restart."""
@@ -2446,6 +2483,18 @@ class PacketAgentTools:
                 raise _Rejected("duplicate_proposal", "Each requirement may be answered once.")
             if rid in submitted and submitted[rid] != checked:
                 raise _Rejected("answer_batch_conflict", "A staged proposal cannot be replaced.")
+            if (
+                rid not in self._pending_answers
+                and proposal.historical_basis is not None
+                and checked.historical_basis is not None
+                and proposal.historical_basis.tenure != checked.historical_basis.tenure
+            ):
+                message = (
+                    f"Historical tenure date normalized: requirement={rid}; "
+                    "origin=citation; evidence_status=unvalidated"
+                )
+                logging.getLogger(__name__).info("%s run=%s", message, self._run_id)
+                self.answer_progress(message)
             seen.add(rid)
             submitted[rid] = checked
         return submitted
@@ -2743,93 +2792,34 @@ class PacketAgentTools:
                     "attachment_manifest_invalid",
                     "Attachment manifest is missing its unassessed source count.",
                 )
-            support_summary = [
-                "\nSUPPORTING-DOCUMENT REVIEW:",
-                f"Selected supporting sources: {len(review.attachment_source_ids)}.",
-            ]
-            support_summary.append(
-                "Attachment version dates are ordering metadata, not capture/publication or "
-                "reporting dates. PDF creation time may reflect re-exporting older material."
-            )
-            for selected_source in self._context()[0].sources:
-                if selected_source.source_id in review.attachment_source_ids:
-                    selected_version = (
-                        selected_source.version_timestamp
-                        or selected_source.version_date
-                        or "unknown"
-                    )
-                    support_summary.append(
-                        f"- {selected_source.family} source_id={selected_source.source_id[:12]}: "
-                        f"version={selected_version}; "
-                        f"basis={selected_source.version_date_basis or 'unknown'}; "
-                        f"filename date={selected_source.filename_date or 'unknown'}."
-                    )
-            if unresolved_support:
-                support_summary.append("Items requiring follow-up:")
-                sources = {s.source_id: s for s in self._context()[0].sources}
-                for item in unresolved_support:
-                    support_summary.append(
-                        f"- {item.family} ({', '.join(item.requirement_ids)}): {item.reason} "
-                        f"Limitation: {item.limitation}"
-                    )
-                    source = sources.get(item.source_id or "")
-                    if item.disposition == "review_required" and source is not None:
-                        inspections = self.answer_handoff().get("attachment_inspections", [])
-                        outcomes = [
-                            f"page {reading['page']}: {reading['status']}"
-                            for reading in inspections
-                            if reading["source_id"] == source.source_id
-                        ]
-                        version = source.version_timestamp or source.version_date or "unknown"
-                        support_summary.extend(
-                            [
-                                f"  Source: {source.path}; source_id={source.source_id}; "
-                                f"sha256={source.sha256}; "
-                                f"inspected pages={list(item.inspected_pages)}; "
-                                f"version={version}; "
-                                f"basis={source.version_date_basis or 'unknown'}.",
-                                "  Visual inspection: "
-                                + ("; ".join(outcomes) or "not performed")
-                                + ".",
-                                "  Reviewer question: Should this document be included for the "
-                                "linked requirement(s)? Inspect the source page(s) and choose "
-                                "Include / Exclude / Leave unresolved. Attachment inclusion does "
-                                "not verify its figures or approve an application answer.",
-                            ]
-                        )
-            if unassessed:
-                support_summary.append(
-                    f"{unassessed} available source(s) have no recorded attachment decision."
-                )
-            support_summary.append("See attachment-manifest.json for the detailed audit.")
-            artifacts["reviewer-summary.txt"] += ("\n".join(support_summary) + "\n").encode()
+            inventory = self._context()[0]
+            source_ids = {source.source_id for source in inventory.sources}
+            inspection_readings = {
+                item.source_id: self.answer_handoff().get("attachment_inspections", [])
+                for item in unresolved_support
+                if item.disposition == "review_required" and item.source_id in source_ids
+            }
+            artifacts["reviewer-summary.txt"] += supporting_document_summary(
+                unresolved_support,
+                inventory,
+                review.attachment_source_ids,
+                unassessed,
+                inspection_readings,
+            ).encode()
             bio_resolutions = self.answer_handoff().get("representative_bios", [])
             unreviewed_bios = self.answer_handoff().get(
                 "unreviewed_representative_requirements", []
             )
             if bio_resolutions or unreviewed_bios:
-                artifacts["reviewer-summary.txt"] += (
-                    "\nREPRESENTATIVE BIO IDENTITY LINKS (internal; selected bios are attached "
-                    "as supporting documents; not assignment or currency approval):\n"
-                    + json.dumps(
-                        {
-                            "resolutions": bio_resolutions,
-                            "unreviewed_requirement_ids": unreviewed_bios,
-                        },
-                        indent=2,
-                    )
-                    + "\n"
+                artifacts["reviewer-summary.txt"] += representative_bio_summary(
+                    bio_resolutions, unreviewed_bios
                 ).encode()
             if bio_resolutions:
                 contacts = json.loads(
                     self._store.read_artifact(self._run_id, "representative_contacts.json")
                 )
-                artifacts["reviewer-summary.txt"] += (
-                    "\nREPRESENTATIVE TITLE AND CONTACT RECONCILIATION (internal; titles and "
-                    "contacts come from the attached bio; history and bio differences are listed "
-                    "for review; currency is not confirmed):\n"
-                    + json.dumps(contacts, indent=2)
-                    + "\n"
+                artifacts["reviewer-summary.txt"] += representative_contact_summary(
+                    contacts
                 ).encode()
         self._store.advance(
             self._run_id,

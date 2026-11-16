@@ -2,6 +2,377 @@
 
 Status: implementation roadmap, rebaselined October 28, 2026.
 
+**Supplemental-answer presentation: implementation plan (November 16, 2026).**
+Keep audit requirement IDs unchanged, but derive reader-facing question numbers from issuer
+wording, not opaque IDs. Use readable response labels for unnumbered fields. Replace the
+one-answer-per-page renderer with one deterministic flow plan used for reservation, rendering
+and independent text checks. Use left-aligned 11-point body text, one-inch side margins,
+bold headings, paragraph/list spacing and a repeated incomplete-draft header. Pack answers in
+requirement order, continue long answers without orphaned headings, and reserve bounded evidence
+note space before resolving final packet references. Retain all answer/source checks, original
+values, page budgets and separate internal summaries. Test shared pages, printed numbers
+overriding ID-like numbers, long-answer completeness, additional issuer forms and final evidence
+destinations offline; visually inspect synthetic output and run both Python suites/static checks.
+
+**Supplemental-answer presentation: completed and verified (November 16, 2026).**
+Writer v21 uses a shared placement plan for page allocation, rendering and bounded text
+verification. Printed question numbers become reader-facing labels; opaque IDs remain audit
+keys. Answers share pages in requirement order, with left-aligned 11-point body text, one-inch
+side margins, bold source-page headings, paragraph/list spacing and continuation headings.
+Single source-wrapped newlines reflow without changing non-whitespace answer content. Evidence
+notes follow completed answers. Their worst-case page-number width is reserved before final
+pagination, so neither consolidation nor additional issuer forms invalidate destinations.
+The supplemental section hash is updated by section identity, not a hardcoded index that
+could overwrite an additional form's hash.
+
+The two initial shared-page regression variants failed before implementation. Three final
+variants cover shared short answers, an additional issuer form and a long middle answer whose
+successor starts on a later page. They verify complete body text, source-number precedence
+over an ID-like number, formatting, draft warnings, section hashes and actual form/evidence
+destinations. Existing long-answer, historical, hyphen and 200-page-budget cases remain
+covered. Synthetic shared and continuation pages were visually inspected. Non-supplement
+PDF fingerprints are unchanged; their manifests differ only by writer version. Supplemental
+fingerprints intentionally reflect the new typography, pagination and references.
+
+Validation commands and results:
+- `.venv/bin/python -m pytest -q tests/integration/test_draft.py tests/integration/test_response_layout.py tests/unit/test_response_structure.py tests/integration/test_historical_context.py`:
+  **321 passed**.
+- `.venv/bin/python -m pytest -q` and `.venv313/bin/python -m pytest -q`:
+  **1,883 passed, 69 skipped** on each Python target.
+- `.venv/bin/ruff check .`, `.venv/bin/ruff format --check .`, `.venv/bin/mypy`
+  and `git diff --check`: passed.
+
+No dependencies, extraction engines, prompts, model configuration, evidence policy, answer
+values or existing packets were changed. No paid calls. Model-quality evaluation is not
+applicable here (zero live cases); these are deterministic presentation checks. Restart the
+worker and generate a fresh packet for live visual acceptance; the isolated extraction-layout
+comparison remains a separate next step.
+
+**Repeated role-specific question anchoring: implementation plan (November 16, 2026).**
+Run `59bac591...` recovered Q12 but withheld both page-one trading/quoting choices.
+The historical selections, answer receipts and focused question rereads pass their checks.
+The current blank repeats the same question for primary/backup representatives, so the global
+single-occurrence rule excludes both targets and the final gate reports unresolved wording.
+
+1. Add failing synthetic cases for repeated inline choice questions with distinct mapped rows
+   and native labels, including actual gate/writer output. Keep unmapped/global duplicates
+   refused and cover wrong hashes/pages/wording, invalid labels, missing/duplicate/overlapping
+   mappings and wrong historical roles.
+2. Extend the existing blank-question verifier with optional response mappings. For repeated
+   inline choices only, require every copy to have exactly one matching mapping, exactly one
+   native question in its control/label row and native option labels. Require disjoint row
+   anchors and a one-to-one binding across all copies. Do not infer roles from requirement IDs,
+   model explanations, old answers or question-list order; use the existing role-specific
+   physical placements and retain historical role/selection checks.
+3. Use the same verifier in evidence collection, final gate and independent writer rechecks.
+   Preserve unique-question behavior, historical receipt hashes/replay, answer values and
+   source/crop/control checks. Unsupported layouts remain unresolved; no generic duplicate veto
+   removal, new extraction engine, narrative work, prompt/schema changes or model calls.
+4. Version question reading and require fresh runs. Run targeted/full offline suites on both
+   Python targets plus Ruff, strict mypy and whitespace checks. Replay the latest saved request
+   read-only: only the two missing choices should improve; Q12 and every other decision/value
+   must remain unchanged, with original artifacts untouched. Layout comparison remains next.
+
+**Mapped duplicate-question implementation and read-only verification (November 16, 2026).**
+Question reading v3 preserves the existing global anchor for unique native questions. For
+repeated inline choices, the shared verifier additionally requires an exact mapping per copy,
+native labels inside the actual label boxes, one complete question in each bounded row and
+disjoint one-to-one anchors covering every native occurrence. Row context is bounded by the
+mapped control/label height, not an unrestricted page search or a role inferred from an ID.
+No claim of semantic role assignment from geometry alone is added; historical role and
+selection checks remain unchanged. Other repeated layouts remain unresolved.
+
+The verifier is wired into all three existing production callers: evidence collection,
+the final gate and the independent writer. Pylance confirmed call-site compatibility and
+strict mypy passed. Agent v52/groups v16/context v11, prompts, schemas, historical source
+receipt hashes, gate/writer decision rules and dependencies are unchanged. Fresh runs record
+question-reading-v3; no older artifacts are upgraded or rewritten.
+
+The new end-to-end synthetic case failed before implementation on the intended withheld
+supported answer; its wrong-role refusal already passed. Expanded tests exercise normal and
+reordered opaque field IDs, missing/duplicate/same-row/overlapping mappings, invalid native
+labels, wrong hashes/pages/wording, out-of-bounds placements and actual writing with zero
+changed pixels outside allowed regions. Targeted unit/historical/live/agent suites:
+**312 passed, 1 skipped**.
+
+Full offline suites: **1,880 passed, 69 skipped** on each of Python 3.12.13 and 3.13.18.
+Ruff lint/format, strict mypy and whitespace checks passed. No dependencies changed.
+
+Read-only replay of saved request `59bac591...` through the implemented verifier and unchanged
+gate changed exactly **two decisions** (primary/backup trading-and-quoting) from withheld to
+draft-verified with unconfirmed historical continuity. **67 other decisions**, including Q12,
+and all proposals/citations remained unchanged. Seven inspected run artifacts retained their
+hashes; no paid calls, source edits or packet writes. This is not a new live model evaluation.
+Restart workers/use a fresh question-reading-v3 run for live validation; layout comparison is next.
+
+**Narrow narrative recovery eligibility: approved plan (November 16, 2026).**
+Fresh run `6a891a92...` recovered four omitted choices but left Q12 blank. Its question
+image/OCR wording agrees with low OCR confidence, while its answer readings disagree.
+The question warning prevents the existing bounded native/focused recovery from running.
+
+1. Reproduce this combination with failing synthetic regressions, including actual writer
+   acceptance/withholding, bounded rereads and restart-safe evidence rechecks.
+2. Permit answer recovery when the sole otherwise-blocking context warning is low question
+   confidence with presentation-equivalent wording. Keep the warning. Do not permit a
+   substantive question disagreement, role uncertainty, ambiguous geometry or disputed control.
+3. Keep answer corroboration, confidence, source hashes, crop verification, shared budgets and
+   gate/writer checks unchanged. This allows investigation, not acceptance of either reading.
+4. Version the context behavior and preserve earlier receipt hashes/replay. No prompts, schemas,
+   extraction engines, new budgets, paid calls or edits to original runs.
+5. Run targeted/full offline suites and static checks; inspect Q12 read-only with no new model
+   calls. Report any remaining disagreement rather than widening this fix. Proceed to isolated
+   layout comparison next, even if Q12 remains unresolved.
+
+**Narrow eligibility implementation and verification (November 16, 2026).**
+Context v11 permits agreeing low-confidence question wording to pass the existing plain-answer
+recovery entry rule. The warning remains immutable; no answer, role, geometry, control,
+confidence, corroboration, budget or gate/writer rule changes. V10 remains withdrawn; explicit
+v9 behavior is retained for old hashes and rechecks, alongside existing v8 compatibility.
+Agent v52/groups v16 and all prompts, schemas and dependencies are unchanged.
+
+Ten new regression variants failed on the intended missing candidate, skipped recovery outcome
+or absent accepted answer before implementation. Coverage includes native/focused recovery,
+retained low-confidence question warnings, unreadable/disagreeing/third readings, exhausted
+budgets, actual writer output, crop/transcription/artifact tampering, role-confidence refusal
+and v9 unattempted-recovery replay. Targeted historical/live suites: **225 passed, 1 skipped**.
+Full offline suites: **1,867 passed, 69 skipped** on each Python target (3.12.13/3.13.18).
+Ruff lint/format, strict mypy and whitespace checks passed.
+
+Read-only Q12 inspection of `6a891a92...` verified the old receipt still rechecks unchanged
+and the new version enters native recovery, preserving the question warning. The existing
+recovery resolves a **283-character native passage**, versus **358** characters in the visual
+reading and **280** in OCR. This establishes support for the passage, not full-answer
+completeness. Seven inspected run artifacts remained unchanged; no paid calls, source edits,
+packet writes or live-quality evaluation. Do not claim Q12 is completely fixed.
+Restart workers/use a fresh context-v11 run for future live validation; layout comparison is
+next, with narrative extent explicitly included. No further narrative micro-fixes in this slice.
+
+**Checked historical evidence binding: implementation plan (November 16, 2026).**
+Pause cleanup and extraction changes. Latest run `74c5124d...` populated 43 rather than 48
+fields; three missing single-choice answers had exact checked historical relationships but
+model-supplied native citations instead of the associated answer receipts. An in-memory
+substitution using only the current run's records passed the unchanged gate for all three.
+
+1. Add failing synthetic grouped-workflow tests for historical single-choice receipt binding,
+   actual PDF writing, unchanged peers/raw responses and restart without regeneration.
+2. Resolve at proposal level from the complete current-run historical-context reference,
+   including its hash, never from a repeated answer label alone. Require one eligible checked
+   relationship, matching source/page, a checked selected control and support for the unchanged
+   target selection. Deduplicate identical records; refuse conflicting/ambiguous alternatives.
+3. Limit new binding to single-choice answers without write-ins or composed historical contexts,
+   and misplaced native citations. Never repair supplied OCR hashes, context hashes, answer
+   values, roles or source/page identities. Missing/disputed selection evidence remains unresolved.
+4. Preserve raw responses, record canonical replacements with content-free resolution metadata,
+   and retain all source, historical applicability, gate and independent writer checks.
+   No prompt/schema changes, new model calls, retry changes or automatic current confirmation.
+5. Version the workflow, test positive/refusal/replay cases and run full offline suites on
+   Python 3.12/3.13 plus Ruff, strict mypy and whitespace checks. Replay the latest proposals
+   read-only: the three cited answers should pass and every other gate decision remain unchanged.
+   Do not rewrite existing runs or packets. Document Intelligence, checkbox refinement,
+   narrative recovery, chat and further cleanup remain outside this slice.
+
+**Binding implementation and read-only verification (November 16, 2026).**
+Answer groups v16 binds before generic citation normalization, so a misplaced native citation
+cannot first be converted to an unrelated checked question receipt. The binding requires exact
+equality with both the exported historical association and its immutable private check, a selected
+control, explicit support for the unchanged single-choice value and the existing role/support
+checks. It neither repairs supplied OCR identities nor changes any gate/writer policy.
+
+Four initial end-to-end regressions failed on the intended missing written choice before
+implementation; nine initial refusal cases already passed. The completed focused suite has
+**20 passing cases**, covering actual publication/render constraints, valid peers, immutable raw
+responses, canonical replay without regeneration, identical-record deduplication, competing
+question receipts, and refusal of wrong/missing context, hashes, roles, source/page, selection,
+ambiguity, disputed controls, OCR hashes, write-ins, multi-select and composed contexts.
+
+Full offline suites: **1,855 passed, 69 skipped** on each of Python 3.12.13 and 3.13.18.
+Ruff lint/format, strict mypy and whitespace checks passed. No dependencies changed.
+
+The implemented binding and unchanged gate were replayed against latest run `74c5124d...`
+entirely in memory: **three bindings**, Q6/Q7/Q8 changed from withheld to draft-verified with
+unconfirmed historical continuity, **66 other decisions unchanged**, all answer values and
+historical bases unchanged, and **seven inspected artifact hashes unchanged**. No model calls
+or packet writes. This is a deterministic contract replay, not an independent model evaluation
+or a recovery of that run. Use a fresh agent-v52/groups-v16 run after restarting workers.
+The page-one checkbox and Q12 extraction defects remain deferred to the isolated layout comparison.
+
+**Proposal resilience: implementation plan (November 16, 2026).**
+Pause further cleanup. Keep evidence, source integrity, rendering and publication checks strict,
+but isolate parseable proposal failures to their assigned requirements.
+
+1. Add failing synthetic cases for whitespace-only supporting-reference differences, mixed
+   valid/invalid answers, bounded correction, review exceptions, replay and unchanged evidence
+   withholding. Preserve original model responses and diagnose without confidential log text.
+2. Canonicalize supporting-reference labels only by a unique whitespace-equivalent substring
+   of the proposed answer. Never rewrite answer text, source quotations, identifiers or values.
+   Existing citation-offset and tenure-date derivation remain independent of evidence approval.
+3. Validate proposals individually inside a valid, bounded group envelope. Retain valid peers
+   durably, request at most one automatic proposal correction per group for affected IDs only,
+   sharing the existing three-attempt, run-call and elapsed-time budgets. Record the correction
+   allowance before invoking the model so interruption/resume cannot reset it.
+4. When attributable proposal errors remain, create code-owned `technical_review_required`
+   dispositions with no answer value and explicit reviewer actions. Never label these missing
+   business evidence. Save canonical group completion and private diagnostics for idempotent
+   replay. Normal gate, dependency/checklist and writer checks still decide what can be written.
+5. Unparseable/unsafe envelopes, unassigned or ambiguous identities, transport failures, changed
+   snapshots, storage failures and unsafe rendering/publication remain blocking; do not salvage
+   JSON or suppress technical failures. Existing bounded JSON retry remains separate.
+6. Version the workflow/proposal contracts; old failed runs require a fresh run, not mutation.
+   Test actual written/blank PDFs and reviewer output, correction limits and interruption,
+   then full offline suites on Python 3.12/3.13, Ruff, strict mypy and whitespace checks.
+   No chat UI, reviewer approval tool, new dependencies, paid calls or old-artifact edits.
+
+Implemented as agent v52/answer groups v15. Individual schema failures, missing assigned answers
+and invalid tenure arithmetic are isolated inside a valid envelope. Whitespace-only reference
+labels resolve only to one exact answer substring. Valid peers and private raw responses remain
+unchanged; canonical attempt records and code-owned exception-completion checkpoints support
+replay. A proposal correction gets one automatic allowance per group, recorded before its call
+and sharing existing JSON-retry, three-attempt, cumulative-call and elapsed-time limits.
+Pending evidence requests preserve their original discovered scope, never expand access and
+are explicitly annotated if verification cannot be performed.
+
+Exhausted attributable errors become null-valued `technical_review_required` answers with
+explicit reviewer actions, not `missing_evidence`. These fields and dependent conditional/checklist
+items remain unresolved. The model cannot emit this technical disposition itself. Ordinary
+grounding checks still withhold fabricated values; malformed/unsafe envelopes, ambiguous identities,
+transport, integrity, storage, rendering and publication failures remain blocking.
+
+Eight initial synthetic regressions failed before application changes. Expanded cases verify
+targeted correction, unchanged peers/raw responses, unique-label refusal cases, actual written/blank
+PDFs, content-free progress, canonical replay, interrupted correction, shared JSON/schema budgets,
+evidence follow-up and unperformed-verification reporting, conditional/checklist dependencies and
+unchanged source/grounding refusal. A further failing regression caught and fixed criterion-check
+ordering: an invalid proposal must not bypass exact issuer-criterion validation. Three prior
+follow-up tests were adapted to the intentional per-item exception boundary; they now assert
+blank answers and explicit technical concerns, while unsafe-envelope recovery stays blocking.
+Existing successful packet fingerprints remain unchanged.
+
+Validation: targeted suites **275 passed, 6 skipped**. Full `python -m pytest -q` suites
+**1,835 passed, 69 skipped** in each existing Python 3.12.13 and 3.13.18 environment.
+`python -m ruff check src tests`, `python -m ruff format --check src tests`,
+`python -m mypy src` and `git diff --check` pass. The original `f0306966...` group now passes
+schema validation offline with one supporting-reference whitespace canonicalization; answer
+values, citations, historical evidence and inspected saved artifacts are unchanged. This is
+not semantic approval, a model call or a resumed/published packet.
+
+Two new paid opt-in targeted-correction evaluation cases cover supported versus absent evidence
+and retained-peer isolation: **0/2 executed**, so correction model quality/generalization remains
+unmeasured. Restart workers and start a fresh v52/v15 run for end-to-end validation. No paid calls,
+existing-run changes, new dependencies, cover letters or human-chat interface were included.
+
+**Behavior-preserving cleanup, Slice 3 (November 13, 2026; writer assembly).**
+Resumed after the business owner reported a successful agent-v51/groups-v14 run. The two
+intervening behavior fixes remain intact; this slice neither reopens Slices 1-2 nor introduces
+new answer, cover-letter or model behavior.
+
+Before application edits, captured three synthetic packet-byte and manifest fingerprints for
+inline answers, multi-page supplemental answers and an additional issuer form with evidence.
+Only the volatile manifest creation timestamp is excluded. These and three additional-form
+refusal cases passed in both Python environments before extraction; expected fingerprints were
+not changed afterward.
+
+Extracted four typed private helpers in `draft.py`: additional-form loading/placement validation,
+ordered packet-section construction, supplemental-answer rendering and PDF merging. The existing
+tuple values are passed explicitly; no new persisted model, orchestration framework or module.
+`publish_draft` is 878 rather than 998 lines. Evidence acceptance, native/OCR/history checks,
+answer fitting, reconciliation, budgets, rendered-output checks, snapshot rechecks, reviewer
+summary and atomic publication remain with their existing owners and in their existing order.
+Mechanically inlining all four helpers reproduces the exact pre-Slice-3 coordinator AST.
+All other original writer definitions are structurally unchanged.
+
+Validation: targeted draft/grouped/agent/historical-context suites **392 passed**. Full
+`python -m pytest -q` suites **1,811 passed, 67 skipped** on Python 3.12.13 and 3.13.18.
+`python -m ruff check src tests`, `python -m ruff format --check src tests`,
+`python -m mypy src` and `git diff --check` pass. Pylance still reports diagnostics in untouched
+historical-context verification, not the extracted helpers; these are outside this cleanup.
+Agent v51/groups v14/writer v20, prompts, schemas, retry limits, dependencies and recovery
+contracts remain unchanged. No paid calls, existing-run modifications or real-packet publication.
+A post-cleanup live comparison remains unexecuted; cover letters remain deferred.
+
+**Exact native-page citation offsets: development plan (November 13, 2026).**
+Implement this as a separate behavior fix before resuming cleanup. Run `0d8fdb52...`
+loaded agent v51 and passed the tenure group, but another group supplied a 491-character
+span for a 448-character quote. The quote occurs once on the same retained native page;
+there is no pre-existing checked receipt for that source/page/quote.
+
+1. Add synthetic regressions that first fail: native page reading without `locate_quote`,
+   wrong model offsets, unchanged raw response, canonical saved citation and group replay.
+2. Extend the existing citation resolver, not the model prompt. Keep checked receipts first.
+   Only when no matching receipt exists, derive offsets from a retained, citable native page
+   for the same approved source/page. Require consistent page text/source hash and exactly
+   one literal occurrence, including overlapping occurrences. Preserve all other fields.
+3. Do not normalize whitespace, punctuation, case, OCR word spans, source identity or page.
+   Missing/altered quotes, repeated occurrences, conflicting observations, non-citable native
+   text, OCR-only text and ambiguous existing receipts must not gain a replacement citation.
+4. Preserve independent gate/writer source, hash, period, historical-context and value checks.
+   A derived offset is not semantic verification. Retain the raw response and existing
+   resolved-path audit; test actual written/blank PDF output and saved-group replay without
+   another model call.
+5. Version the answer workflow and its resolution marker. Keep prompts, tool/input schemas,
+   retries, dependencies and older run artifacts unchanged. Recovery must reject incompatible
+   workflow versions; use a fresh run for live validation.
+6. Run targeted tests, full offline suites on existing Python 3.12/3.13 environments, Ruff,
+   strict mypy and whitespace checks. Recheck the failed response read-only offline; no paid
+   calls, source edits, packet publication or live run recovery are authorized by this fix.
+
+Implemented in answer groups v14; agent remains v51. The existing resolver now indexes eligible
+native page readings by source/page and deduplicates identical source-hash/text observations.
+Only one consistent observation containing exactly one literal quote can supply replacement
+offsets. Existing checked receipts take precedence, including refusal on ambiguous receipts.
+Attempt records retain the raw response and resolved paths, with resolution marker
+`checked-citations-and-native-pages-v3`; saved-group replay uses the same deterministic resolver.
+No prompt, schema, retry, dependency or independent verification changes.
+
+Four initial regressions failed before application changes. Expanded synthetic cases cover
+incorrect offsets with and without matching span lengths, unchanged raw responses, canonical
+saved citations, exact source/page restrictions, changed/repeated/overlapping quotes, conflicting
+text/hashes, missing hashes, non-citable native text, OCR exclusions and identical cached readings.
+Replay needs no new model attempt. Actual PDF checks verify supported writing and withholding
+of fabricated candidate text. Recovery rejects changed workflow versions.
+
+Validation: targeted grouped/live/historical-adjustment suites report **125 passed, 1 skipped**.
+Full `python -m pytest -q` suites report **1,805 passed, 67 skipped** in each existing Python
+3.12.13 and 3.13.18 environment. `python -m ruff check src tests`,
+`python -m ruff format --check src tests`, `python -m mypy src` and `git diff --check` pass.
+The original failed group now passes schema validation read-only; its 448-character citation
+resolves at offsets 276-724 against the original snapshot's hash-verified source. This verifies
+the pointer, not semantic answer approval. The saved response remains unchanged.
+Restart workers and use a fresh agent-v51/groups-v14 run; do not upgrade or resume the v13 run.
+No paid calls, source edits, packet publication or live recovery occurred. Live model-quality
+evaluation remains unexecuted; cleanup Slice 3 and cover letters remain deferred.
+
+**Citation-derived tenure dates (November 13, 2026; agent v51).** Cleanup is paused for a
+separate deterministic behavior fix. Two live runs generated valid JSON with erroneous
+`HistoricalTenure.signed_on` years despite citing the intended historical date; the earlier
+run was recovered, not permanently fixed. The JSON-syntax retry does not cover this failure.
+
+`historical_time.adjusted_tenure` now parses the existing signing-date citation and returns a
+canonical proposal containing that date and the calculated tenure. The original model proposal
+is not mutated. Staging logs/progress identify normalization using only the requirement ID,
+origin and unvalidated status; raw responses remain in private group records and canonical
+values remain in saved draft requests. No new audit schema or generic correction framework.
+
+Native/OCR provenance, same-source signing context, conflicting-date detection and independent
+gate/writer checks are retained. Parsing a model-supplied citation does not verify its truth.
+Missing, invalid, multiple or genuinely future cited dates fail explicitly; there is no fallback
+to the model's duplicate date, filename, metadata or current date. Non-tenure and signing-field
+rules are unchanged.
+
+Nine initial regressions failed before application changes. Expanded synthetic cases cover both
+erroneous years, immutable raw responses, canonical saved requests, idempotent staging,
+assembly-only recovery without model calls, native and checked-OCR citations, forged dates,
+wrong sources, unresolved signing context, conflicting dates and version-protected recovery.
+Agent v51 records the behavior change; prompt/tool schemas and retry budgets are unchanged.
+Restart workers and use a fresh v51 run. Do not edit or resume older versioned artifacts under
+the new implementation. The original failed proposal was checked read-only offline without
+resuming its run, bypassing evidence verification or publishing outputs.
+
+Validation: `python -m pytest -q` reports **1,787 passed, 67 skipped** in each existing Python
+3.12.13 and 3.13.18 environment. `python -m ruff check src tests`,
+`python -m ruff format --check src tests`, `python -m mypy src` and `git diff --check` pass.
+No dependencies, paid calls or live model-quality evaluation; no existing packets rewritten.
+Cleanup Slice 3 and cover letters remain unstarted.
+
 **Slice 4 withdrawn (agent v39/groups v11):** the business owner approved removing the new
 layout veto after v38 run `a3fec3e3...` withheld Q3/Q10/Q11/Q12 and generated no supplement.
 Restore scan v6/context v9/gate v24/writer v19: remove layout-based approval, completeness
@@ -248,6 +619,56 @@ Live screenshot recognition and packet inclusion require separate explicit autho
 Validation: affected scan/evidence/attachment/grouped/live suites **181 passed, 17 skipped**;
 full offline suite **1,763 passed, 67 skipped**. Ruff lint/format, strict mypy and whitespace
 checks pass.
+
+**Behavior-preserving cleanup, Slice 1 (reviewer formatting only).** Starting commit
+`7385315`; pre-change offline baseline: **1,763 passed, 67 skipped** on Python 3.12.
+Three added synthetic summary-byte characterization cases passed before application changes.
+They cover written/blank/signing dispositions, conditional completion and unresolved supporting
+documents after assembly restart. Their expected values are the original invariant synthetic
+outputs, not newly approved post-refactor snapshots.
+
+Extracted draft, supporting-document and representative review text into pure functions in
+`reviewer_summary.py`. Source reads, support auditing, rendered PDF checks, output writes and
+atomic publication remain with their existing owners. No model calls, filesystem access or
+publication occur in the formatters. Existing history/OCR evidence formatting and all warnings
+are retained. The nested writer is 73 lines rather than 503; `publish_draft` is 998 rather than
+1,428, and agent assembly is 75 rather than 134. These are responsibility separations, not
+claims that business complexity or total source lines disappeared.
+
+Agent v50, prompts, tools, artifacts and recovery contracts are unchanged. No version bump,
+new dependency, paid evaluation or cover-letter implementation. Slice 2 handoff simplification
+and Slice 3 broader writer decomposition are not included.
+Validation: targeted draft/attachment/agent/grouped/scan suites **222 passed**. Full offline
+suite **1,766 passed, 67 skipped** on both Python 3.12.13 and 3.13.18. Ruff lint/format,
+strict mypy on both environments and whitespace checks pass. Structural comparison against
+the starting commit verifies unchanged agent prompts, versions, tool contracts/registration
+and every non-assembly agent method. Existing published packets were not rewritten.
+
+**Behavior-preserving cleanup, Slice 2 (evidence completion only).** Pre-change offline
+baseline: **1,766 passed, 67 skipped** on Python 3.12. Three synthetic characterization
+cases passed before application changes: exact completion-artifact bytes for native evidence,
+exact selection/bio artifact bytes for selected and missing bios, and saved handoff recovery.
+
+Split evidence completion into four private helpers in `agent.py`: completion validation,
+selection-payload construction, artifact collection/snapshotting and answer-handoff construction.
+A narrow internal `TypedDict` describes the existing selection JSON, not a new domain model
+or persisted schema. Selection values are serialized once and reused by explicit key to retain
+the differing field orders in saved selection and handoff payloads. The coordinator is now
+74 lines rather than 323; this separates responsibilities rather than removing safeguards.
+
+Coverage enforcement, the one-time reconsideration checkpoint, mandatory equivalent-bio
+deduplication, OCR path/read/hash checks, exception order and single store transition are
+preserved. Agent v50, prompts, tools, saved formats and restart/recovery behavior are unchanged;
+all 17 baseline top-level constant/registration nodes and every original method except
+`_finish_evidence` compare unchanged structurally. Existing Slice 1 changes remain intact.
+No new dependency, paid calls, existing-packet rewrites or cover-letter implementation.
+Slice 3 broader writer decomposition remains unstarted.
+
+Validation commands: targeted `pytest` over agent, attachment-planning, representative-bio,
+grouped, historical-prefill and scan integration files: **222 passed**. Full
+`python -m pytest -q`: **1,769 passed, 67 skipped** on both Python 3.12.13 and 3.13.18.
+`python -m ruff check src tests`, `python -m ruff format --check src tests` and
+`python -m mypy src` pass in both environments; `git diff --check` passes.
 
 **Historical narrative recovery (agent v37/groups v8/context v9):** extend existing bounded
 printed-wording recovery to plain historical answer text, including narratives, before handing

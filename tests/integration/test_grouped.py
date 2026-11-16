@@ -41,15 +41,28 @@ from tests.integration.test_agent import (
 from tests.integration.test_blob_storage import MemoryBlobs
 
 
-def ready(tmp_path):
+def ready(tmp_path, *, checked_quote=True):
     setup = Setup(tmp_path, blank_pdf())
     tools = setup.tools()
     tools.call("interpret_form", "{}")
     listing = json.loads(tools.call("list_sources", "{}"))["result"]
     source = listing["sources"][0]["source_id"]
-    quote = json.loads(
-        tools.call("locate_quote", json.dumps({"source_id": source, "page": 1, "quote": NAME}))
-    )["result"]
+    if checked_quote:
+        quote = json.loads(
+            tools.call("locate_quote", json.dumps({"source_id": source, "page": 1, "quote": NAME}))
+        )["result"]
+    else:
+        reading = json.loads(tools.call("read_page", json.dumps({"source_id": source, "page": 1})))[
+            "result"
+        ]
+        start = reading["text"].index(NAME)
+        quote = {
+            "source_id": source,
+            "page": 1,
+            "quote": NAME,
+            "start": start,
+            "end": start + len(NAME),
+        }
     tools.call("finish_evidence", "{}")
     proposal = {
         "requirement_id": "p1.name",
@@ -61,13 +74,337 @@ def ready(tmp_path):
     return setup, tools, proposal
 
 
+def ready_pair(tmp_path):
+    from tests.integration.test_agent import visual_page
+    from tests.integration.test_historical_prefill import call as invoke
+
+    stream = BytesIO()
+    canvas = Canvas(stream, pagesize=(612, 792), invariant=True)
+    for _ in range(2):
+        canvas.drawString(40, 732, "Firm legal name:")
+        canvas.showPage()
+    canvas.save()
+    setup = Setup(
+        tmp_path, stream.getvalue(), mapper=FakeMapper({1: visual_page(), 2: visual_page()})
+    )
+    tools = setup.tools()
+    invoke(tools, "interpret_form")
+    source = invoke(tools, "list_sources")["sources"][0]["source_id"]
+    invoke(tools, "read_page", {"source_id": source, "page": 1})
+    citation = invoke(tools, "locate_quote", {"source_id": source, "page": 1, "quote": NAME})
+    citation.pop("occurrences")
+    invoke(tools, "finish_evidence")
+    proposals = [
+        {
+            "requirement_id": f"p{page}.name",
+            "outcome": "proposed",
+            "value": {"kind": "text", "value": NAME},
+            "citations": [citation],
+            "confidence": 0.9,
+        }
+        for page in (1, 2)
+    ]
+    return setup, tools, proposals
+
+
+@pytest.mark.parametrize("changed_word", [False, True])
+def test_reference_whitespace_is_canonicalized_without_changing_answer_or_source(
+    tmp_path, changed_word
+):
+    setup, tools, proposal = ready(tmp_path)
+    proposal["value"]["value"] = NAME.replace(" ", "\n", 1)
+    proposal["supporting_references"] = [NAME + (" invented" if changed_word else "")]
+    raw = json.dumps({"proposals": [proposal]})
+
+    async def propose(payload):
+        return raw
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+
+    assert final.status == "published"
+    saved = json.loads(setup.artifact("draft_request.json"))["proposals"]["proposals"][0]
+    assert json.loads(setup.artifact("answer-group-000-attempt-1.json"))["response"] == raw
+    if changed_word:
+        assert saved["outcome"] == "technical_review_required"
+        assert saved["value"] is None
+    else:
+        assert saved["value"] == proposal["value"]
+        assert saved["citations"] == proposal["citations"]
+        assert saved["supporting_references"] == [proposal["value"]["value"]]
+        assert "reference_resolution_paths" in json.loads(
+            setup.artifact("answer-group-000-attempt-1.json")
+        )
+
+
+@pytest.mark.parametrize("repaired", [True, False])
+def test_bad_proposal_does_not_discard_valid_peer_and_only_bad_id_is_retried(tmp_path, repaired):
+    from pypdf import PdfReader
+
+    setup, tools, proposals = ready_pair(tmp_path)
+    broken = {"requirement_id": "p2.name", "outcome": "proposed"}
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return json.dumps({"proposals": [proposals[0], broken]})
+        assert payload["assigned_requirement_ids"] == ["p2.name"]
+        assert [r["requirement_id"] for r in payload["requirements"]] == ["p2.name"]
+        assert payload["previous_errors"]
+        return json.dumps({"proposals": [proposals[1] if repaired else broken]})
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+
+    assert final.status == "published" and final.outcome == "incomplete"
+    assert len(calls) == 2
+    draft = json.loads(setup.artifact("draft.json"))
+    assert draft["written_requirements"] == (["p1.name", "p2.name"] if repaired else ["p1.name"])
+    pdf = PdfReader(BytesIO(setup.artifact("packet.pdf")))
+    assert NAME in pdf.pages[0].extract_text()
+    if not repaired:
+        assert NAME not in pdf.pages[1].extract_text()
+        answer = next(a for a in draft["answers"] if a["requirement_id"] == "p2.name")
+        assert answer["proposal"]["outcome"] == "technical_review_required"
+        assert answer["completion_disposition"] == "unresolved"
+        summary = setup.artifact("reviewer-summary.txt").decode()
+        assert "TECHNICAL REVIEW REQUIRED" in summary
+        assert "not a finding of missing business evidence" in summary
+        assert "technical_review_required" not in "\n".join(
+            page.extract_text() for page in pdf.pages
+        )
+
+
+def test_interrupted_proposal_correction_preserves_peers_and_does_not_reset_allowance(tmp_path):
+    setup, tools, proposals = ready_pair(tmp_path)
+    calls = []
+
+    async def interrupted(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return json.dumps(
+                {"proposals": [proposals[0], {"requirement_id": "p2.name", "outcome": "proposed"}]}
+            )
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_answer_groups(tools, interrupted))
+    marker = setup.artifact("answer-group-000-attempt-2-request.json")
+    assert json.loads(marker)["proposal_retry_of_attempt"] == 1
+
+    async def unexpected(payload):
+        pytest.fail("Interrupted correction must not reset its automatic allowance")
+
+    final = asyncio.run(run_answer_groups(setup.tools(), unexpected, resume=True))
+    assert final.status == "published"
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == ["p1.name"]
+    assert setup.artifact("answer-group-000-attempt-2-request.json") == marker
+
+
+@pytest.mark.parametrize("budget", ["attempts", "calls", "time"])
+def test_proposal_exception_completion_respects_existing_budgets(tmp_path, monkeypatch, budget):
+    from bd_packet_builder import grouped
+
+    setup, tools, proposals = ready_pair(tmp_path)
+    if budget == "attempts":
+        monkeypatch.setattr(grouped, "MAX_GROUP_ATTEMPTS", 1)
+    elif budget == "calls":
+        tools.limits = tools.limits.model_copy(update={"max_turns": 2})
+    ticks = [0.0]
+    if budget == "time":
+        monkeypatch.setattr(grouped.time, "monotonic", lambda: ticks[0])
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        if budget == "time":
+            ticks[0] = tools.limits.max_seconds + 1
+        return json.dumps(
+            {"proposals": [proposals[0], {"requirement_id": "p2.name", "outcome": "proposed"}]}
+        )
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+    assert final.status == "published"
+    assert len(calls) == 1
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == ["p1.name"]
+
+
+@pytest.mark.parametrize("repaired", [True, False])
+def test_canonical_repair_or_exception_replays_without_regeneration(
+    tmp_path, monkeypatch, repaired
+):
+    setup, tools, proposals = ready_pair(tmp_path)
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return json.dumps({"proposals": [proposals[0]]})
+        return json.dumps({"proposals": [proposals[1]] if repaired else []})
+
+    dispatch = tools.call
+
+    def interrupt(name, args):
+        if name == "submit_answers":
+            raise asyncio.CancelledError
+        return dispatch(name, args)
+
+    monkeypatch.setattr(tools, "call", interrupt)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_answer_groups(tools, propose))
+    before = {a.name: setup.artifact(a.name) for a in tools.manifest().artifacts}
+
+    async def unexpected(payload):
+        pytest.fail("Canonical groups must replay without regenerating valid answers")
+
+    final = asyncio.run(run_answer_groups(setup.tools(), unexpected, resume=True))
+    assert final.status == "published"
+    assert len(calls) == 2
+    for name, data in before.items():
+        assert setup.artifact(name) == data
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == (
+        ["p1.name", "p2.name"] if repaired else ["p1.name"]
+    )
+
+
+@pytest.mark.parametrize("mode", ["verification", "fabricated", "transport"])
+def test_repair_does_not_skip_verification_or_turn_technical_failures_into_success(tmp_path, mode):
+    setup, tools, proposals = ready_pair(tmp_path)
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            if mode != "verification":
+                return json.dumps({"proposals": [proposals[0]]})
+            citation = proposals[0]["citations"][0]
+            return json.dumps(
+                {
+                    "proposals": [],
+                    "verification_requests": [
+                        {
+                            "requirement_id": "p1.name",
+                            "source_id": citation["source_id"],
+                            "page": 1,
+                            "quote": NAME,
+                            "expected_subject": NAME,
+                            "method": "native",
+                        }
+                    ],
+                }
+            )
+        if mode == "transport":
+            raise TimeoutError
+        if mode == "fabricated":
+            return json.dumps(
+                {
+                    "proposals": [
+                        proposals[1] | {"value": {"kind": "text", "value": "Invented firm"}}
+                    ]
+                }
+            )
+        if len(calls) == 2:
+            assert payload["assigned_requirement_ids"] == ["p2.name"]
+            return json.dumps({"proposals": [proposals[1]]})
+        assert payload["assigned_requirement_ids"] == ["p1.name"]
+        assert len(payload["verification_results"]) == 1
+        assert payload["verification_results"][0]["ok"]
+        return json.dumps({"proposals": [proposals[0]]})
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+    if mode == "transport":
+        assert final.status == "failed"
+        assert "packet.pdf" not in {a.name for a in final.artifacts}
+    else:
+        assert final.status == "published"
+        assert json.loads(setup.artifact("draft.json"))["written_requirements"] == (
+            ["p1.name", "p2.name"] if mode == "verification" else ["p1.name"]
+        )
+
+
+def test_proposal_failure_logs_are_content_free_and_completion_is_auditable(tmp_path, caplog):
+    setup, tools, proposal = ready(tmp_path)
+    events = []
+    tools = setup.tools(progress_sink=events.append)
+    proposal["value"]["value"] = "PRIVATE SYNTHETIC CONTENT"
+    proposal["confidence"] = "PRIVATE SYNTHETIC CONTENT"
+
+    async def propose(payload):
+        return json.dumps({"proposals": [proposal]})
+
+    with caplog.at_level("INFO", logger="bd_packet_builder.grouped"):
+        final = asyncio.run(run_answer_groups(tools, propose))
+
+    assert final.status == "published"
+    assert "PRIVATE SYNTHETIC CONTENT" not in caplog.text + "\n".join(events)
+    completion = json.loads(setup.artifact("answer-group-000-completion.json"))
+    assert completion["exceptions"] == [
+        {"requirement_id": "p1.name", "code": "proposal_schema_invalid"}
+    ]
+    assert sum("Proposal correction started" in e for e in events) == 1
+    assert any("Technical review required" in e for e in events)
+
+
+@pytest.mark.parametrize("json_first", [True, False])
+def test_json_and_proposal_corrections_share_attempt_budget_without_resetting_allowances(
+    tmp_path, json_first
+):
+    setup, tools, proposals = ready_pair(tmp_path)
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        if len(calls) == (1 if json_first else 2):
+            return '{"proposals":['
+        if len(calls) < 3:
+            return json.dumps({"proposals": [proposals[0]]})
+        assert payload["assigned_requirement_ids"] == ["p2.name"]
+        return json.dumps({"proposals": [proposals[1]]})
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+
+    assert final.status == "published"
+    assert len(calls) == 3
+    records = [
+        json.loads(setup.artifact(f"answer-group-000-attempt-{i}-request.json"))
+        for i in range(1, 4)
+    ]
+    assert sum("json_retry_of_attempt" in r for r in records) == 1
+    assert sum("proposal_retry_of_attempt" in r for r in records) == 1
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == [
+        "p1.name",
+        "p2.name",
+    ]
+
+
+@pytest.mark.parametrize(
+    "answer,reference",
+    [
+        ("Synthetic\nlabel and Synthetic\tlabel", "Synthetic label"),
+        ("Synthetic\nlabel", "Synthetic changed label"),
+        ("Report 2026", "Report 2027"),
+        ("Account 00123", "Account 123"),
+    ],
+)
+def test_reference_resolution_does_not_guess_ambiguous_or_different_text(answer, reference):
+    from bd_packet_builder.grouped import _resolve_reference_labels
+
+    response = json.dumps(
+        {
+            "proposals": [
+                {"value": {"kind": "text", "value": answer}, "supporting_references": [reference]}
+            ]
+        }
+    )
+    assert _resolve_reference_labels(response) == (response, [])
+
+
 def test_evidence_tool_order_includes_attachment_planning_and_continuation_guidance():
     ordered_workflow = AGENT_INSTRUCTIONS.split("Rules that cannot be overridden")[0]
     normalized_instructions = " ".join(AGENT_INSTRUCTIONS.split())
     assert "plan_supporting_document" in ordered_workflow
     assert "plan_supporting_documents" in ordered_workflow
-    assert AGENT_VERSION == "packet-agent-v50"
-    assert GROUP_VERSION == "answer-groups-v13"
+    assert AGENT_VERSION == "packet-agent-v52"
+    assert GROUP_VERSION == "answer-groups-v16"
     assert "not a subset exempt from a decision" in normalized_instructions
     assert "exactly one decision for every candidate" in normalized_instructions
     assert "plan_supporting_documents" in EVIDENCE_CONTINUATION
@@ -189,8 +526,13 @@ def test_complete_proposals_survive_followup_limits_without_executing_requests(
 
 
 @pytest.mark.parametrize("changed_word", [False, True])
-def test_condition_quote_accepts_line_wrapping_but_not_changed_words(tmp_path, changed_word):
+@pytest.mark.parametrize("malformed_proposal", [False, True])
+def test_condition_quote_accepts_line_wrapping_but_not_changed_words(
+    tmp_path, changed_word, malformed_proposal
+):
     setup, tools, proposal = ready(tmp_path)
+    if malformed_proposal:
+        proposal.pop("value")
 
     # The mapped issuer instruction is "Firm legal name"; wrapping does not change its words.
     async def propose(payload):
@@ -214,6 +556,9 @@ def test_condition_quote_accepts_line_wrapping_but_not_changed_words(tmp_path, c
     if changed_word:
         record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
         assert record["error"]["code"] == "condition_not_in_requirement"
+    elif malformed_proposal:
+        assert json.loads(setup.artifact("draft.json"))["written_requirements"] == []
+        assert "TECHNICAL REVIEW REQUIRED" in setup.artifact("reviewer-summary.txt").decode()
 
 
 def test_answering_can_verify_observed_quote_and_retry_only_affected_group(tmp_path):
@@ -335,7 +680,7 @@ def test_followup_recovery_retains_successful_groups_and_retries_only_unfinished
                     ],
                 }
             )
-        return '{"proposals":[]}'
+        return '{"proposals":[],"unexpected":true}'
 
     assert asyncio.run(run_answer_groups(tools, initial)).status == "failed"
     resumed_calls = []
@@ -357,8 +702,11 @@ def test_followup_recovery_retains_successful_groups_and_retries_only_unfinished
 
 
 @pytest.mark.parametrize("span", [(260, 261), (260, 260 + len(NAME))])
-def test_group_restores_unique_checked_native_receipt_without_model_offsets(tmp_path, span):
-    setup, tools, proposal = ready(tmp_path)
+@pytest.mark.parametrize("checked_quote", [True, False])
+def test_group_resolves_exact_native_quote_without_model_offsets(tmp_path, span, checked_quote):
+    setup, tools, proposal = ready(tmp_path, checked_quote=checked_quote)
+    if not checked_quote:
+        assert tools.answer_handoff()["native_quote_citations"] == []
     original = proposal["citations"][0].copy()
     proposal["citations"][0].update(start=span[0], end=span[1])
     raw = json.dumps({"proposals": [proposal]})
@@ -377,6 +725,108 @@ def test_group_restores_unique_checked_native_receipt_without_model_offsets(tmp_
     assert record["resolved_citation_paths"] == ["proposals.0.citations.0"]
     review = json.loads(setup.artifact("answer_review.json"))
     assert review["decisions"][0]["decision"] == "draft_verified"
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == ["p1.name"]
+    from pypdf import PdfReader
+
+    assert NAME in PdfReader(BytesIO(setup.artifact("packet.pdf"))).pages[0].extract_text()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "quote",
+        "source",
+        "page",
+        "repeated",
+        "overlapping",
+        "uncitable",
+        "ocr",
+        "ocr_artifact",
+        "conflicting_text",
+        "conflicting_hash",
+        "unapproved",
+        "missing_hash",
+    ],
+)
+def test_native_page_resolution_does_not_invent_or_disambiguate_evidence(tmp_path, change):
+    from bd_packet_builder.grouped import _resolve_citations
+
+    _, tools, proposal = ready(tmp_path, checked_quote=False)
+    handoff = tools.answer_handoff()
+    reading = handoff["candidate_readings"][0]
+    citation = proposal["citations"][0]
+    citation.update(start=260, end=261)
+    if change == "quote":
+        citation["quote"] = NAME.lower()
+    elif change == "source":
+        citation["source_id"] = "b" * 64
+    elif change == "page":
+        citation["page"] = 999
+    elif change == "repeated":
+        reading["text"] += "\n" + NAME
+    elif change == "overlapping":
+        citation["quote"] = "aa"
+        reading["text"] = "aaa"
+    elif change == "uncitable":
+        reading["citable"] = False
+    elif change == "ocr":
+        reading["mode"] = "ocr"
+    elif change == "ocr_artifact":
+        reading["artifact_path"] = "outputs/ocr-" + "0" * 32 + "/ocr.json"
+    elif change == "conflicting_text":
+        handoff["candidate_readings"].append(reading | {"text": "Other prefix " + reading["text"]})
+    elif change == "conflicting_hash":
+        handoff["candidate_readings"].append(reading | {"source_sha256": "b" * 64})
+    elif change == "unapproved":
+        handoff["sources"] = []
+    elif change == "missing_hash":
+        reading.pop("source_sha256")
+    response = json.dumps({"proposals": [proposal]})
+
+    resolved, paths = _resolve_citations(response, handoff)
+
+    assert resolved == response
+    assert paths == []
+
+
+def test_native_page_resolution_deduplicates_identical_cached_readings(tmp_path):
+    from bd_packet_builder.grouped import _resolve_citations
+
+    _, tools, proposal = ready(tmp_path, checked_quote=False)
+    handoff = tools.answer_handoff()
+    handoff["candidate_readings"].append(handoff["candidate_readings"][0].copy())
+    original = proposal["citations"][0].copy()
+    proposal["citations"][0].update(start=260, end=261)
+
+    resolved, paths = _resolve_citations(json.dumps({"proposals": [proposal]}), handoff)
+
+    assert json.loads(resolved)["proposals"][0]["citations"] == [original]
+    assert paths == ["proposals.0.citations.0"]
+
+
+def test_native_offset_resolution_still_withholds_fabricated_page_text(tmp_path, monkeypatch):
+    from pypdf import PdfReader
+
+    setup, tools, proposal = ready(tmp_path, checked_quote=False)
+    handoff = tools.answer_handoff()
+    citation = proposal["citations"][0]
+    citation.update(quote="Invented company", start=260, end=261)
+    proposal["value"]["value"] = "Invented company"
+    handoff["candidate_readings"][0]["text"] = "Firm legal name: Invented company"
+    monkeypatch.setattr(tools, "answer_handoff", lambda: handoff)
+
+    async def propose(payload):
+        return json.dumps({"proposals": [proposal]})
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+
+    assert final.status == "published"
+    record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
+    assert record["resolved_citation_paths"] == ["proposals.0.citations.0"]
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == []
+    assert "Invented company" not in (
+        PdfReader(BytesIO(setup.artifact("packet.pdf"))).pages[0].extract_text()
+    )
 
 
 @pytest.mark.parametrize("change", ["quote", "source", "page", "extra", "ambiguous"])
@@ -403,11 +853,13 @@ def test_group_does_not_guess_unknown_or_ambiguous_receipts(tmp_path, monkeypatc
         return json.dumps({"proposals": [proposal]})
 
     final = asyncio.run(run_answer_groups(tools, propose))
-    assert final.status == "failed"
+    assert final.status == "published" and final.outcome == "incomplete"
     record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
-    assert record["status"] == "invalid_response"
+    assert record["status"] == "proposal_recovery_requested"
     assert not record.get("resolved_citation_paths")
-    assert "draft_request.json" not in {a.name for a in final.artifacts}
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == []
+    saved = json.loads(setup.artifact("draft_request.json"))["proposals"]["proposals"][0]
+    assert saved["outcome"] == "technical_review_required" and saved["value"] is None
 
 
 @pytest.mark.parametrize("wrong_context", [False, True])
@@ -469,6 +921,252 @@ def test_group_resolves_scanned_receipt_and_keeps_context_checks(
     if not wrong_context:
         assert review["historical_context_checks"]
     assert (review["decisions"][0]["decision"] == "draft_verified") == (not wrong_context)
+
+
+def ready_historical_choice(tmp_path, monkeypatch, *, disputed_control=False):
+    from bd_packet_builder.scan import ScanTranscript
+    from tests.integration.test_historical_context import setup_page
+    from tests.integration.test_historical_prefill import call as invoke
+
+    stream = BytesIO()
+    canvas = Canvas(stream, pagesize=(612, 792), invariant=True)
+    canvas.drawString(40, 732, "Services")
+    for left, label in ((40, "Yes"), (140, "No")):
+        canvas.rect(left, 690, 10, 10)
+        canvas.drawString(left + 15, 690, label)
+    canvas.drawString(40, 632, "Firm legal name")
+    canvas.save()
+    choice = visual_item("services", "Services", "single_select", None)
+    choice["options"] = [
+        {
+            "option_id": label.casefold(),
+            "label": label,
+            "instruction": label,
+            "control": "checkbox",
+            "box": nbox(left, 92, left + 10, 102),
+            "label_box": nbox(left + 15, 90, left + 50, 106),
+            "write_in_region": None,
+        }
+        for left, label in ((40, "Yes"), (140, "No"))
+    ]
+    name = visual_item("name", "Firm legal name", "text", nbox(40, 170, 400, 190))
+    name["instruction_box"] = nbox(35, 140, 560, 166)
+    mapper = FakeMapper(
+        {
+            1: VisualPage.model_validate_json(
+                json.dumps({"readable": True, "explanation": None, "items": [choice, name]})
+            )
+        }
+    )
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_question="Services",
+        primary_answer="Yes",
+        primary_ocr_answer="Yes",
+        scanned_answer=True,
+        control_state="unselected" if disputed_control else "selected",
+        historical_policy="answer_first_review",
+        draft_schema_version=2,
+        blank=stream.getvalue(),
+        mapper=mapper,
+    )
+    if disputed_control:
+        transcript = json.loads(reader.transcribe.return_value.model_dump_json())
+        transcript["historical_fields"][0]["control"]["state"] = "selected"
+        reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(transcript))
+    result = invoke(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    association = result["associations"][0]
+    assert association["answer_citation"]["evidence_kind"] == "ocr"
+    citation = invoke(
+        tools,
+        "locate_quote",
+        {"source_id": current["source_id"], "page": 1, "quote": NAME},
+    )
+    citation.pop("occurrences")
+    invoke(tools, "finish_evidence")
+    proposal = {
+        "requirement_id": "p1.services",
+        "outcome": "proposed",
+        "value": {"kind": "single_select", "selected": ["yes"]},
+        "citations": [
+            {
+                "source_id": prior["source_id"],
+                "page": 1,
+                "start": 0,
+                "end": 8,
+                "quote": "Yes / No",
+            }
+        ],
+        "confidence": 0.9,
+        "historical_basis": {
+            "category": "trading_capability",
+            "context": "firm_wide",
+            "role": "Primary representative",
+            "prior_question": association["context_citation"],
+            "current_checks": [],
+            "reviewer_confirmation": "Confirm the historically selected service remains offered.",
+            "correspondence": {
+                "target_question": "Services",
+                "assessment": "applicable",
+                "differences": "Same synthetic question and explicit answer options.",
+                "reason": "Identical service selection, not current confirmation.",
+            },
+        },
+    }
+    peer = {
+        "requirement_id": "p1.name",
+        "outcome": "proposed",
+        "value": {"kind": "text", "value": NAME},
+        "citations": [citation],
+        "confidence": 0.9,
+    }
+    return setup, tools, reader, proposal, peer, association
+
+
+@pytest.mark.parametrize("receipt_case", ["ordinary", "duplicate", "question_receipt"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_group_binds_exact_historical_choice_without_regenerating_or_changing_peers(
+    tmp_path, monkeypatch, receipt_case, restart
+):
+    from pypdf import PdfReader
+
+    setup, tools, reader, proposal, peer, association = ready_historical_choice(
+        tmp_path, monkeypatch
+    )
+    if receipt_case != "ordinary":
+        handoff = tools.answer_handoff()
+        if receipt_case == "duplicate":
+            handoff["historical_candidates"].append(dict(association))
+        else:
+            question = json.loads(setup.artifact("historical_context_checks.json"))["checks"][0][
+                "question"
+            ]
+            proposal["citations"][0]["quote"] = question["quote"]
+            proposal["citations"][0]["end"] = len(question["quote"])
+            handoff["scan_quotes"].append({"citation": question})
+        monkeypatch.setattr(tools, "answer_handoff", lambda: handoff)
+    raw = json.dumps({"proposals": [proposal, peer]})
+    calls = []
+
+    async def propose(payload):
+        calls.append(payload)
+        return raw
+
+    if restart:
+        dispatch = tools.call
+
+        def interrupt(name, args):
+            if name == "submit_answers":
+                raise asyncio.CancelledError
+            return dispatch(name, args)
+
+        monkeypatch.setattr(tools, "call", interrupt)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run_answer_groups(tools, propose))
+        saved = setup.artifact("answer-group-000-attempt-1.json")
+
+        async def unexpected(payload):
+            pytest.fail("Canonical choice binding must replay without a new model call")
+
+        fresh = setup.tools(scan_reader=reader, draft_schema_version=2)
+        if receipt_case != "ordinary":
+            monkeypatch.setattr(fresh, "answer_handoff", lambda: handoff)
+        final = asyncio.run(run_answer_groups(fresh, unexpected, resume=True))
+        assert setup.artifact("answer-group-000-attempt-1.json") == saved
+    else:
+        final = asyncio.run(run_answer_groups(tools, propose))
+    assert final.status == "published" and final.outcome == "incomplete"
+    assert len(calls) == 1
+    record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
+    assert record["response"] == raw
+    report = json.loads(setup.artifact("draft.json"))
+    assert report["written_requirements"] == ["p1.services", "p1.name"]
+    assert record["historical_binding_paths"] == ["proposals.0.citations.0"]
+    canonical = json.loads(record["canonical_response"])["proposals"]
+    assert canonical[0]["citations"] == [association["answer_citation"]]
+    assert canonical[0]["value"] == proposal["value"] | {"write_ins": []}
+    assert canonical[1]["value"] == peer["value"]
+    assert canonical[1]["citations"] == peer["citations"]
+    review = json.loads(setup.artifact("answer_review.json"))
+    assert all(d["decision"] == "draft_verified" for d in review["decisions"])
+    assert report["answers"][0]["evidence_status"] == "historical_continuity_unconfirmed"
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+    assert NAME in PdfReader(BytesIO(setup.artifact("packet.pdf"))).pages[0].extract_text()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "hash",
+        "context_quote",
+        "missing_context",
+        "source",
+        "page",
+        "role",
+        "selection",
+        "question",
+        "ambiguous",
+        "write_in",
+        "control",
+        "ocr_hash",
+        "multi_select",
+        "additional_context",
+    ],
+)
+def test_group_refuses_unproven_historical_choice_bindings(tmp_path, monkeypatch, change):
+    setup, tools, _, proposal, peer, association = ready_historical_choice(
+        tmp_path, monkeypatch, disputed_control=change == "control"
+    )
+    basis = proposal["historical_basis"]
+    if change == "hash":
+        basis["prior_question"] = basis["prior_question"] | {"check_sha256": "0" * 64}
+    elif change == "context_quote":
+        basis["prior_question"] = basis["prior_question"] | {"quote": "Different question"}
+    elif change == "missing_context":
+        proposal["historical_basis"] = None
+    elif change == "source":
+        proposal["citations"][0]["source_id"] = peer["citations"][0]["source_id"]
+    elif change == "page":
+        proposal["citations"][0]["page"] = 2
+    elif change == "role":
+        basis["role"] = "Backup representative"
+    elif change == "selection":
+        proposal["value"]["selected"] = ["no"]
+    elif change == "question":
+        basis["prior_question"] = tools.answer_handoff()["historical_candidates"][1][
+            "context_citation"
+        ]
+    elif change == "ambiguous":
+        handoff = tools.answer_handoff()
+        handoff["historical_candidates"].append(
+            association
+            | {
+                "answer_citation": association["answer_citation"]
+                | {"word_end": association["answer_citation"]["word_end"] + 1}
+            }
+        )
+        monkeypatch.setattr(tools, "answer_handoff", lambda: handoff)
+    elif change == "write_in":
+        proposal["value"]["write_ins"] = [{"option_id": "yes", "text": "Unproven detail"}]
+    elif change == "ocr_hash":
+        proposal["citations"] = [association["answer_citation"] | {"artifact_sha256": "0" * 64}]
+    elif change == "multi_select":
+        proposal["value"]["kind"] = "multi_select"
+    elif change == "additional_context":
+        basis["additional_contexts"] = [basis["prior_question"]]
+
+    async def propose(payload):
+        return json.dumps({"proposals": [proposal, peer]})
+
+    final = asyncio.run(run_answer_groups(tools, propose))
+
+    assert final.status == "published" and final.outcome == "incomplete"
+    record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
+    assert not record.get("historical_binding_paths")
+    canonical = json.loads(record["canonical_response"])["proposals"][0]
+    assert canonical["citations"] == proposal["citations"]
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == ["p1.name"]
 
 
 def test_citation_resolution_preserves_checked_scan_type_in_current_checks(tmp_path, monkeypatch):
@@ -600,8 +1298,11 @@ def test_full_ocr_reference_resolves_render_metadata_only_with_exact_artifact_id
         assert not paths
 
 
-def test_restored_receipt_is_reused_after_restart_without_regenerating_group(tmp_path, monkeypatch):
-    setup, tools, proposal = ready(tmp_path)
+@pytest.mark.parametrize("checked_quote", [True, False])
+def test_resolved_citation_is_reused_after_restart_without_regenerating_group(
+    tmp_path, monkeypatch, checked_quote
+):
+    setup, tools, proposal = ready(tmp_path, checked_quote=checked_quote)
     original = proposal["citations"][0].copy()
     proposal["citations"][0].update(start=260, end=261)
     dispatch = tools.call
@@ -672,7 +1373,7 @@ def test_failed_group_records_exact_errors_then_resumes_without_evidence_calls(t
 
     async def malformed(payload):
         calls.append(payload)
-        return json.dumps({"proposals": [{"requirement_id": "p1.name", "outcome": "proposed"}]})
+        return json.dumps({"proposals": [{"requirement_id": "p1.name"}], "unexpected": True})
 
     final = asyncio.run(run_answer_groups(tools, malformed))
     assert final.status == "failed"
@@ -836,7 +1537,7 @@ def test_resume_rejects_changed_source_before_model_call(tmp_path):
     setup, tools, _ = ready(tmp_path)
 
     async def malformed(payload):
-        return '{"proposals":[]}'
+        return '{"proposals":[],"unexpected":true}'
 
     initial = asyncio.run(run_answer_groups(tools, malformed))
     assert initial.status == "failed"
@@ -1005,11 +1706,13 @@ def test_actual_sdk_preserves_schema_invalid_response_for_private_diagnostics(tm
                 OpenAIChatClient(model="synthetic", async_client=api), tools
             )
 
-    assert asyncio.run(execute()).status == "failed"
+    final = asyncio.run(execute())
+    assert final.status == "published" and final.outcome == "incomplete"
     record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
-    assert record["status"] == "invalid_response"
+    assert record["status"] == "proposal_recovery_requested"
     assert record["response"] == malformed
     assert record["error"]["problems"]
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == []
 
 
 @pytest.mark.parametrize("completion", ["completed", "incomplete"])
@@ -1085,7 +1788,7 @@ def test_actual_sdk_json_retry_records_completion_metadata(tmp_path, completion)
     assert retry_payload.pop("verification_budget")["group_calls_remaining"] == 2
     assert initial_payload == retry_payload
     plan = json.loads(setup.artifact("answer-plan.json"))
-    assert plan["version"] == "answer-groups-v13"
+    assert plan["version"] == "answer-groups-v16"
     assert plan["max_json_retries"] == 1
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 import pytest
+from pypdf import PdfReader
 from reportlab.pdfgen.canvas import Canvas
 
 from bd_packet_builder.draft import (
@@ -232,6 +233,126 @@ def write_review(request: Path, review: Path, *, approve: bool = True) -> None:
     )
 
 
+def add_issuer_form(root: Path, data: dict) -> Path:
+    path = Path("bd_agreements/Blank/authorization.pdf")
+    make_pdf(root / path, [(40, 740, "Institution:"), (40, 200, "Signature:")])
+    data["additional_forms"] = [
+        {
+            "source": {
+                "path": path.as_posix(),
+                "sha256": hashlib.sha256((root / path).read_bytes()).hexdigest(),
+            },
+            "fields": [
+                {
+                    "requirement_id": "crd",
+                    "region": {
+                        "page": 1,
+                        "left": 120.0,
+                        "bottom": 730.0,
+                        "right": 300.0,
+                        "top": 748.0,
+                    },
+                }
+            ],
+            "protected_regions": [
+                {"page": 1, "left": 35.0, "bottom": 180.0, "right": 575.0, "top": 225.0}
+            ],
+        }
+    ]
+    return path
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        (
+            "inline",
+            {
+                "packet": "edf5139c2a15249bb8cf332ccec15df563d834a81fa40d587f077be53daf173a",
+                "manifest": "f6d2a49492b99b93a3f1093f030255faf6719b89d3109e40c80c09c5128e48e8",
+            },
+        ),
+        (
+            "supplement",
+            {
+                "packet": "7e5e80be15de6402f374dda05795898b1f14affa5f10089ec3efda042abc61ca",
+                "manifest": "c9947204009194b30bf882efa7fdda1de1ee1ed83406e678bc26ebfa852ad8d9",
+            },
+        ),
+        (
+            "additional_form",
+            {
+                "packet": "8dfcc669083a0969c4d233c7ef1f3b0d8f7ed71720fa0ab1bfdd7763a79c4429",
+                "manifest": "ef9e994451c91aced520e19b84c42190115046545cfe75b07c50294d78ccb639",
+            },
+        ),
+    ],
+)
+def test_writer_assembly_preserves_packet_bytes_and_manifest(tmp_path, case, expected):
+    # Writer v21 changes supplemental presentation and manifest version, not inline/form PDFs.
+    request, review, data = prepare(tmp_path, long=case == "supplement")
+    if case == "additional_form":
+        add_issuer_form(tmp_path, data)
+        request.write_text(json.dumps(data))
+        write_review(request, review)
+
+    output = run_draft(tmp_path, request.relative_to(tmp_path), review.relative_to(tmp_path))
+
+    report = json.loads((output / "draft.json").read_bytes())
+    report.pop("created_at")
+    actual = {
+        "packet": hashlib.sha256((output / "draft-packet.pdf").read_bytes()).hexdigest(),
+        "manifest": hashlib.sha256((json.dumps(report, indent=2) + "\n").encode()).hexdigest(),
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("problem", "message"),
+    [
+        ("hash", "Additional issuer form changed"),
+        ("issuer_text", "Additional-form field overlaps existing issuer text"),
+        ("protected", "Additional-form field overlaps protected content"),
+    ],
+)
+def test_additional_form_validation_prevents_publication(tmp_path, problem, message):
+    request, review, data = prepare(tmp_path)
+    add_issuer_form(tmp_path, data)
+    form = data["additional_forms"][0]
+    if problem == "hash":
+        form["source"]["sha256"] = "0" * 64
+    elif problem == "issuer_text":
+        form["fields"][0]["region"]["left"] = 40.0
+    else:
+        form["protected_regions"].append(form["fields"][0]["region"].copy())
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+
+    with pytest.raises(DraftError, match=message):
+        run_draft(tmp_path, request.relative_to(tmp_path), review.relative_to(tmp_path))
+
+    assert not list((tmp_path / "outputs").glob("draft-*"))
+    assert not list((tmp_path / "outputs").glob(".staging-*"))
+
+
+@pytest.mark.parametrize(
+    ("registered", "conditional", "expected_sha256"),
+    [
+        (None, False, "a27df4672666d049c2475aff9e508a94bf88fd130b6f5eb4b21d6d48e4d735de"),
+        (False, True, "8a4ff8e85e1d4ee15f1f0ea203d8ebe505416fcaea1215ab0659f01355ffa2a8"),
+    ],
+)
+def test_reviewer_summary_preserves_exact_text_order_and_newlines(
+    tmp_path: Path, registered: bool | None, conditional: bool, expected_sha256: str
+) -> None:
+    request, review, _ = prepare(tmp_path, registered=registered, conditional=conditional)
+    output = run_draft(tmp_path, request.relative_to(tmp_path), review.relative_to(tmp_path))
+
+    summary = (output / "reviewer-summary.txt").read_bytes()
+
+    assert hashlib.sha256(summary).hexdigest() == expected_sha256
+
+
 @pytest.mark.parametrize(
     "registered,withhold_parent,proposed_child",
     [
@@ -284,6 +405,31 @@ def test_reviewer_summary_includes_specific_unanswered_explanation(tmp_path):
     write_review(request, review)
     output = run_draft(tmp_path, Path("outputs/request.json"), Path("outputs/review.json"))
     assert explanation in (output / "reviewer-summary.txt").read_text()
+
+
+def test_technical_review_parent_keeps_conditional_followup_unresolved(tmp_path):
+    request, review, data = prepare(tmp_path, registered=False, conditional=True)
+    data["proposals"]["proposals"][0] = {
+        "requirement_id": "crd",
+        "outcome": "technical_review_required",
+        "explanation": (
+            "TECHNICAL REVIEW REQUIRED: proposal processing failed, not missing evidence."
+        ),
+    }
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+
+    output = run_draft(tmp_path, request.relative_to(tmp_path), review.relative_to(tmp_path))
+
+    report = json.loads((output / "draft.json").read_bytes())
+    child = next(a for a in report["answers"] if a["requirement_id"] == "services")
+    assert child["status"] == "blank"
+    assert child["issues"] == ["conditional_parent_unresolved"]
+    assert report["written_requirements"] == ["instruments"]
+    assert report["completion"]["conditional_not_applicable"] == 0
+    assert (
+        "Resolve the proposal-processing exception" in (output / "reviewer-summary.txt").read_text()
+    )
 
 
 def test_supplement_text_verification_preserves_line_ending_hyphens(tmp_path):
@@ -791,6 +937,138 @@ def test_long_narrative_has_real_supplement_and_final_attachment_reference(tmp_p
 
 
 @pytest.mark.parametrize(
+    ("additional_form", "long_middle"), [(False, False), (True, False), (False, True)]
+)
+def test_supplement_groups_numbered_answers_with_readable_labels_and_final_references(
+    tmp_path, additional_form, long_middle
+):
+    request, review, data = prepare(tmp_path)
+    identities = ["p1.page1_q99_services", "p1.page1_q11_services", "p1.page1_q12_services"]
+    answer = (
+        "This synthetic evidence-backed answer describes the services\n"
+        "provided by a fictional firm.\nIt is deliberately wrapped in the input, "
+        "but should use normal paragraph wrapping in the supplement.\n\n"
+        "- First fictional service.\n- Second fictional service."
+    )
+    middle_answer = (
+        " ".join(f"Service {n}: fictional evidence-backed narrative." for n in range(150))
+        if long_middle
+        else answer
+    )
+    requirements = data["requirements"]["requirements"]
+    original = requirements[2]
+    original.update(requirement_id=identities[0], instruction="10. Describe services.")
+    data["proposals"]["proposals"][2].update(
+        requirement_id=identities[0], value={"kind": "narrative", "value": answer}
+    )
+    for number, identity, bottom, top in [
+        (11, identities[1], 350.0, 375.0),
+        (12, identities[2], 240.0, 275.0),
+    ]:
+        requirement = dict(original, requirement_id=identity, instruction=f"{number}. Services.")
+        requirements.insert(number - 8, requirement)
+        data["layout"]["responses"].append(
+            {
+                "requirement": requirement,
+                "narrative_region": dict(page=1, left=40.0, bottom=bottom, right=550.0, top=top),
+            }
+        )
+        data["proposals"]["proposals"].insert(
+            number - 8,
+            dict(
+                data["proposals"]["proposals"][2],
+                requirement_id=identity,
+                value={"kind": "narrative", "value": middle_answer if number == 11 else answer},
+            ),
+        )
+    make_pdf(
+        tmp_path / data["source"],
+        [
+            (40, 740, "Firm CRD:"),
+            (40, 660, "Choose instruments."),
+            (40, 510, "10. Describe services."),
+            (40, 390, "11. Services."),
+            (40, 290, "12. Services."),
+            (40, 320, "Missing tax ID:"),
+            (40, 200, "Authorized signature:"),
+            (340, 200, "Signature date:"),
+        ],
+    )
+    digest = hashlib.sha256((tmp_path / data["source"]).read_bytes()).hexdigest()
+    data["layout"]["application_sha256"] = digest
+    for requirement in requirements:
+        requirement["application_sha256"] = digest
+    if additional_form:
+        add_issuer_form(tmp_path, data)
+    # Model response ordering must not determine presentation order.
+    data["proposals"]["proposals"].reverse()
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    approval = json.loads(review.read_bytes())
+    template = approval["decisions"].pop()
+    approval["decisions"].extend(dict(template, requirement_id=identity) for identity in identities)
+    review.write_text(json.dumps(approval))
+
+    output = execute(tmp_path, request, review)
+
+    report = json.loads((output / "draft.json").read_bytes())
+    sections = report["pagination"]["sections"]
+    supplement_index = 2 if additional_form else 1
+    first_supplement_page = supplement_index + 1
+    supplement = sections[supplement_index]
+    assert supplement["role"] == "supplemental_answers"
+    supplement_count = supplement["page_count"]
+    if long_middle:
+        assert supplement_count >= 2
+    else:
+        assert supplement_count == 1
+    assert supplement["source_sha256"] != "0" * 64
+    if additional_form:
+        assert sections[1]["source_sha256"] == data["additional_forms"][0]["source"]["sha256"]
+    packet = PdfReader(output / "draft-packet.pdf")
+    assert len(packet.pages) == first_supplement_page + supplement_count
+    form_text = " ".join(packet.pages[0].extract_text().split())
+    supplement_pages = packet.pages[
+        first_supplement_page - 1 : first_supplement_page - 1 + supplement_count
+    ]
+    page_texts = [" ".join(page.extract_text().split()) for page in supplement_pages]
+    supplement_text = " ".join(page_texts)
+    assert all("INCOMPLETE DRAFT - NOT FOR SUBMISSION" in text for text in page_texts)
+    assert all(identity not in form_text + supplement_text for identity in identities)
+    assert supplement_text.index("Question 10") < supplement_text.index("Question 11")
+    assert supplement_text.index("Question 11") < supplement_text.index("Question 12")
+    for number, identity in zip((10, 11, 12), identities, strict=True):
+        destination = next(
+            offset
+            for offset, text in enumerate(page_texts, start=first_supplement_page)
+            if f"Question {number} (form page 1)" in text
+        )
+        assert (
+            f"See Supplemental Answers, Question {number}, packet page {destination}." in form_text
+        )
+        if long_middle and number == 12:
+            assert destination > first_supplement_page
+        assert report["placements"][identity]["evidence_packet_pages"] == [len(packet.pages)]
+    assert supplement_text.count(f"Supporting evidence: packet page {len(packet.pages)}.") == 3
+    assert report["render_checks"]["supplement_pages_rendered_and_text_checked"] == supplement_count
+    drawn = []
+    for page in supplement_pages:
+        page.extract_text(
+            visitor_text=lambda text, cm, tm, font, size: drawn.append((text, tm[4], tm[5], size))
+        )
+    actual_body = " ".join(" ".join(text for text, _, _, size in drawn if size == 11.0).split())
+    assert actual_body == " ".join(" ".join((answer, middle_answer, answer)).split())
+    body = [(text, x, y) for text, x, y, size in drawn if text.strip() and size == 11.0]
+    assert all(x == 72.0 and y >= 75.0 for _, x, y in body)
+    short_count = 2 if long_middle else 3
+    prose = [item for item in drawn if item[0].startswith("This synthetic")]
+    assert len(prose) == short_count
+    assert all(size == 11.0 for _, _, _, size in prose)
+    assert all("provided by" in text for text, _, _, _ in prose)
+    assert len([item for item in drawn if item[0].startswith("- Second fictional")]) == short_count
+
+
+@pytest.mark.parametrize(
     "problem", ["review-hash", "source-hash", "form-hash", "signature", "overlap"]
 )
 def test_draft_rejects_invalid_handoff_without_publishing(tmp_path: Path, problem: str) -> None:
@@ -1093,7 +1371,7 @@ def test_related_attachments_stay_together_with_correct_pages_and_bookmarks(
         for index, label in enumerate(expected_labels, start=evidence_start):
             with closing(document[index]) as page, closing(page.get_textpage()) as text:
                 assert label in text.get_text_bounded()
-        reference_page = 1 if long else 0
+        reference_page = evidence_start - 1 if long else 0
         with closing(document[reference_page]) as page, closing(page.get_textpage()) as text:
             assert f"packet page {evidence_start + 3}" in text.get_text_bounded()
     reader = PdfReader(output / "draft-packet.pdf")
@@ -1145,7 +1423,7 @@ def test_packet_allows_200_pages_including_supplements_but_inputs_remain_bounded
         services = next(a for a in report["answers"] if a["requirement_id"] == "services")
         if long:
             assert services["status"] == "blank"
-            assert any("202 > 200" in issue for issue in services["issues"])
+            assert any("203 > 200" in issue for issue in services["issues"])
             assert "supplemental page budget" in (output / "reviewer-summary.txt").read_text()
         else:
             assert services["status"] == "written_to_draft"

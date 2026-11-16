@@ -80,6 +80,14 @@ def adjusted_tenure(proposal: AnswerProposal, as_of: date) -> AnswerProposal:
         return proposal
     if basis.category != "tenure" or not isinstance(proposal.value, TextValue):
         raise ValueError("Historical adjustment is allowed only for textual tenure candidates")
-    temporal = basis.tenure
+    # Derivation is not verification: the gate and writer still check citation provenance.
+    temporal = basis.tenure.model_copy(
+        update={"signed_on": signed_date(basis.tenure.date_citation.quote)}
+    )
     value = increment_years(temporal.prior_value, anniversary_years(temporal.signed_on, as_of))
-    return proposal.model_copy(update={"value": TextValue(kind="text", value=value)})
+    return proposal.model_copy(
+        update={
+            "value": TextValue(kind="text", value=value),
+            "historical_basis": basis.model_copy(update={"tenure": temporal}),
+        }
+    )

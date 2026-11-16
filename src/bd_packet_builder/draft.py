@@ -57,7 +57,6 @@ from bd_packet_builder.history import (
     ArchiveManifest,
     HistoricalReusePolicy,
     historical_issues,
-    historical_review_concerns,
     requires_personal_action,
     with_historical_sources,
 )
@@ -91,6 +90,7 @@ from bd_packet_builder.responses import (
 )
 from bd_packet_builder.retrieval import default_catalog
 from bd_packet_builder.review import AnswerProposals
+from bd_packet_builder.reviewer_summary import draft_reviewer_summary
 from bd_packet_builder.scan import (
     SUPPORTED_SCAN_VERSIONS,
     ExhibitImageCheck,
@@ -152,7 +152,12 @@ MAX_INPUT_PAGES = 100
 BANNER_HEIGHT = 24
 RENDER_SCALE = 2
 MAX_RENDER_PIXELS = 12_000_000
-SUPPLEMENT_LINES = 42
+SUPPLEMENT_LEFT = 72.0
+SUPPLEMENT_WIDTH = 468.0
+SUPPLEMENT_TOP = 680.0
+SUPPLEMENT_BOTTOM = 75.0
+SUPPLEMENT_FONT = 11.0
+SUPPLEMENT_LEADING = 15.0
 
 
 class DraftError(ValueError):
@@ -768,43 +773,6 @@ _POINTER = re.compile(
 )
 
 
-_PLAIN_HISTORICAL_REASONS = {
-    "historical_question_correspondence_required": (
-        "The historical answer lacks an assessment tied to this exact target question."
-    ),
-    "historical_question_applicability_uncertain": (
-        "It is uncertain whether the historical answer addresses this question. This is "
-        "different from unconfirmed current continuity."
-    ),
-    "historical_question_partially_applicable": (
-        "Only part of the question has applicable historical support. Partial-response "
-        "writing is not enabled; supported and missing parts are identified below."
-    ),
-    "historical_composition_has_unsupported_text": (
-        "The proposed answer does not exactly equal the cited historical answer pieces joined "
-        "in order. A 'see supplement' pointer cited as an answer piece causes this."
-    ),
-    "historical_question_link_not_a_pointer": (
-        "A record cited as a 'see supplement' link does not read as a short pointer."
-    ),
-    "historical_question_link_question_mismatch": (
-        "The 'see supplement' link belongs to a different question than the cited answer."
-    ),
-    "historical_question_link_context_mismatch": (
-        "The 'see supplement' link is from a different packet, section or answer type."
-    ),
-    "historical_question_link_receipt_missing": (
-        "The 'see supplement' link has no checked page-reading record."
-    ),
-    "historical_question_link_repeats_answer": (
-        "The same record was cited as both an answer piece and a 'see supplement' link."
-    ),
-    "historical_question_link_text_or_geometry_disagrees": (
-        "The 'see supplement' link no longer matches the page text or position on recheck."
-    ),
-}
-
-
 def _question_links_agree(
     pointer: str, answer: str, *, allow_truncated_answer: bool = False
 ) -> bool:
@@ -1300,45 +1268,12 @@ def run_draft(root: Path, request_path: Path, review_path: Path) -> Path:
     return publish_draft(root, request_path, raw, request, review, reviewed, review_path)
 
 
-def publish_draft(
-    root: Path,
-    request_path: Path,
-    raw: bytes,
-    request: DraftRequest,
-    review: DraftReview,
-    reviewed: bytes,
-    review_path: Path | None,
-) -> Path:
-    """Write the draft for already-parsed inputs; ``review_path`` is None for gate-made reviews."""
-    request_hash = hashlib.sha256(raw).hexdigest()
-    if review.request_sha256 != request_hash:
-        raise DraftError("Draft review does not match this exact request snapshot")
-    requirements = {r.requirement_id: r for r in request.requirements.requirements}
-    if any(d.requirement_id not in requirements for d in review.decisions):
-        raise DraftError("Draft review contains an unknown requirement")
-    if not set(review.attachment_source_ids) <= set(request.attachments):
-        raise DraftError("Attachment review contains an unknown attachment")
-    if not set(review.historical_exhibit_ids) <= {
-        e.exhibit_id for e in request.historical_exhibits
-    }:
-        raise DraftError("Exhibit review contains an unknown selection")
-    if any(
-        requirements[d.requirement_id].kind in ("signature", "signature_date")
-        and d.decision == "draft_verified"
-        for d in review.decisions
-    ):
-        raise DraftError("Signatures and signature dates cannot be approved for draft writing")
-    original = read_local_input(
-        root, Path(request.source), Path("bd_agreements/Blank"), 64 * 1024 * 1024
-    )
-    validate_layout(root, Path(request.source), request.layout)
-    reader = _validate_pdf(original, blank=True)
-    question_requirements = verified_question_requirements(
-        original, request.requirements.requirements
-    )
+def _prepare_additional_forms(
+    root: Path, forms: tuple[DraftAdditionalForm, ...]
+) -> tuple[list[tuple[DraftAdditionalForm, bytes, PdfReader]], dict[Path, bytes]]:
     additional_forms_data: list[tuple[DraftAdditionalForm, bytes, PdfReader]] = []
     additional_form_snapshots: dict[Path, bytes] = {}
-    for form in request.additional_forms:
+    for form in forms:
         form_path = Path(form.source.path)
         form_bytes = read_local_input(
             root, form_path, Path("bd_agreements/Blank"), 64 * 1024 * 1024
@@ -1391,6 +1326,291 @@ def publish_draft(
             raise DraftError("Additional-form fields overlap")
         additional_forms_data.append((form, form_bytes, form_reader))
         additional_form_snapshots[form_path] = form_bytes
+    return additional_forms_data, additional_form_snapshots
+
+
+def _packet_sections(
+    request: DraftRequest,
+    main_page_count: int,
+    additional_forms_data: list[tuple[DraftAdditionalForm, bytes, PdfReader]],
+    supplement_page_count: int,
+    attachment_readers: list[tuple[SourceRecord, PdfReader]],
+    exhibit_data: list[tuple[HistoricalExhibit, bytes, PdfReader]],
+) -> list[PacketSection]:
+    sections = [
+        PacketSection(
+            section_id="form",
+            source_sha256=request.layout.application_sha256,
+            page_count=main_page_count,
+            role="form",
+        )
+    ]
+    sections.extend(
+        PacketSection(
+            section_id=f"additional-form-{form.source.sha256[:16]}",
+            source_sha256=form.source.sha256,
+            page_count=len(form_reader.pages),
+            role="form",
+        )
+        for form, _, form_reader in additional_forms_data
+    )
+    if supplement_page_count:
+        sections.append(
+            PacketSection(
+                section_id="answers",
+                source_sha256="0" * 64,
+                page_count=supplement_page_count,
+                role="supplemental_answers",
+            )
+        )
+    sections.extend(
+        PacketSection(
+            section_id=source.source_id,
+            source_sha256=source.sha256,
+            page_count=len(attachment_reader.pages),
+            role="evidence",
+        )
+        for source, attachment_reader in attachment_readers
+    )
+    sections.extend(
+        PacketSection(
+            section_id=exhibit.exhibit_id,
+            source_sha256=hashlib.sha256(data).hexdigest(),
+            page_count=len(exhibit_reader.pages),
+            role="evidence",
+        )
+        for exhibit, data, exhibit_reader in exhibit_data
+    )
+    return sections
+
+
+@dataclass(frozen=True)
+class SupplementPlacement:
+    requirement_id: str
+    page: int
+    heading_y: float
+    lines: tuple[str, ...]
+    continued: bool
+    reference_line_count: int
+
+    @property
+    def body_top(self) -> float:
+        return self.heading_y - 24.0
+
+    @property
+    def body_bottom(self) -> float:
+        return self.body_top - (len(self.lines) - 1) * SUPPLEMENT_LEADING
+
+    @property
+    def reference_top(self) -> float:
+        return self.body_bottom - 24.0
+
+    @property
+    def bottom(self) -> float:
+        if self.reference_line_count:
+            return self.reference_top - (self.reference_line_count - 1) * 12.0
+        return self.body_bottom
+
+
+def _supplement_labels(requirements: tuple[Requirement, ...]) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for ordinal, requirement in enumerate(requirements, start=1):
+        number = re.match(
+            r"^\s*(?:Question\s+)?([1-9][0-9]{0,2})(?:[.):]|\s)",
+            requirement.instruction,
+            re.IGNORECASE,
+        )
+        labels[requirement.requirement_id] = (
+            f"Question {number[1]}" if number else f"Response {ordinal}"
+        )
+    return labels
+
+
+def _evidence_text(pages: tuple[int, ...]) -> str:
+    if pages:
+        return "Supporting evidence: " + "; ".join(f"packet page {p}" for p in pages) + "."
+    return "Historical draft basis; internal reviewer confirmation required."
+
+
+def _supplement_reference_lines(text: str) -> tuple[str, ...]:
+    lines = wrap_text(text, SUPPLEMENT_WIDTH, 10.0, _measure)
+    if lines is None or len(lines) > 4:
+        raise DraftError("Supplemental evidence references exceed reserved space")
+    return lines
+
+
+def _plan_supplement(
+    identity: str,
+    text: str,
+    reference_line_count: int,
+    previous: SupplementPlacement | None,
+) -> list[SupplementPlacement]:
+    # Single newlines are source wrapping; retain blank paragraphs and explicit list items.
+    paragraphs = [
+        re.sub(r"\n(?![ \t]*(?:[-*]|\d+[.)])[ \t]+)", " ", paragraph).strip()
+        for paragraph in re.split(r"\n\s*\n", text.strip())
+    ]
+    remaining = wrap_text("\n\n".join(paragraphs), SUPPLEMENT_WIDTH, SUPPLEMENT_FONT, _measure)
+    if remaining is None:
+        raise DraftError("Answer has an unbreakable word that cannot fit")
+    page = previous.page if previous else 1
+    heading_y = previous.bottom - 28.0 if previous else SUPPLEMENT_TOP
+    planned: list[SupplementPlacement] = []
+    while remaining:
+        body_top = heading_y - 24.0
+        capacity = math.floor((body_top - SUPPLEMENT_BOTTOM) / SUPPLEMENT_LEADING) + 1
+        final_capacity = (
+            math.floor(
+                (body_top - 24.0 - (reference_line_count - 1) * 12.0 - SUPPLEMENT_BOTTOM)
+                / SUPPLEMENT_LEADING
+            )
+            + 1
+        )
+        final = len(remaining) <= final_capacity
+        count = len(remaining) if final else min(capacity, len(remaining) - 2)
+        if count < min(2, len(remaining)):
+            page += 1
+            heading_y = SUPPLEMENT_TOP
+            continue
+        planned.append(
+            SupplementPlacement(
+                identity,
+                page,
+                heading_y,
+                remaining[:count],
+                bool(planned),
+                reference_line_count if final else 0,
+            )
+        )
+        remaining = remaining[count:]
+        while remaining and not remaining[0]:
+            remaining = remaining[1:]
+        page += 1
+        heading_y = SUPPLEMENT_TOP
+    return planned
+
+
+def _supplement_pdf(
+    supplements: list[SupplementPlacement],
+    requirements: dict[str, Requirement],
+    labels: dict[str, str],
+    supplement_evidence: dict[str, str],
+) -> bytes:
+    stream = BytesIO()
+    canvas = Canvas(stream, pagesize=(612, 792), invariant=True)
+    page_count = supplements[-1].page
+    for number in range(1, page_count + 1):
+        canvas.setFont("Helvetica-Bold", 9)
+        canvas.drawString(SUPPLEMENT_LEFT, 756, "INCOMPLETE DRAFT - NOT FOR SUBMISSION")
+        canvas.setFont("Helvetica-Bold", 16)
+        canvas.drawString(SUPPLEMENT_LEFT, 720, "Supplemental Answers")
+        canvas.setLineWidth(0.5)
+        canvas.line(SUPPLEMENT_LEFT, 704, SUPPLEMENT_LEFT + SUPPLEMENT_WIDTH, 704)
+        canvas.setFont("Helvetica", 9)
+        canvas.drawRightString(540, 40, f"Supplemental Answers - Page {number} of {page_count}")
+        for placement in supplements:
+            if placement.page != number:
+                continue
+            identity = placement.requirement_id
+            continuation = "continued; " if placement.continued else ""
+            canvas.setFont("Helvetica-Bold", 12)
+            canvas.drawString(
+                SUPPLEMENT_LEFT,
+                placement.heading_y,
+                f"{labels[identity]} ({continuation}form page {requirements[identity].page})",
+            )
+            canvas.setFont("Helvetica", SUPPLEMENT_FONT)
+            for index, line in enumerate(placement.lines):
+                canvas.drawString(
+                    SUPPLEMENT_LEFT, placement.body_top - index * SUPPLEMENT_LEADING, line
+                )
+            if not placement.reference_line_count:
+                continue
+            reference_lines = _supplement_reference_lines(supplement_evidence[identity])
+            if len(reference_lines) > placement.reference_line_count:
+                raise DraftError("Supplemental evidence references exceed reserved space")
+            canvas.setFont("Helvetica", 10)
+            for index, line in enumerate(reference_lines):
+                canvas.drawString(SUPPLEMENT_LEFT, placement.reference_top - index * 12, line)
+        canvas.showPage()
+    canvas.save()
+    return stream.getvalue()
+
+
+def _merge_packet(
+    main_form_pdf: bytes,
+    additional_forms_data: list[tuple[DraftAdditionalForm, bytes, PdfReader]],
+    additional_form_pdfs: list[bytes],
+    supplemental_bytes: bytes | None,
+    attachment_readers: list[tuple[SourceRecord, PdfReader]],
+    exhibit_data: list[tuple[HistoricalExhibit, bytes, PdfReader]],
+    pagination: PacketPagination,
+) -> bytes:
+    with closing(PdfWriter(clone_from=PdfReader(BytesIO(main_form_pdf)))) as writer:
+        for (additional_form, _, _), additional_pdf in zip(
+            additional_forms_data, additional_form_pdfs, strict=True
+        ):
+            start = len(writer.pages)
+            writer.append(PdfReader(BytesIO(additional_pdf)), import_outline=False)
+            writer.add_outline_item(f"Issuer form {additional_form.source.sha256[:12]}", start)
+        if supplemental_bytes:
+            writer.append(PdfReader(BytesIO(supplemental_bytes)), import_outline=False)
+        for source, attachment_reader in attachment_readers:
+            start = len(writer.pages)
+            writer.append(attachment_reader, import_outline=False)
+            writer.add_outline_item(f"Evidence {source.source_id[:12]}", start)
+        for exhibit, _, exhibit_reader in exhibit_data:
+            start = len(writer.pages)
+            writer.append(exhibit_reader, import_outline=False)
+            writer.add_outline_item(f"Historical exhibit {exhibit.exhibit_id}", start)
+        writer.add_metadata({"/Title": "INCOMPLETE DRAFT - NOT FOR SUBMISSION"})
+        buffer = BytesIO()
+        writer.write(buffer)
+    packet = buffer.getvalue()
+    if len(PdfReader(BytesIO(packet)).pages) != sum(s.page_count for s in pagination.sections):
+        raise DraftError("Final packet pagination does not match assembled output")
+    return packet
+
+
+def publish_draft(
+    root: Path,
+    request_path: Path,
+    raw: bytes,
+    request: DraftRequest,
+    review: DraftReview,
+    reviewed: bytes,
+    review_path: Path | None,
+) -> Path:
+    """Write the draft for already-parsed inputs; ``review_path`` is None for gate-made reviews."""
+    request_hash = hashlib.sha256(raw).hexdigest()
+    if review.request_sha256 != request_hash:
+        raise DraftError("Draft review does not match this exact request snapshot")
+    requirements = {r.requirement_id: r for r in request.requirements.requirements}
+    if any(d.requirement_id not in requirements for d in review.decisions):
+        raise DraftError("Draft review contains an unknown requirement")
+    if not set(review.attachment_source_ids) <= set(request.attachments):
+        raise DraftError("Attachment review contains an unknown attachment")
+    if not set(review.historical_exhibit_ids) <= {
+        e.exhibit_id for e in request.historical_exhibits
+    }:
+        raise DraftError("Exhibit review contains an unknown selection")
+    if any(
+        requirements[d.requirement_id].kind in ("signature", "signature_date")
+        and d.decision == "draft_verified"
+        for d in review.decisions
+    ):
+        raise DraftError("Signatures and signature dates cannot be approved for draft writing")
+    original = read_local_input(
+        root, Path(request.source), Path("bd_agreements/Blank"), 64 * 1024 * 1024
+    )
+    validate_layout(root, Path(request.source), request.layout)
+    reader = _validate_pdf(original, blank=True)
+    question_requirements = verified_question_requirements(
+        original, request.requirements.requirements, mappings=request.layout.responses
+    )
+    additional_forms_data, additional_form_snapshots = _prepare_additional_forms(
+        root, request.additional_forms
+    )
     all_regions = [b for m in request.layout.responses for b in _writable(m)]
     with pdfium.PdfDocument(original) as document:
         for response in request.layout.responses:
@@ -1491,7 +1711,8 @@ def publish_draft(
     results: list[dict[str, object]] = []
     placements: dict[str, dict[str, object]] = {}
     accepted: list[AnswerProposal] = []
-    supplements: list[tuple[str, tuple[str, ...]]] = []
+    supplements: list[SupplementPlacement] = []
+    supplement_labels = _supplement_labels(request.requirements.requirements)
     supplement_starts: dict[str, int] = {}
     supplement_page_count = 0
     ocr_render_hashes: dict[tuple[str, int], str] = {}
@@ -1526,21 +1747,30 @@ def publish_draft(
             ):
                 raise DraftError("Exhibit OCR artifact changed during assembly")
 
-    def reserve_supplement(identity: str, text: str) -> None:
+    def reserve_supplement(proposal: AnswerProposal, text: str) -> None:
         nonlocal supplement_page_count
-        full = wrap_text(text, 520.0, 10.0, _measure)
-        if full is None:
-            raise DraftError("Answer has an unbreakable word that cannot fit")
-        count = max(1, math.ceil(len(full) / SUPPLEMENT_LINES))
-        total_pages = base_page_count + supplement_page_count + count
+        identity = proposal.requirement_id
+        references = tuple(
+            MAX_PACKET_PAGES
+            for _ in {
+                (c.source_id, c.page)
+                for c in proposal.citations
+                if sources[c.source_id].family != "historical_reference"
+            }
+        )
+        reference_lines = _supplement_reference_lines(_evidence_text(references))
+        planned = _plan_supplement(
+            identity, text, len(reference_lines), supplements[-1] if supplements else None
+        )
+        total_pages = base_page_count + planned[-1].page
         if total_pages > MAX_PACKET_PAGES:
             raise DraftError(
                 "Answer exceeds the bounded supplemental page budget "
                 f"({total_pages} > {MAX_PACKET_PAGES} total packet pages)"
             )
-        supplement_starts[identity] = supplement_page_count + 1
-        supplement_page_count += count
-        supplements.append((identity, full))
+        supplement_starts[identity] = planned[0].page
+        supplement_page_count = planned[-1].page
+        supplements.extend(planned)
 
     written_by_id: dict[str, AnswerProposal] = {}
     requirement_order = {
@@ -1812,7 +2042,7 @@ def publish_draft(
                 fitted = fit_short_text(text, region)
                 if fitted is None and isinstance(value, TextValue):
                     _lines(f"See packet page {MAX_PACKET_PAGES}.", region)
-                    reserve_supplement(identity, text)
+                    reserve_supplement(proposal, text)
                     placements[identity] = {"mode": "supplement", "fit": "below_minimum_font"}
                 elif fitted is None:
                     raise DraftError("Answer cannot fit at the minimum readable font size")
@@ -1860,10 +2090,11 @@ def publish_draft(
                 )
                 if overflow:
                     _lines(
-                        f"See Supplemental Answers, {identity}, packet page {MAX_PACKET_PAGES}.",
+                        f"See Supplemental Answers, {supplement_labels[identity]}, "
+                        f"packet page {MAX_PACKET_PAGES}.",
                         narrative_region,
                     )
-                    reserve_supplement(identity, value.value)
+                    reserve_supplement(proposal, value.value)
                 placements[identity] = {"mode": "supplement" if overflow else "inline"}
             else:
                 raise DraftError("This draft slice does not write this answer type")
@@ -1948,49 +2179,13 @@ def publish_draft(
         result["completion_disposition"] = disposition
         completion[disposition] += 1
 
-    section_data = [
-        PacketSection(
-            section_id="form",
-            source_sha256=request.layout.application_sha256,
-            page_count=len(reader.pages),
-            role="form",
-        )
-    ]
-    section_data.extend(
-        PacketSection(
-            section_id=f"additional-form-{form.source.sha256[:16]}",
-            source_sha256=form.source.sha256,
-            page_count=len(form_reader.pages),
-            role="form",
-        )
-        for form, _, form_reader in additional_forms_data
-    )
-    if supplement_page_count:
-        section_data.append(
-            PacketSection(
-                section_id="answers",
-                source_sha256="0" * 64,
-                page_count=supplement_page_count,
-                role="supplemental_answers",
-            )
-        )
-    section_data.extend(
-        PacketSection(
-            section_id=source.source_id,
-            source_sha256=source.sha256,
-            page_count=len(attachment_reader.pages),
-            role="evidence",
-        )
-        for source, attachment_reader in attachment_readers
-    )
-    section_data.extend(
-        PacketSection(
-            section_id=exhibit.exhibit_id,
-            source_sha256=hashlib.sha256(data).hexdigest(),
-            page_count=len(exhibit_reader.pages),
-            role="evidence",
-        )
-        for exhibit, data, exhibit_reader in exhibit_data
+    section_data = _packet_sections(
+        request,
+        len(reader.pages),
+        additional_forms_data,
+        supplement_page_count,
+        attachment_readers,
+        exhibit_data,
     )
     pagination = PacketPagination(sections=tuple(section_data))
     accepted_by_id = {proposal.requirement_id: proposal for proposal in accepted}
@@ -2040,11 +2235,7 @@ def publish_draft(
         )
         refs = tuple(dict.fromkeys(pagination.resolve(r, role="evidence") for r in evidence_refs))
         placements[identity]["evidence_packet_pages"] = list(refs)
-        evidence_text = (
-            "Supporting evidence: " + "; ".join(f"packet page {p}" for p in refs) + "."
-            if refs
-            else "Historical draft basis; internal reviewer confirmation required."
-        )
+        evidence_text = _evidence_text(refs)
         supplement_evidence[identity] = evidence_text
         if isinstance(proposal.value, TextValue) and identity in supplement_starts:
             scalar_region = mappings[identity].text_region
@@ -2066,7 +2257,9 @@ def publish_draft(
                     PacketReference(section_id="answers", page=supplement_starts[identity]),
                     role="supplemental_answers",
                 )
-                marker = f"See Supplemental Answers, {identity}, packet page {start}."
+                marker = (
+                    f"See Supplemental Answers, {supplement_labels[identity]}, packet page {start}."
+                )
                 texts.append(
                     TextPlacement(
                         answer_narrative_region,
@@ -2086,26 +2279,13 @@ def publish_draft(
 
     supplemental_bytes: bytes | None = None
     if supplements:
-        stream = BytesIO()
-        canvas = Canvas(stream, pagesize=(612, 792), invariant=True)
-        for identity, lines in supplements:
-            for start in range(0, len(lines), SUPPLEMENT_LINES):
-                canvas.setFont("Helvetica-Bold", 10)
-                canvas.drawString(30, 770, "INCOMPLETE DRAFT - NOT FOR SUBMISSION")
-                canvas.drawString(40, 735, "Supplemental Answers - " + identity)
-                canvas.setFont("Helvetica", 10)
-                canvas.drawString(40, 715, f"Response to form page {requirements[identity].page}.")
-                for index, line in enumerate(lines[start : start + SUPPLEMENT_LINES]):
-                    canvas.drawString(40, 690 - index * 14, line)
-                reference_lines = wrap_text(supplement_evidence[identity], 520.0, 10.0, _measure)
-                if reference_lines is None or len(reference_lines) > 4:
-                    raise DraftError("Supplemental evidence references exceed reserved space")
-                for index, line in enumerate(reference_lines):
-                    canvas.drawString(40, 70 - index * 12, line)
-                canvas.showPage()
-        canvas.save()
-        supplemental_bytes = stream.getvalue()
-        section_data[1] = section_data[1].model_copy(
+        supplemental_bytes = _supplement_pdf(
+            supplements, requirements, supplement_labels, supplement_evidence
+        )
+        supplement_index = next(
+            index for index, section in enumerate(section_data) if section.section_id == "answers"
+        )
+        section_data[supplement_index] = section_data[supplement_index].model_copy(
             update={"source_sha256": hashlib.sha256(supplemental_bytes).hexdigest()}
         )
         pagination = PacketPagination(sections=tuple(section_data))
@@ -2116,29 +2296,15 @@ def publish_draft(
             additional_forms_data, additional_form_texts, strict=True
         )
     ]
-    with closing(PdfWriter(clone_from=PdfReader(BytesIO(main_form_pdf)))) as writer:
-        for (additional_form, _, _), additional_pdf in zip(
-            additional_forms_data, additional_form_pdfs, strict=True
-        ):
-            start = len(writer.pages)
-            writer.append(PdfReader(BytesIO(additional_pdf)), import_outline=False)
-            writer.add_outline_item(f"Issuer form {additional_form.source.sha256[:12]}", start)
-        if supplemental_bytes:
-            writer.append(PdfReader(BytesIO(supplemental_bytes)), import_outline=False)
-        for source, attachment_reader in attachment_readers:
-            start = len(writer.pages)
-            writer.append(attachment_reader, import_outline=False)
-            writer.add_outline_item(f"Evidence {source.source_id[:12]}", start)
-        for exhibit, _, exhibit_reader in exhibit_data:
-            start = len(writer.pages)
-            writer.append(exhibit_reader, import_outline=False)
-            writer.add_outline_item(f"Historical exhibit {exhibit.exhibit_id}", start)
-        writer.add_metadata({"/Title": "INCOMPLETE DRAFT - NOT FOR SUBMISSION"})
-        buffer = BytesIO()
-        writer.write(buffer)
-    packet = buffer.getvalue()
-    if len(PdfReader(BytesIO(packet)).pages) != sum(s.page_count for s in pagination.sections):
-        raise DraftError("Final packet pagination does not match assembled output")
+    packet = _merge_packet(
+        main_form_pdf,
+        additional_forms_data,
+        additional_form_pdfs,
+        supplemental_bytes,
+        attachment_readers,
+        exhibit_data,
+        pagination,
+    )
 
     def verify() -> None:
         inputs = [(request_path, raw)]
@@ -2167,7 +2333,7 @@ def publish_draft(
     payload: dict[str, object] = {
         "domain_knowledge": knowledge_context(),
         "schema_version": 1,
-        "writer_version": "reviewed-draft-overlay-v20",
+        "writer_version": "reviewed-draft-overlay-v21",
         "created_at": datetime.now(UTC).isoformat(),
         "status": "incomplete_draft_not_for_submission",
         "mode": request.mode,
@@ -2251,479 +2417,73 @@ def publish_draft(
             page_offset += len(form_reader.pages)
         render["additional_forms"] = additional_render_checks
         with pdfium.PdfDocument(packet) as document:
-            for identity, lines in supplements:
-                for offset in range(0, len(lines), SUPPLEMENT_LINES):
-                    number = form_count + supplement_starts[identity] + offset // SUPPLEMENT_LINES
-                    with (
-                        closing(document[number - 1]) as page,
-                        closing(page.get_textpage()) as text,
-                    ):
+            for placement in supplements:
+                number = form_count + placement.page
+                with (
+                    closing(document[number - 1]) as page,
+                    closing(page.get_textpage()) as text,
+                ):
+                    regions = [
+                        (
+                            placement.lines,
+                            placement.body_bottom,
+                            placement.body_top,
+                            SUPPLEMENT_FONT,
+                        )
+                    ]
+                    if placement.reference_line_count:
+                        reference_lines = _supplement_reference_lines(
+                            supplement_evidence[placement.requirement_id]
+                        )
+                        regions.append(
+                            (
+                                reference_lines,
+                                placement.bottom,
+                                placement.reference_top,
+                                10.0,
+                            )
+                        )
+                    for lines, bottom, top, size in regions:
                         extracted = text.get_text_bounded(
-                            left=40.0, bottom=105.0, right=560.0, top=705.0, errors="strict"
+                            left=SUPPLEMENT_LEFT,
+                            bottom=bottom - 3.0,
+                            right=SUPPLEMENT_LEFT + SUPPLEMENT_WIDTH,
+                            top=top + size,
+                            errors="strict",
                         )
                         # PDFium replaces a visible line-ending hyphen and break with STX.
                         actual = " ".join(extracted.replace("\x02", "- ").split())
-                        expected = " ".join(
-                            " ".join(lines[offset : offset + SUPPLEMENT_LINES]).split()
-                        )
+                        expected = " ".join(" ".join(lines).split())
                         if expected not in actual:
                             raise DraftError(
-                                f"Supplemental answer is missing or clipped: {identity}, "
-                                f"page {number}"
+                                "Supplemental answer/evidence is missing or clipped: "
+                                f"{placement.requirement_id}, page {number}"
                             )
-                    with _render_image(packet, number - 1) as image:
-                        image.save(output / f"supplement-page-{number}.png")
+            for offset in range(1, supplement_page_count + 1):
+                number = form_count + offset
+                with _render_image(packet, number - 1) as image:
+                    image.save(output / f"supplement-page-{number}.png")
         render["supplement_pages_rendered_and_text_checked"] = supplement_page_count
         payload["render_checks"] = render
         # The shared publisher writes its initial report before companion validation.
         (output / "draft.json").write_text(json.dumps(payload, indent=2) + "\n")
-        summary = [
-            "INTERNAL REVIEW - NOT PART OF THE SUBMISSION PACKET",
-            "INCOMPLETE DRAFT - NOT FOR SUBMISSION",
-            f"Mode: {request.mode}",
-            "Coverage: declared subset only; all other form fields remain unresolved.",
-            "Signatures and signature dates must be completed only by humans at signing.",
-            f"Completion: {completion}. Conditional not-applicable is NOT a populated answer.",
-        ]
-        for form in additional_form_manifest:
-            summary.append(
-                "Additional issuer form appended: "
-                f"{form['path']}; approved mirrored fields: {form['written_requirements']}."
-            )
-        if review.reviewer_notes:
-            summary.extend(["", "Reviewer notes:"])
-            summary.extend(f"- {note}" for note in review.reviewer_notes)
-        summary.extend(["", "REVIEWER ACTION LIST (internal only):"])
-        for item in results:
-            identity = str(item["requirement_id"])
-            printed_details = item.get("historical_printed_readings")
-            printed_records = (
-                [r for r in printed_details if isinstance(r, dict)]
-                if isinstance(printed_details, list)
-                else []
-            )
-            resolved_printed = any(r.get("status") == "resolved" for r in printed_records)
-            if printed_records:
-                for reading in printed_records:
-                    summary.append(
-                        f"- Form page {requirements[identity].page}, {identity}: "
-                        f"PRINTED-WORDING CHECK: {reading['part']}; "
-                        f"status={reading['status']}; method="
-                        + (
-                            "localized source-native text"
-                            if reading["native"]
-                            else "blind focused image reread"
-                            if reading["focused"]
-                            else "reread budget exhausted"
-                        )
-                        + ". Original readings remain below; this does not establish "
-                        "current business truth or approve a selection."
-                    )
-            extraction_details = item.get("historical_extraction_discrepancies")
-            extraction_parts = (
-                tuple(
-                    dict.fromkeys(
-                        str(d["part"])
-                        for d in extraction_details
-                        if isinstance(d, dict)
-                        and d.get("code") != "historical_question_presentation_resolved"
-                    )
-                )
-                if isinstance(extraction_details, list)
-                else ()
-            )
-            if isinstance(extraction_details, list) and any(
-                isinstance(d, dict) and d.get("code") == "historical_question_presentation_resolved"
-                for d in extraction_details
-            ):
-                summary.append(
-                    f"- {identity}: QUESTION PRESENTATION RESOLVED; substantive wording agrees. "
-                    "Original readings retained; applicability, answer support and historical "
-                    "continuity are separate checks."
-                )
-            if item["status"] in ("blank", "requirement_satisfied") or identity in assessments:
-                assessment = assessments.get(identity)
-                summary.append(
-                    f"- Form page {requirements[identity].page}, {identity}: "
-                    f"{'LEFT BLANK' if item['status'] == 'blank' else item['status']}; "
-                    + (
-                        "Historical question transcription was reconciled against source "
-                        "evidence, but the answer was not written; see validation details."
-                        if item.get("historical_question_reconciliation")
-                        else "Historical extraction differs in: "
-                        + ", ".join(extraction_parts)
-                        + ". Question wording, answer text and selected marks are checked "
-                        "separately; a question-reading problem does not mean the checkbox "
-                        "could not be read."
-                        if "question" in extraction_parts
-                        else "Conflicting readings were not resolved with verified evidence "
-                        "linking the same subject, field and value."
-                        if extraction_parts
-                        else str(item.get("effective_explanation") or item["review_reason"])
-                    )
-                )
-                if item["status"] == "blank":
-                    basis = next(
-                        p.historical_basis
-                        for p in request.proposals.proposals
-                        if p.requirement_id == identity
-                    )
-                    if basis is not None and basis.correspondence is not None:
-                        correspondence = basis.correspondence
-                        summary.append(
-                            f"  QUESTION CORRESPONDENCE ({correspondence.assessment}; "
-                            "model interpretation, not semantic approval): "
-                            f"{correspondence.reason} "
-                            f"Differences/coverage gap: {correspondence.differences}. "
-                            f"Historical source: {basis.prior_question.source_id}, "
-                            f"page {basis.prior_question.page}."
-                        )
-                    summary.append(
-                        f"  Validation details: {item['review_reason']}; "
-                        f"writer checks: {item['issues']}"
-                    )
-                    codes = f"{item['review_reason']} {item['issues']}"
-                    summary.extend(
-                        f"  Plain-language reason: {text}"
-                        for code, text in _PLAIN_HISTORICAL_REASONS.items()
-                        if code in codes
-                    )
-                if item.get("historical_extraction_discrepancies"):
-                    summary.append(
-                        (
-                            "  Original extraction readings (question transcription reconciled): "
-                            if item.get("historical_question_reconciliation")
-                            else "  Conflicting extraction readings (originals): "
-                        )
-                        + json.dumps(item["historical_extraction_discrepancies"])
-                    )
-                if assessment is not None:
-                    summary.append(
-                        f"  Reviewed applicability: {assessment.applicability}; "
-                        f"reviewer/provenance: {assessment.reviewer}. "
-                        "Local review input is not authenticated approval."
-                    )
-                    for criterion in assessment.criteria:
-                        summary.append(
-                            f"  Issuer criterion: {criterion.issuer_quote}; "
-                            f"coverage={criterion.status}. {criterion.explanation}"
-                        )
-                        if criterion.status not in ("supported", "not_applicable"):
-                            summary.append(f"  ACTION: {criterion.action}")
-                        for assessed_citation in criterion.evidence:
-                            assessed_source = sources[assessed_citation.source_id]
-                            in_packet = assessed_citation.source_id in attachment_ids
-                            packet_page = (
-                                pagination.resolve(
-                                    PacketReference(
-                                        section_id=assessed_citation.source_id,
-                                        page=assessed_citation.page,
-                                    ),
-                                    role="evidence",
-                                )
-                                if in_packet
-                                else "not included"
-                            )
-                            summary.append(
-                                f"  Evidence: {assessed_source.path}; "
-                                f"sha256={assessed_source.sha256}; "
-                                f"source page {assessed_citation.page}; packet page {packet_page}; "
-                                "inclusion alone is not requirement satisfaction."
-                            )
-                    if assessment.depends_on:
-                        summary.append(
-                            "  Completion evaluated from actual required-item outcomes: "
-                            + str(item.get("coverage"))
-                        )
-                    for note in assessment.historical_notes:
-                        assessed_source = sources[note.citation.source_id]
-                        summary.append(
-                            f"  HISTORICAL LIMITATION, NOT INITIALS OR CURRENT CONFIRMATION: "
-                            f"{note.citation.quote}; {note.explanation} "
-                            f"Source: {assessed_source.path}; sha256={assessed_source.sha256}; "
-                            f"page {note.citation.page}. ACTION: {note.action}"
-                        )
-                elif item["status"] == "blank":
-                    summary.append(
-                        "  ACTION: Question transcription is already resolved. Review the "
-                        "remaining validation issues or regenerate the answer proposal; do not "
-                        "request new business evidence solely for this OCR defect."
-                        if item.get("historical_question_reconciliation")
-                        else "  ACTION: Inspect the original historical question and its selected "
-                        "answer together. Resolve the specific question wording difference; "
-                        "current business evidence is not required merely to repair transcription."
-                        if "question" in extraction_parts
-                        and not item.get("historical_question_reconciliation")
-                        else "  ACTION: Verify the conflicting readings against an independent "
-                        "source for the same subject and field; enter the supported value "
-                        "only after verification."
-                        if extraction_parts
-                        else "  ACTION: "
-                        + str(item.get("effective_explanation") or item["review_reason"])
-                    )
-            elif item["status"] == "written_to_draft":
-                proposal = next(
-                    p for p in request.proposals.proposals if p.requirement_id == identity
-                )
-                basis = proposal.historical_basis
-                if basis is not None and basis.reading_resolution is not None:
-                    summary.append(
-                        f"- Form page {requirements[identity].page}, {identity}: "
-                        "FILLED AFTER RECONCILIATION; selected value "
-                        + str(proposal.value.model_dump(mode="json") if proposal.value else None)
-                        + "; independent identity/field evidence "
-                        + basis.reading_resolution.citation.model_dump_json()
-                        + "; original readings "
-                        + json.dumps(item.get("historical_extraction_discrepancies", []))
-                    )
-                elif (
-                    item.get("historical_candidate_status") == "reconciled_with_native_text_and_ocr"
-                ):
-                    summary.append(
-                        f"- Form page {requirements[identity].page}, {identity}: "
-                        "FILLED AFTER RECONCILIATION; exact native digits and high-confidence "
-                        "OCR agree within the historical answer region. Original readings: "
-                        + json.dumps(item.get("historical_extraction_discrepancies", []))
-                    )
-                elif resolved_printed:
-                    summary.append(
-                        f"- Form page {requirements[identity].page}, {identity}: "
-                        "FILLED AFTER PRINTED-WORDING RESOLUTION. Local source evidence resolved "
-                        "the transcription difference; the selected answer was checked separately. "
-                        "Historical continuity remains unconfirmed."
-                    )
-                elif item.get("historical_question_reconciliation"):
-                    summary.append(
-                        f"- Form page {requirements[identity].page}, {identity}: "
-                        "FILLED AFTER QUESTION-TEXT RECONCILIATION; the historical image question "
-                        "matches the native blank, and bounded OCR alignment passed. "
-                        "The selected answer was checked separately. Historical continuity "
-                        "remains unconfirmed."
-                    )
-                    summary.append(
-                        "  Historical selected answer: "
-                        + "; ".join(
-                            c.field.answer.text
-                            for c in review.historical_context_checks
-                            if c.supports(proposal, requirements[identity])
-                        )
-                    )
-                    if isinstance(extraction_details, list):
-                        for difference in extraction_details:
-                            if (
-                                isinstance(difference, dict)
-                                and difference.get("part") == "question"
-                            ):
-                                summary.extend(
-                                    [
-                                        "  Image question: " + str(difference["image_reading"]),
-                                        "  OCR question: " + str(difference["ocr_reading"]),
-                                    ]
-                                )
-        adjusted = [
-            (identity, placement)
-            for identity, placement in placements.items()
-            if placement.get("fit") not in (None, "standard")
-        ]
-        if adjusted:
-            summary.extend(
-                [
-                    "",
-                    "SHORT-FIELD FIT (internal; reduced font, wrapped or moved to the supplement; "
-                    f"minimum {MIN_SHORT_FONT:g} pt; check legibility):",
-                ]
-            )
-            for identity, placement in adjusted:
-                summary.append(
-                    f"- {identity}: below_minimum_font; written in Supplemental Answers."
-                    if placement["mode"] == "supplement"
-                    else f"- {identity}: {placement['fit']}; {placement['font_size']:g} pt, "
-                    f"{placement['line_count']} line(s)."
-                )
-        summary.extend(["", "Supporting-document completeness (not semantic approval):"])
-        for audit in audit_support(
-            tuple(accepted), inventory, tuple(attachment_ids), approved_exhibits
-        ):
-            summary.append(
-                f"- {audit.requirement_id}: current documents="
-                f"{','.join(audit.current_source_ids) or 'none'}; "
-                f"historical exhibits={','.join(audit.historical_exhibits) or 'none'}; "
-                "referenced support="
-                f"{'; '.join(audit.referenced_support) or 'none declared/detected'}; "
-                f"issues={','.join(audit.issues) or 'no physical dependency gaps detected'}."
-            )
-        for exhibit in approved_exhibits:
-            summary.append(
-                f"- HISTORICAL EXHIBIT {exhibit.exhibit_id}, requirement {exhibit.requirement_id}: "
-                f"{sources[exhibit.title.source_id].path}, source hash "
-                f"{sources[exhibit.title.source_id].sha256}, pages {exhibit.pages}. "
-                f"{exhibit.reason} LIMITATION: {exhibit.limitation} "
-                "Historical inclusion does not verify current truth or satisfy a dated claim."
-            )
-        proposals_by_id = {p.requirement_id: p for p in request.proposals.proposals}
-        for item in results:
-            proposal = proposals_by_id[str(item["requirement_id"])]
-            summary_decision = decisions.get(proposal.requirement_id)
-            packet_pages = placements.get(proposal.requirement_id, {}).get(
-                "evidence_packet_pages", []
-            )
-            summary.extend(
-                [
-                    "",
-                    f"{item['requirement_id']}: {item['status']} - {item['issues']}",
-                    f"Question: {requirements[proposal.requirement_id].instruction}",
-                    f"Form page: {requirements[proposal.requirement_id].page}",
-                    "Proposed value: "
-                    + (
-                        "(not applicable; no answer written)"
-                        if item["status"] == "not_applicable"
-                        else proposal.value.model_dump_json()
-                        if proposal.value
-                        else "(blank)"
-                    ),
-                    f"Review: {item['review_reason']}",
-                    f"Explanation: {item.get('effective_explanation') or '(none supplied)'}",
-                    f"Evidence packet pages: {packet_pages}",
-                    "MODEL-REPORTED KNOWLEDGE APPLICATION (not verified reasoning): "
-                    + (
-                        "; ".join(
-                            f"{use.entry_id}: {use.reason}" for use in proposal.knowledge_applied
-                        )
-                        if proposal.knowledge_applied
-                        else "none reported"
-                    ),
-                ]
-            )
-            if item["status"] == "not_applicable" or (
-                item["status"] != "written_to_draft" and item.get("conditional") is not None
-            ):
-                continue
-            if proposal.historical_basis is not None and isinstance(
-                proposal.historical_basis.prior_question, HistoricalContextCitation
-            ):
-                receipt = next(
-                    (
-                        c
-                        for c in review.historical_context_checks
-                        if c.context_citation == proposal.historical_basis.prior_question
-                    ),
-                    None,
-                )
-                summary.append(
-                    "Question/answer association: localized OCR and independent image reading, "
-                    "with source/render hashes and normalized question/answer/role boxes; "
-                    "not human approval or current role confirmation."
-                )
-                if receipt is not None:
-                    extraction_details = item.get("historical_extraction_discrepancies", [])
-                    if isinstance(extraction_details, list):
-                        for discrepancy in extraction_details:
-                            summary.append(
-                                "EXTRACTION DISCREPANCY - ORIGINAL READINGS "
-                                "(see final disposition): " + json.dumps(discrepancy)
-                            )
-                    summary.append(
-                        "Image-proposed association regions (0-1000, full image, top-left; "
-                        "also checked against local text geometry): "
-                        + receipt.field.model_dump_json()
-                    )
-            if proposal.historical_basis is not None:
-                summary.extend(
-                    historical_review_concerns(requirements[proposal.requirement_id], proposal)
-                )
-                basis = proposal.historical_basis
-                status = (
-                    "HISTORICAL - CONTINUITY UNCONFIRMED"
-                    if item["evidence_status"] == "historical_continuity_unconfirmed"
-                    else str(item["evidence_status"]).upper()
-                )
-                summary.extend(
-                    [
-                        f"HISTORICAL BASIS: {status}; not human approval.",
-                        f"Context: {basis.context}; category={basis.category}; "
-                        f"role={basis.role or 'none'}",
-                        f"Prior question/context: {basis.prior_question.quote}",
-                        f"REVIEWER MUST CONFIRM: {basis.reviewer_confirmation}",
-                        "Historical originals are internal only and are NOT appended "
-                        "to the packet.",
-                    ]
-                )
-                if basis.tenure is not None:
-                    summary.append(
-                        f"DERIVED TENURE: prior={basis.tenure.prior_value}; "
-                        f"signed={basis.tenure.signed_on}; calculated as of="
-                        f"{request.calculation_date}; completed calendar anniversaries "
-                        "(February 29 anniversaries use February 28 in non-leap years). "
-                        f"Signing metadata provenance: {basis.tenure.model_dump_json()}. "
-                        "Not a verified founding/hire date or confirmation of continuity."
-                    )
-                for entry in (
-                    request.historical_archive.entries if request.historical_archive else ()
-                ):
-                    if any(
-                        sources.get(c.source_id) and sources[c.source_id].path == entry.path
-                        for c in proposal.citations
-                    ):
-                        summary.append(
-                            f"Prior issuer: {entry.issuer}; packet date: "
-                            f"{str(entry.completed_on) if entry.completed_on else 'unknown'}; "
-                            f"source: {entry.path}; sha256={entry.sha256}"
-                        )
-                if not basis.current_checks:
-                    summary.append("Current corroboration: no cited current-source checks.")
-                for current_check in basis.current_checks:
-                    checked = sources.get(current_check.citation.source_id)
-                    summary.append(
-                        f"Current check (model assessment, not proof): {current_check.finding}; "
-                        f"{checked.path if checked else 'UNRESOLVED SOURCE'}; "
-                        f"sha256={checked.sha256 if checked else 'unknown'}; "
-                        f"page {current_check.citation.page}; {current_check.explanation}"
-                    )
-            for citation in proposal.citations:
-                source = sources.get(citation.source_id)
-                summary.append(
-                    f"Evidence: {source.path if source else 'UNRESOLVED SOURCE'}; "
-                    f"sha256={source.sha256 if source else citation.source_id}; "
-                    f"source page {citation.page}"
-                )
-                if isinstance(citation, OcrCitation):
-                    summary.append(
-                        f"OCR quote: {citation.quote}; artifact {citation.artifact_path}; "
-                        f"word range [{citation.word_start}, {citation.word_end}); "
-                        "see draft.json for exact pixel bounds and render hash."
-                    )
-            if any(isinstance(c, OcrCitation) for c in proposal.citations):
-                confirmed_subject = (
-                    summary_decision.confirmed_source_subject
-                    if summary_decision
-                    else "(not confirmed)"
-                )
-                visual_confirmation = (
-                    summary_decision.ocr_visual_confirmed if summary_decision else False
-                )
-                summary.append(
-                    "OCR review: "
-                    f"source subject confirmed as {confirmed_subject}; "
-                    f"visual confirmation={visual_confirmation}."
-                )
-                if (
-                    item.get("ocr_review_method")
-                    == "machine_cross_checked_draft_not_human_approval"
-                ):
-                    summary.append(
-                        "Machine evidence processing: see localized receipt and any extraction "
-                        "discrepancies above; agreement must not be presumed. "
-                        "not human visual approval or proof of semantic support. "
-                        "See answer_review.json for subject, period, prompt/model and transcript."
-                    )
-        summary.extend(
-            [
-                "",
-                "Detailed checks, quotations and output hashes: see draft.json.",
-                "Prior-packet comparison and signer-specific copies: not performed.",
-            ]
+        summary = draft_reviewer_summary(
+            request,
+            review,
+            completion=completion,
+            additional_form_manifest=additional_form_manifest,
+            results=results,
+            placements=placements,
+            sources=sources,
+            pagination=pagination,
+            attachment_ids=attachment_ids,
+            support_audits=audit_support(
+                tuple(accepted), inventory, tuple(attachment_ids), approved_exhibits
+            ),
+            approved_exhibits=approved_exhibits,
+            minimum_short_font=MIN_SHORT_FONT,
         )
-        (output / "reviewer-summary.txt").write_text("\n".join(summary) + "\n")
+        (output / "reviewer-summary.txt").write_text(summary)
 
     return publish_json_run(
         root, "draft", payload, inventory, verify_inputs=verify, write_artifacts=write

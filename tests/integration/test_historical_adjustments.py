@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -110,6 +111,8 @@ def test_new_municipality_rephrased_tenure_uses_verified_signature_baseline(tmp_
         ("wrong_question", "historical_target_question_mismatch"),
         ("no_correspondence", "historical_cross_issuer_correspondence_required"),
         ("financial", "historical_tenure_field_not_allowed"),
+        ("normalized_wrong_source", "historical_signature_source_mismatch"),
+        ("normalized_invented_date", "historical_signature_context_unresolved"),
     ],
 )
 def test_invalid_historical_adjustments_are_not_written(
@@ -140,6 +143,19 @@ def test_invalid_historical_adjustments_are_not_written(
         clock = None
     elif change == "different_source":
         temporal["date_citation"]["source_id"] = "b" * 64
+    elif change.startswith("normalized_"):
+        from bd_packet_builder.historical_time import adjusted_tenure
+
+        temporal["signed_on"] = "7147-07-14"
+        if change == "normalized_wrong_source":
+            temporal["date_citation"]["source_id"] = "b" * 64
+        else:
+            temporal["date_citation"]["quote"] = "Signature date: November 2, 2023"
+            temporal["date_citation"]["end"] = temporal["date_citation"]["start"] + len(
+                temporal["date_citation"]["quote"]
+            )
+        canonical = adjusted_tenure(AnswerProposal.model_validate_json(json.dumps(raw)), clock)
+        raw.update(canonical.model_dump(mode="json"))
     elif change == "incompatible":
         raw["historical_basis"]["correspondence"]["assessment"] = "incompatible"
     elif change == "wrong_question":
@@ -168,12 +184,29 @@ def test_headcount_remains_a_qualified_historical_value(tmp_path: Path) -> None:
     assert "historical_value_not_in_prior_answer" in issues(tmp_path, case)[0]
 
 
-def test_fresh_grouped_workflow_calculates_and_writes_cross_municipality_tenure(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("signed_on", "recover_assembly", "forged_source"),
+    [
+        ("2024-11-02", False, False),
+        ("7147-07-14", False, False),
+        ("7202-07-14", True, False),
+        ("7147-07-14", False, True),
+    ],
+)
+def test_fresh_grouped_workflow_calculates_and_writes_cross_municipality_tenure(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_on: str,
+    recover_assembly: bool,
+    forged_source: bool,
+):
     import asyncio
     from io import BytesIO
 
     from reportlab.pdfgen.canvas import Canvas
 
+    from bd_packet_builder import draft
     from bd_packet_builder.foundry import FoundryConfig
     from bd_packet_builder.grouped import run_answer_groups
     from bd_packet_builder.live import LiveRunRequest, prepare_live_run
@@ -205,6 +238,9 @@ def test_fresh_grouped_workflow_calculates_and_writes_cross_municipality_tenure(
     raw["requirement_id"] = "p1.years"
     raw["historical_basis"]["correspondence"]["target_question"] = "Years established"
     raw["value"]["value"] = "26"  # The model supplies the baseline, not its own arithmetic.
+    raw["historical_basis"]["tenure"]["signed_on"] = signed_on
+    if forged_source:
+        raw["historical_basis"]["tenure"]["date_citation"]["source_id"] = "b" * 64
     setup.manifest = prepare_live_run(
         setup.store,
         LiveRunRequest(
@@ -220,22 +256,60 @@ def test_fresh_grouped_workflow_calculates_and_writes_cross_municipality_tenure(
         setup.evidence_root,
         FoundryConfig(endpoint="https://synthetic.openai.azure.com/openai/v1", deployment="test"),
     )
-    tools = setup.tools()
+    events: list[str] = []
+    tools = setup.tools(progress_sink=events.append)
     call(tools, "interpret_form")
     handoff = call(tools, "finish_evidence")
     assert handoff["calculation_date"] == "2026-11-02"
+    caplog.set_level(logging.INFO, logger="bd_packet_builder.agent")
+    for _ in range(2):
+        call(tools, "stage_answers", {"proposals": [raw]})
+    tools = setup.tools(progress_sink=events.append)
 
     async def propose(payload):
         assert payload["issuer"] == "Net New City"
         return json.dumps({"proposals": [raw]})
 
-    final = asyncio.run(run_answer_groups(tools, propose))
+    if recover_assembly:
+        with monkeypatch.context() as limited:
+            limited.setattr(draft, "MAX_PACKET_PAGES", 0)
+            failed = asyncio.run(run_answer_groups(tools, propose))
+        assert failed.failure.code == "packet_assembly_failed"
+        saved = setup.artifact("draft_request.json")
+
+        async def unexpected_proposal(payload):
+            pytest.fail("Assembly recovery must reuse the canonical validated proposal")
+
+        final = asyncio.run(run_answer_groups(setup.tools(), unexpected_proposal, resume=True))
+        assert setup.artifact("draft_request.json") == saved
+    else:
+        final = asyncio.run(run_answer_groups(tools, propose))
     assert final.status == "published" and final.outcome == "incomplete"
     request = json.loads(setup.artifact("draft_request.json"))
     assert request["proposals"]["proposals"][0]["value"]["value"] == "28"
+    canonical = request["proposals"]["proposals"][0]["historical_basis"]["tenure"]
+    assert canonical["signed_on"] == "2024-11-02"
+    original = json.loads(setup.artifact("answer-group-000-attempt-1.json"))["response"]
+    assert json.loads(original)["proposals"][0]["historical_basis"]["tenure"]["signed_on"] == (
+        signed_on
+    )
+    assert ("Historical tenure date normalized" in caplog.text) == (signed_on != "2024-11-02")
+    assert any("Historical tenure date normalized" in event for event in events) == (
+        signed_on != "2024-11-02"
+    )
+    assert signed_on not in caplog.text
+    assert "Signature date: November 2, 2024" not in caplog.text
     review = json.loads(setup.artifact("answer_review.json"))
-    assert review["decisions"][0]["decision"] == "draft_verified"
     report = json.loads(setup.artifact("draft.json"))
+    if forged_source:
+        from pypdf import PdfReader
+
+        assert review["decisions"][0]["decision"] != "draft_verified"
+        assert report["completion"]["populated"] == 0
+        assert "p1.years" not in report["written_requirements"]
+        assert "28" not in PdfReader(BytesIO(setup.artifact("packet.pdf"))).pages[0].extract_text()
+        return
+    assert review["decisions"][0]["decision"] == "draft_verified"
     assert report["completion"]["populated"] == 1
     summary = setup.artifact("reviewer-summary.txt").decode()
     assert "prior=26; signed=2024-11-02; calculated as of=2026-11-02" in summary

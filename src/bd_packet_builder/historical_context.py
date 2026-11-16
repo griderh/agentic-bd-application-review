@@ -51,9 +51,10 @@ from bd_packet_builder.scan import (
 )
 from bd_packet_builder.visual import NormalizedBox
 
-CONTEXT_VERSION = "historical-page-context-v9"
-_PRINTED_CONTEXT_VERSIONS = ("historical-page-context-v8", CONTEXT_VERSION)
-QUESTION_READING_VERSION = "question-reading-v2"
+CONTEXT_VERSION = "historical-page-context-v11"
+_NARRATIVE_CONTEXT_VERSIONS = ("historical-page-context-v9", CONTEXT_VERSION)
+_PRINTED_CONTEXT_VERSIONS = ("historical-page-context-v8", *_NARRATIVE_CONTEXT_VERSIONS)
+QUESTION_READING_VERSION = "question-reading-v3"
 
 _QUESTION_PROTECTED = re.compile(
     r"no|not|never|ever|neither|nor|without|except|unless|only|all|any|each|every|and|or|"
@@ -117,33 +118,95 @@ def question_text_agrees(image: str, ocr: str, target: str) -> bool:
     )
 
 
-def verified_question_requirements(
-    blank: bytes, requirements: tuple[Requirement, ...]
-) -> tuple[Requirement, ...]:
-    """Return only unique native questions from this exact blank, not model assertions."""
-    digest = hashlib.sha256(blank).hexdigest()
-    result: list[Requirement] = []
-    with pdfium.PdfDocument(blank) as document:
-        pages: dict[int, str] = {}
-        for requirement in requirements:
-            if requirement.application_sha256 != digest or requirement.page > len(document):
-                continue
-            if requirement.page not in pages:
-                with (
-                    closing(document[requirement.page - 1]) as page,
-                    closing(page.get_textpage()) as text,
-                ):
-                    pages[requirement.page] = normalized(text.get_text_bounded(errors="strict"))
-            wanted = normalized(requirement.instruction)
-            if (
-                wanted
-                and len(
-                    re.findall(r"(?<!\w)" + re.escape(wanted) + r"(?!\w)", pages[requirement.page])
+def _mapped_question_row(
+    text: pdfium.PdfTextPage, width: float, height: float, mapping: MappedResponse
+) -> tuple[float, float, float, float] | None:
+    if mapping.requirement.kind not in ("single_select", "multi_select") or not mapping.options:
+        return None
+    boxes = [b for p in mapping.options for b in (p.box, p.label_box)]
+    if any(
+        b.page != mapping.requirement.page
+        or not 0 <= b.left < b.right <= width
+        or not 0 <= b.bottom < b.top <= height
+        for b in boxes
+    ):
+        return None
+    for placement in mapping.options:
+        b = placement.label_box
+        label = normalized(
+            text.get_text_bounded(
+                left=b.left, bottom=b.bottom, right=b.right, top=b.top, errors="strict"
+            )
+        )
+        if (
+            len(
+                re.findall(
+                    r"(?<!\w)" + re.escape(normalized(placement.label_quote)) + r"(?!\w)", label
                 )
-                == 1
-            ):
-                result.append(requirement)
-    return tuple(result)
+            )
+            != 1
+        ):
+            return None
+    padding = max(b.top - b.bottom for b in boxes)
+    return (
+        0.0,
+        max(0.0, min(b.bottom for b in boxes) - padding),
+        min(b.left for b in boxes),
+        min(height, max(b.top for b in boxes) + padding),
+    )
+
+
+def verified_question_requirements(
+    blank: bytes,
+    requirements: tuple[Requirement, ...],
+    *,
+    mappings: tuple[MappedResponse, ...] = (),
+) -> tuple[Requirement, ...]:
+    """Anchor native questions globally or one-to-one in distinct mapped choice rows."""
+    digest = hashlib.sha256(blank).hexdigest()
+    groups: dict[tuple[int, str], list[Requirement]] = {}
+    for requirement in requirements:
+        if requirement.application_sha256 == digest:
+            groups.setdefault((requirement.page, normalized(requirement.instruction)), []).append(
+                requirement
+            )
+    verified: set[str] = set()
+    with pdfium.PdfDocument(blank) as document:
+        for (number, wanted), targets in groups.items():
+            if not wanted or number > len(document):
+                continue
+            with closing(document[number - 1]) as page, closing(page.get_textpage()) as text:
+                pattern = r"(?<!\w)" + re.escape(wanted) + r"(?!\w)"
+                count = len(re.findall(pattern, normalized(text.get_text_bounded(errors="strict"))))
+                if count == 1:
+                    verified.update(t.requirement_id for t in targets)
+                    continue
+                if count < 2 or count != len(targets) or page.get_rotation() != 0:
+                    continue
+                rows: list[tuple[float, float, float, float]] = []
+                width, height = page.get_size()
+                for target in targets:
+                    matches = [m for m in mappings if m.requirement == target]
+                    if len(matches) != 1:
+                        break
+                    row = _mapped_question_row(text, width, height, matches[0])
+                    if row is None:
+                        break
+                    left, bottom, right, top = row
+                    local = normalized(
+                        text.get_text_bounded(
+                            left=left, bottom=bottom, right=right, top=top, errors="strict"
+                        )
+                    )
+                    if len(re.findall(pattern, local)) != 1 or any(
+                        min(right, c) > max(left, a) and min(top, d) > max(bottom, b)
+                        for a, b, c, d in rows
+                    ):
+                        break
+                    rows.append(row)
+                if len(rows) == count:
+                    verified.update(t.requirement_id for t in targets)
+    return tuple(r for r in requirements if r.requirement_id in verified)
 
 
 class QuestionReconciliation(Contract):
@@ -624,13 +687,17 @@ def _make_check(
                 if field.control.state != "selected" or any(d.part == "control" for d in warnings):
                     continue
             elif (
-                context_version != CONTEXT_VERSION
+                context_version not in _NARRATIVE_CONTEXT_VERSIONS
                 or name != "answer"
                 or any(
                     d.part != "answer"
                     and not (
                         d.part == "question"
-                        and d.code == "historical_text_or_region_disagrees"
+                        and (
+                            d.code == "historical_text_or_region_disagrees"
+                            or context_version == CONTEXT_VERSION
+                            and d.code == "historical_low_word_confidence"
+                        )
                         and questions_agree(d.image_reading, d.ocr_reading)
                     )
                     for d in warnings
@@ -1307,6 +1374,7 @@ class HistoricalContextCheck(Contract):
             "historical-page-context-v6",
             "historical-page-context-v7",
             "historical-page-context-v8",
+            "historical-page-context-v9",
             CONTEXT_VERSION,
         ):
             legacy = json.loads(payload)
@@ -1375,6 +1443,7 @@ class HistoricalContextCheck(Contract):
                 "historical-page-context-v6",
                 "historical-page-context-v7",
                 "historical-page-context-v8",
+                "historical-page-context-v9",
                 CONTEXT_VERSION,
             )
             and self.prompt_version in SUPPORTED_SCAN_VERSIONS
@@ -1388,6 +1457,7 @@ class HistoricalContextCheck(Contract):
                         "historical-page-context-v6",
                         "historical-page-context-v7",
                         "historical-page-context-v8",
+                        "historical-page-context-v9",
                         CONTEXT_VERSION,
                     )
                     and self.prompt_version

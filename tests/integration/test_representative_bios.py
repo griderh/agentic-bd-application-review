@@ -1,3 +1,4 @@
+import hashlib
 import json
 from contextlib import closing
 from io import BytesIO
@@ -185,6 +186,37 @@ def test_selection_is_hash_bound_and_survives_handoff_and_publication(tmp_path):
     call(tools, "submit_answers", {"proposals": []})
     call(tools, "assemble_packet")
     assert source["source_id"] in setup.artifact("reviewer-summary.txt").decode()
+
+
+@pytest.mark.parametrize(
+    ("bios", "expected_sha256"),
+    [
+        (
+            {"bio": [PERSON]},
+            "e080f921fc22c333d0ef0f72135a2b60b592fb29f4fde0d50600d5e933b8baf5",
+        ),
+        ({}, "ae5f4b1a03399fe35cad079b40948c28443f05aec8389397eb613d0f2cfb8951"),
+    ],
+)
+def test_evidence_completion_preserves_selection_bytes_and_representative_context(
+    tmp_path: Path, bios: dict[str, list[str]], expected_sha256: str
+) -> None:
+    setup, tools, _, request = setup_bios(tmp_path, bios)
+    call(tools, "resolve_representative_bio", request)
+
+    handoff = call(tools, "finish_evidence")
+
+    bundle = {
+        name: hashlib.sha256(setup.artifact(name)).hexdigest()
+        for name in ["evidence_selection.json", "representative_bios.json"]
+    }
+    assert (
+        hashlib.sha256(json.dumps(bundle, sort_keys=True).encode()).hexdigest() == expected_sha256
+    )
+    assert setup.tools().answer_handoff() == handoff
+    selection = json.loads(setup.artifact("evidence_selection.json"))
+    assert selection["representative_bios"] == handoff["representative_bios"]
+    assert selection["attachments"] == handoff["attachments"]
 
 
 @pytest.mark.parametrize("change", ["person", "role", "offset", "requirement", "signing"])

@@ -20,7 +20,7 @@ from bd_packet_builder.historical_context import HistoricalContextCheck
 from bd_packet_builder.history import ArchiveEntry, ArchiveManifest
 from bd_packet_builder.live import LiveRunRequest, prepare_live_run
 from bd_packet_builder.scan import ScanTranscript
-from tests.integration.test_agent import EVIDENCE_TEXT, Setup, blank_pdf
+from tests.integration.test_agent import EVIDENCE_TEXT, FakeMapper, Setup, blank_pdf
 from tests.integration.test_historical_prefill import call
 
 PRIOR = "bd_agreements/Completed/Broward/mixed.pdf"
@@ -458,10 +458,12 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
 
 
 @pytest.mark.parametrize("change", ["none", "invented_anchor", "conflicting_dates", "discrepancy"])
-def test_native_tenure_with_image_date_requires_independently_rechecked_signing_metadata(
+@pytest.mark.parametrize("scanned_answer", [False, True])
+def test_tenure_date_normalization_requires_independently_rechecked_signing_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     change: str,
+    scanned_answer: bool,
 ) -> None:
     from datetime import date
 
@@ -470,21 +472,25 @@ def test_native_tenure_with_image_date_requires_independently_rechecked_signing_
         Citation,
         HistoricalBasis,
         HistoricalTenure,
+        OcrCitation,
     )
     from bd_packet_builder.draft import verify_historical_context
+    from bd_packet_builder.historical_time import adjusted_tenure
     from bd_packet_builder.history import with_historical_sources
     from bd_packet_builder.inventory import build_inventory
 
     setup, tools, reader, prior, _ = setup_page(
         tmp_path,
         monkeypatch,
+        scanned_answer=scanned_answer,
         primary_question="Date",
         primary_answer="2024-11-02",
+        primary_ocr_answer="2024-11-02",
         primary_role="Primary representative"
         if change == "invented_anchor"
         else "Signature section",
         secondary_question="Date" if change == "conflicting_dates" else "Name",
-        secondary_answer="November 2, 2025" if change == "conflicting_dates" else "Blair Example",
+        secondary_answer="Date 2025-11-02" if change == "conflicting_dates" else "Blair Example",
     )
     reader.transcribe.return_value = reader.transcribe.return_value.model_copy(
         update={
@@ -515,7 +521,7 @@ def test_native_tenure_with_image_date_requires_independently_rechecked_signing_
             }
         )
         checks = (date_check,) + tuple(c for c in checks if c.field.answer.text != "2024-11-02")
-    assert isinstance(date_check.answer, Citation)
+    assert isinstance(date_check.answer, OcrCitation if scanned_answer else Citation)
     # Native tenure context and image date context deliberately take different verification paths.
     proposal = AnswerProposal(
         requirement_id="years",
@@ -531,12 +537,14 @@ def test_native_tenure_with_image_date_requires_independently_rechecked_signing_
             reviewer_confirmation="Confirm operating continuity.",
             tenure=HistoricalTenure(
                 prior_value="26",
-                signed_on=date(2024, 11, 2),
+                signed_on=date(7147, 7, 14),
                 date_citation=date_check.answer,
                 date_context=date_check.context_citation,
             ),
         ),
     )
+    proposal = adjusted_tenure(proposal, date(2026, 11, 2))
+    assert proposal.historical_basis.tenure.signed_on == date(2024, 11, 2)
     inventory = with_historical_sources(
         setup.evidence_root,
         build_inventory(setup.evidence_root),
@@ -656,8 +664,16 @@ def setup_page(
     primary_ocr_answer: str | None = None,
     primary_ocr_confidence: int = 96,
     primary_image_answer: str | None = None,
+    blank: bytes | None = None,
+    mapper: FakeMapper | None = None,
 ):
-    setup = Setup(tmp_path, blank_pdf(), evidence_text=evidence_text, scanned=scanned_current)
+    setup = Setup(
+        tmp_path,
+        blank if blank is not None else blank_pdf(),
+        mapper,
+        evidence_text=evidence_text,
+        scanned=scanned_current,
+    )
     target = setup.evidence_root / PRIOR
     target.parent.mkdir(parents=True)
     background = BytesIO()
@@ -1502,7 +1518,7 @@ def test_native_verified_narrative_with_imperfect_ocr_reaches_the_supplement(tmp
     packet = PdfReader(output / "draft-packet.pdf")
     for line in answer.splitlines():
         assert line in packet.pages[1].extract_text()
-    assert "See Supplemental Answers, p1.name, packet page 2." in packet.pages[0].extract_text()
+    assert "See Supplemental Answers, Response 1, packet page 2." in packet.pages[0].extract_text()
     assert reader.transcribe.call_count == 1
 
 
@@ -2321,7 +2337,14 @@ NARRATIVE = "Agency bond desk"
 
 
 def narrative_dispute(
-    tmp_path, monkeypatch, *, native=False, outcome="resolved", limit=None, confidence=96
+    tmp_path,
+    monkeypatch,
+    *,
+    native=False,
+    outcome="resolved",
+    limit=None,
+    confidence=96,
+    context_confidence_part=None,
 ):
     setup, tools, reader, prior, current = setup_page(
         tmp_path,
@@ -2333,6 +2356,25 @@ def narrative_dispute(
         primary_ocr_answer=NARRATIVE,
         primary_ocr_confidence=confidence,
     )
+    if context_confidence_part is not None:
+        from bd_packet_builder import ocr
+
+        execute = ocr._execute
+        word = "Name" if context_confidence_part == "question" else "Primary"
+
+        def lower_confidence(command, *args):
+            output = execute(command, *args)
+            if "--version" in command:
+                return output
+            rows = []
+            for line in output.splitlines():
+                fields = line.split("\t")
+                if len(fields) == 12 and fields[-1] == word:
+                    fields[10] = "89"
+                rows.append("\t".join(fields))
+            return "\n".join(rows) + "\n"
+
+        monkeypatch.setattr(ocr, "_execute", lower_confidence)
     initial = reader.transcribe.return_value.model_dump(mode="json")
     # Omit an interior word from the image reading, not the source or local OCR.
     initial["historical_fields"][0]["answer"]["text"] = "Agency desk"
@@ -2354,14 +2396,29 @@ def narrative_dispute(
 
 
 @pytest.mark.parametrize("native", [False, True])
-def test_plain_answer_dispute_is_recovered_before_answering(tmp_path, monkeypatch, native):
-    setup, tools, reader, prior, _ = narrative_dispute(tmp_path, monkeypatch, native=native)
+@pytest.mark.parametrize("low_question_confidence", [False, True])
+def test_plain_answer_dispute_is_recovered_before_answering(
+    tmp_path, monkeypatch, native, low_question_confidence
+):
+    setup, tools, reader, prior, _ = narrative_dispute(
+        tmp_path,
+        monkeypatch,
+        native=native,
+        context_confidence_part="question" if low_question_confidence else None,
+    )
     result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
     first = result["associations"][0]
     assert first["candidate_answer"] == NARRATIVE
     assert first["printed_reading_issues"] == []
     assert len(first["printed_resolutions"]) == 1
-    assert first["discrepancies"][0]["code"] == "historical_printed_text_resolved"
+    assert any(d["code"] == "historical_printed_text_resolved" for d in first["discrepancies"])
+    if low_question_confidence:
+        assert any(
+            d["part"] == "question"
+            and d["code"] == "historical_low_word_confidence"
+            and d["image_reading"] == d["ocr_reading"]
+            for d in first["discrepancies"]
+        )
     assert reader.transcribe.call_count == (1 if native else 2)
     # Blind: only image bytes, never the alternative readings or suggested answer.
     assert all(len(c.args) == 1 and not c.kwargs for c in reader.transcribe.call_args_list)
@@ -2416,14 +2473,16 @@ def test_focused_recovery_keeps_corroborated_low_confidence_words_without_an_ext
         ("resolved", 1, "answer:budget_exhausted", 1),
     ],
 )
+@pytest.mark.parametrize("low_question_confidence", [False, True])
 def test_plain_answer_recovery_never_chooses_an_unverified_reading(
-    tmp_path, monkeypatch, outcome, max_pages, issue, calls
+    tmp_path, monkeypatch, outcome, max_pages, issue, calls, low_question_confidence
 ):
     _, tools, reader, prior, _ = narrative_dispute(
         tmp_path,
         monkeypatch,
         outcome=outcome,
         limit=EvidenceLimits(max_ocr_pages=max_pages),
+        context_confidence_part="question" if low_question_confidence else None,
     )
     result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
     first = result["associations"][0]
@@ -2437,9 +2496,15 @@ def test_plain_answer_recovery_never_chooses_an_unverified_reading(
     assert reader.transcribe.call_count == calls
 
 
-def recovered_narrative_draft(tmp_path, monkeypatch, *, outcome="resolved", max_pages=12):
+def recovered_narrative_draft(
+    tmp_path, monkeypatch, *, outcome="resolved", max_pages=12, low_question_confidence=False
+):
     setup, tools, reader, prior, current = narrative_dispute(
-        tmp_path, monkeypatch, outcome=outcome, limit=EvidenceLimits(max_ocr_pages=max_pages)
+        tmp_path,
+        monkeypatch,
+        outcome=outcome,
+        limit=EvidenceLimits(max_ocr_pages=max_pages),
+        context_confidence_part="question" if low_question_confidence else None,
     )
     request, review = validated_page(
         setup,
@@ -2472,10 +2537,13 @@ def recovered_narrative_draft(tmp_path, monkeypatch, *, outcome="resolved", max_
 
 
 @pytest.mark.parametrize("tamper", ["none", "crop_hash", "transcription", "confidence"])
+@pytest.mark.parametrize("low_question_confidence", [False, True])
 def test_recovered_narrative_survives_gate_writer_and_rejects_tampering(
-    tmp_path, monkeypatch, tamper
+    tmp_path, monkeypatch, tamper, low_question_confidence
 ):
-    setup, reader, request, review = recovered_narrative_draft(tmp_path, monkeypatch)
+    setup, reader, request, review = recovered_narrative_draft(
+        tmp_path, monkeypatch, low_question_confidence=low_question_confidence
+    )
     assert review.decisions[0].decision == "draft_verified"
     checks = review.historical_context_checks
     if tamper in ("crop_hash", "transcription"):
@@ -2609,6 +2677,177 @@ def test_plain_answer_recovery_does_not_resolve_a_disputed_association(tmp_path,
     assert first["printed_resolutions"] == []
     assert any(d["part"] == part for d in first["discrepancies"])
     assert reader.transcribe.call_count == 1
+
+
+def test_low_confidence_role_does_not_unlock_narrative_recovery(tmp_path, monkeypatch):
+    _, tools, reader, prior, _ = narrative_dispute(
+        tmp_path, monkeypatch, context_confidence_part="role"
+    )
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] is None
+    assert first["printed_resolutions"] == []
+    assert any(
+        d["part"] == "role" and d["code"] == "historical_low_word_confidence"
+        for d in first["discrepancies"]
+    )
+    assert reader.transcribe.call_count == 1
+
+
+def test_v9_low_confidence_question_keeps_original_unattempted_recovery_on_replay(
+    tmp_path, monkeypatch
+):
+    from bd_packet_builder.history import with_historical_sources
+    from bd_packet_builder.inventory import build_inventory
+
+    setup, tools, reader, prior, _ = narrative_dispute(
+        tmp_path, monkeypatch, context_confidence_part="question"
+    )
+    call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    call(tools, "finish_evidence")
+    raw = json.loads(setup.artifact("historical_context_checks.json"))["checks"][0]
+    raw["version"] = "historical-page-context-v9"
+    raw["printed_readings"] = []
+    for discrepancy in raw["discrepancies"]:
+        if discrepancy["part"] == "answer":
+            discrepancy["code"] = "historical_text_or_region_disagrees"
+            discrepancy["selection_reason"] = (
+                "Neither reading is preferred. Compare the localized alternatives with "
+                "independent identity-linked evidence before choosing a value. "
+                "If the difference cannot be resolved, leave the field blank."
+            )
+    payload = json.dumps(raw, separators=(",", ":"), ensure_ascii=False).encode()
+    legacy = HistoricalContextCheck.model_validate_json(payload)
+    assert legacy.context_citation.check_sha256 == hashlib.sha256(payload).hexdigest()
+    inventory = with_historical_sources(
+        setup.evidence_root,
+        build_inventory(setup.evidence_root),
+        setup.store.load(setup.manifest.run_id).request.historical_archive,
+    )
+    artifact = (setup.evidence_root / legacy.question.artifact_path).read_bytes()
+    calls = reader.transcribe.call_count
+    assert legacy.answer_disputed
+    assert legacy.recheck(setup.evidence_root, inventory, artifact, allow_disagreements=True)
+    assert reader.transcribe.call_count == calls
+
+
+@pytest.mark.parametrize("wrong_role", [False, True])
+def test_repeated_role_questions_with_recovered_wording_reach_gate_and_writer(
+    tmp_path, monkeypatch, wrong_role
+):
+    from bd_packet_builder.visual import VisualPage
+    from tests.integration.test_agent import nbox, visual_item
+
+    stream = BytesIO()
+    canvas = Canvas(stream, pagesize=(612, 792), invariant=True)
+    items = []
+    for item_id, role, y in (
+        ("first", "Primary representative", 600),
+        ("second", "Backup representative", 300),
+    ):
+        canvas.drawString(40, y + 50, role)
+        canvas.drawString(40, y, "Services")
+        for label, x in (("Yes", 450), ("No", 500)):
+            canvas.rect(x, y - 2, 10, 10)
+            canvas.drawString(x + 15, y, label)
+        item = visual_item(item_id, "Services", "single_select", None)
+        item["instruction_box"] = nbox(35, 792 - y - 15, 400, 792 - y + 5)
+        item["options"] = [
+            {
+                "option_id": label.lower(),
+                "label": label,
+                "instruction": label,
+                "control": "checkbox",
+                "box": nbox(x, 792 - y - 8, x + 10, 792 - y + 2),
+                "label_box": nbox(x + 15, 792 - y - 12, x + 45, 792 - y + 4),
+                "write_in_region": None,
+            }
+            for label, x in (("Yes", 450), ("No", 500))
+        ]
+        items.append(item)
+    canvas.save()
+    mapper = FakeMapper(
+        {
+            1: VisualPage.model_validate_json(
+                json.dumps({"readable": True, "explanation": None, "items": items})
+            )
+        }
+    )
+    setup, tools, reader, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        blank=stream.getvalue(),
+        mapper=mapper,
+        primary_question="Services",
+        primary_image_question="Service",
+        primary_answer="Yes",
+        primary_ocr_answer="Yes",
+        control_state="selected",
+        historical_policy="answer_first_review",
+        draft_schema_version=2,
+    )
+    reader.transcribe.side_effect = [
+        reader.transcribe.return_value,
+        ScanTranscript(readable=True, subject=None, text="Services", reporting_period=None),
+    ]
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    candidate = next(a for a in result["associations"] if a["answer_citation"]["quote"] == "Yes")
+    assert any(
+        p["part"] == "question" and p["status"] == "resolved"
+        for p in candidate["printed_resolutions"]
+    )
+    call(tools, "finish_evidence")
+    call(
+        tools,
+        "submit_answers",
+        {
+            "proposals": [
+                {
+                    "requirement_id": "p1.first",
+                    "outcome": "proposed",
+                    "confidence": 0.9,
+                    "value": {"kind": "single_select", "selected": ["yes"]},
+                    "citations": [candidate["answer_citation"]],
+                    "historical_basis": {
+                        "category": "trading_capability",
+                        "context": "firm_wide",
+                        "role": "Backup representative" if wrong_role else "Primary representative",
+                        "prior_question": candidate["context_citation"],
+                        "current_checks": [],
+                        "reviewer_confirmation": (
+                            "Confirm the historically selected service remains offered."
+                        ),
+                        "correspondence": {
+                            "target_question": "Services",
+                            "assessment": "applicable",
+                            "differences": "Same question and answer options.",
+                            "reason": (
+                                "Same historically stated service; current continuity needs review."
+                            ),
+                        },
+                    },
+                },
+                {
+                    "requirement_id": "p1.second",
+                    "outcome": "missing_evidence",
+                    "explanation": "No checked backup selection is available.",
+                },
+            ]
+        },
+    )
+    review = json.loads(setup.artifact("answer_review.json"))
+    assert (review["decisions"][0]["decision"] == "draft_verified") == (not wrong_role)
+    assert review["decisions"][1]["decision"] == "withhold"
+    call(tools, "assemble_packet")
+    call(tools, "publish_results")
+    report = json.loads(setup.artifact("draft.json"))
+    assert report["written_requirements"] == ([] if wrong_role else ["p1.first"])
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+    assert reader.transcribe.call_count == 2
+    assert (
+        setup.tools(scan_reader=reader, draft_schema_version=2).answer_handoff()
+        == tools.answer_handoff()
+    )
 
 
 def test_v8_plain_answer_receipts_replay_without_new_recovery(tmp_path, monkeypatch):

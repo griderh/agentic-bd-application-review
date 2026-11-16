@@ -4,9 +4,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import date
 from typing import Annotated, Any, Literal
 
 from agent_framework import (
@@ -25,19 +27,31 @@ from bd_packet_builder.agent import (
     _problems,
     configure_client,
 )
-from bd_packet_builder.contracts import Citation, Contract, Nonblank, OcrCitation
+from bd_packet_builder.contracts import (
+    Citation,
+    Contract,
+    HistoricalContextCitation,
+    Nonblank,
+    OcrCitation,
+    Requirement,
+    SingleSelectValue,
+    explicit_choice_answer,
+)
 from bd_packet_builder.followup import (
     ConditionAssessment,
     VerificationRequest,
     contains_issuer_quote,
 )
+from bd_packet_builder.historical_context import HistoricalAssociation, HistoricalContextCheck
+from bd_packet_builder.historical_time import adjusted_tenure
 from bd_packet_builder.proposals import ModelAnswerValue, ModelProposal
 from bd_packet_builder.run import RunManifest
 
-GROUP_VERSION = "answer-groups-v13"
+GROUP_VERSION = "answer-groups-v16"
 GROUP_SIZE = 5
 MAX_GROUP_ATTEMPTS = 3
 MAX_JSON_RETRIES = 1
+MAX_PROPOSAL_RETRIES = 1
 GROUP_TIMEOUT_SECONDS = 180
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_VERIFICATION_REQUESTS = 20
@@ -101,6 +115,9 @@ bio's printed card. Propose the best supported value, but never mark them confli
 the bio lacks labels or history differs; code reconciles and reports differences.
 Do not include other requirements, signatures or signature dates. A saved proposal is not
 validated evidence or human approval. previous_errors are application feedback to correct.
+When repair_requirement_ids is nonempty, return proposals only for those IDs. Other proposals
+are retained by code and cannot be replaced. Correct representation errors using the same evidence;
+never invent an answer or claim a failed verification succeeded.
 """
 )
 EVIDENCE_INSTRUCTIONS = (
@@ -138,6 +155,188 @@ class _GroupAnswers(Contract):
     ]
     verification_requests: Annotated[tuple[VerificationRequest, ...], Field(max_length=5)] = ()
     condition_assessments: Annotated[tuple[ConditionAssessment, ...], Field(max_length=30)] = ()
+
+
+class _GroupEnvelope(Contract):
+    proposals: Annotated[list[Any], Field(max_length=GROUP_SIZE)]
+    verification_requests: Annotated[tuple[VerificationRequest, ...], Field(max_length=5)] = ()
+    condition_assessments: Annotated[tuple[ConditionAssessment, ...], Field(max_length=30)] = ()
+
+
+class _GroupIdentityError(ValueError):
+    pass
+
+
+def _resolve_reference_labels(response: str) -> tuple[str, list[str]]:
+    """Resolve labels to unique answer substrings, never edit evidence or answer text."""
+    try:
+        value = json.loads(response)
+    except json.JSONDecodeError:
+        return response, []
+    if not isinstance(value, dict) or not isinstance(value.get("proposals"), list):
+        return response, []
+    paths = []
+    for index, proposal in enumerate(value["proposals"]):
+        if not isinstance(proposal, dict):
+            continue
+        answer = proposal.get("value")
+        references = proposal.get("supporting_references")
+        if (
+            not isinstance(answer, dict)
+            or answer.get("kind") not in ("text", "narrative")
+            or not isinstance(answer.get("value"), str)
+            or len(answer["value"]) > 20_000
+            or not isinstance(references, list)
+            or len(references) > 20
+        ):
+            continue
+        text = answer["value"]
+        for offset, reference in enumerate(references):
+            if not isinstance(reference, str) or not reference.strip() or len(reference) > 20_000:
+                continue
+            if reference.casefold() in text.casefold():
+                continue
+            pattern = r"\s+".join(re.escape(part) for part in reference.split())
+            matches = list(re.finditer("(?=(" + pattern + "))", text, flags=re.IGNORECASE))
+            if len(matches) == 1:
+                references[offset] = matches[0].group(1)
+                paths.append(f"proposals.{index}.supporting_references.{offset}")
+    return (_json(value) if paths else response), paths
+
+
+def _ingest_group(
+    response: str, payload: dict[str, Any]
+) -> tuple[_GroupAnswers, list[dict[str, Any]]]:
+    envelope = _GroupEnvelope.model_validate_json(response)
+    calculation_date = date.fromisoformat(payload["calculation_date"])
+    assigned = payload["assigned_requirement_ids"]
+    proposals: dict[str, _ProposedGroupAnswer | _UnresolvedGroupAnswer] = {}
+    errors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in envelope.proposals:
+        rid = item.get("requirement_id") if isinstance(item, dict) else None
+        if not isinstance(rid, str) or rid not in assigned or rid in seen:
+            raise _GroupIdentityError("group_requirement_mismatch")
+        seen.add(rid)
+        try:
+            single = _GroupAnswers.model_validate_json(_json({"proposals": [item]}))
+        except ValidationError as error:
+            errors.append(
+                {
+                    "requirement_id": rid,
+                    "code": "proposal_schema_invalid",
+                    "problems": _problems(error),
+                }
+            )
+            continue
+        proposal = single.proposals[0]
+        try:
+            adjusted_tenure(proposal, calculation_date)
+        except ValueError:
+            errors.append({"requirement_id": rid, "code": "historical_tenure_invalid"})
+            continue
+        proposals[rid] = proposal
+    requested = {r.requirement_id for r in envelope.verification_requests}
+    if not requested <= set(assigned) or any(
+        c.requirement_id not in assigned for c in envelope.condition_assessments
+    ):
+        raise _GroupIdentityError("group_requirement_mismatch")
+    for rid in assigned:
+        if rid not in seen and rid not in requested:
+            errors.append({"requirement_id": rid, "code": "proposal_missing"})
+    retained = _GroupAnswers.model_validate_json(
+        _json(payload.get("retained_group_answers", {"proposals": []}))
+    )
+    prior_requests = [r["request"] for r in payload.get("verification_results", [])]
+    requests = [
+        r for r in retained.verification_requests if r.model_dump(mode="json") not in prior_requests
+    ]
+    requests.extend(envelope.verification_requests)
+    combined = dict(proposals)
+    combined.update((p.requirement_id, p) for p in retained.proposals)
+    return (
+        _GroupAnswers(
+            proposals=tuple(combined.values()),
+            verification_requests=tuple(requests),
+            condition_assessments=(
+                *(c for c in retained.condition_assessments if c.requirement_id not in assigned),
+                *envelope.condition_assessments,
+            ),
+        ),
+        errors,
+    )
+
+
+def _retained_group_answers(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not any(r["status"] == "proposal_recovery_requested" for r in records):
+        return {"proposals": []}
+    latest = next(
+        r
+        for r in reversed(records)
+        if r["status"] in ("proposal_recovery_requested", "evidence_requested")
+    )
+    retained: dict[str, Any] = json.loads(latest["canonical_response"])
+    if latest["status"] == "evidence_requested":
+        pending = {r["requirement_id"] for r in retained["verification_requests"]}
+        retained["proposals"] = [
+            p for p in retained["proposals"] if p["requirement_id"] not in pending
+        ]
+        retained["verification_requests"] = []
+        kept = {p["requirement_id"] for p in retained["proposals"]}
+        retained["condition_assessments"] = [
+            c for c in retained["condition_assessments"] if c["requirement_id"] in kept
+        ]
+    return retained
+
+
+def _complete_proposal_exceptions(
+    tools: PacketAgentTools,
+    group: list[dict[str, Any]],
+    record: dict[str, Any],
+    handoff: dict[str, Any],
+    name: str,
+) -> None:
+    batch = _GroupAnswers.model_validate_json(record["canonical_response"])
+    proposals = {p.requirement_id: p.model_dump(mode="json") for p in batch.proposals}
+    exceptions = []
+    reasons = {e["requirement_id"]: e["code"] for e in record["proposal_errors"]}
+    for requirement in group:
+        rid = requirement["requirement_id"]
+        if rid in proposals:
+            continue
+        reason = reasons.get(rid, "verification_not_completed")
+        proposals[rid] = {
+            "requirement_id": rid,
+            "outcome": "technical_review_required",
+            "explanation": (
+                f"TECHNICAL REVIEW REQUIRED: {reason}. LEFT BLANK after bounded proposal recovery; "
+                "this is not a finding of missing business evidence. Review the saved source "
+                "and private proposal diagnostics, then provide a supported answer or leave blank."
+            ),
+        }
+        exceptions.append({"requirement_id": rid, "code": reason})
+        tools.answer_progress(f"Technical review required: requirement={rid}; code={reason}")
+    deferred = [
+        {
+            "ok": False,
+            "request": r.model_dump(mode="json"),
+            "error": "verification_not_performed_proposal_recovery_exhausted",
+        }
+        for r in batch.verification_requests
+    ]
+    annotated = json.loads(
+        _staging_response(batch, [*handoff.get("verification_results", []), *deferred])
+    )
+    for proposal in annotated["proposals"]:
+        proposals[proposal["requirement_id"]] = proposal
+    staging = _json({"proposals": [proposals[r["requirement_id"]] for r in group]})
+    tools.answer_checkpoint(
+        name,
+        {"version": GROUP_VERSION, "staging_response": staging, "exceptions": exceptions},
+    )
+    staged = json.loads(tools.call("stage_answers", staging))
+    if not staged["ok"]:
+        raise ValueError("Canonical review exceptions no longer satisfy staging contracts")
 
 
 def _staging_response(
@@ -198,7 +397,7 @@ def _digest(value: object) -> str:
 
 
 def _resolve_citations(response: str, handoff: dict[str, Any]) -> tuple[str, list[str]]:
-    """Resolve plain source/page/quote references only to unique checked receipts."""
+    """Resolve metadata from unique checked receipts or exact, unique native-page text."""
     try:
         value = json.loads(response)
     except json.JSONDecodeError:
@@ -212,6 +411,31 @@ def _resolve_citations(response: str, handoff: dict[str, Any]) -> tuple[str, lis
         checked = kind.model_validate_json(_json(receipt)).model_dump(mode="json")
         key = (checked["source_id"], checked["page"], checked["quote"])
         by_reference.setdefault(key, {})[_json(checked)] = checked
+    sources = {
+        source["source_id"]: source["page_count"]
+        for source in handoff.get("sources", [])
+        if source.get("format") == "pdf" and type(source.get("page_count")) is int
+    }
+    native_pages: dict[tuple[str, int], set[tuple[str, str]]] = {}
+    for reading in handoff.get("candidate_readings", []):
+        source_id = reading.get("source_id")
+        page = reading.get("page")
+        text = reading.get("text")
+        digest = reading.get("source_sha256")
+        if (
+            reading.get("mode") == "native"
+            and reading.get("citable") is True
+            and reading.get("artifact_path") is None
+            and isinstance(source_id, str)
+            and source_id in sources
+            and type(page) is int
+            and 1 <= page <= sources[source_id]
+            and isinstance(text, str)
+            and isinstance(digest, str)
+            and len(digest) == 64
+            and all(c in "0123456789abcdef" for c in digest)
+        ):
+            native_pages.setdefault((source_id, page), set()).add((digest, text))
     resolved: list[str] = []
 
     def visit(item: Any, path: str) -> Any:
@@ -250,6 +474,18 @@ def _resolve_citations(response: str, handoff: dict[str, Any]) -> tuple[str, lis
                     if checked != item:
                         resolved.append(path)
                         return checked
+                if not matches and item["quote"].strip():
+                    pages = native_pages.get((item["source_id"], item["page"]), set())
+                    if len(pages) == 1:
+                        _, text = next(iter(pages))
+                        start = text.find(item["quote"])
+                        if start >= 0 and text.find(item["quote"], start + 1) < 0:
+                            # Offsets are derived here; source and answer support are still
+                            # independently checked by the gate and writer.
+                            located = item | {"start": start, "end": start + len(item["quote"])}
+                            if located != item:
+                                resolved.append(path)
+                                return located
             return {k: visit(v, f"{path}.{k}" if path else k) for k, v in item.items()}
         if isinstance(item, list):
             return [visit(v, f"{path}.{i}") for i, v in enumerate(item)]
@@ -257,6 +493,93 @@ def _resolve_citations(response: str, handoff: dict[str, Any]) -> tuple[str, lis
 
     result = visit(value, "")
     return (_json(result) if resolved else response), resolved
+
+
+def _bind_historical_choice_citations(
+    response: str,
+    handoff: dict[str, Any],
+    checks: tuple[HistoricalContextCheck, ...],
+    application_sha256: str,
+) -> tuple[str, list[str]]:
+    """Bind an unchanged choice through its exact checked relationship, not its label."""
+    try:
+        value = json.loads(response)
+    except json.JSONDecodeError:
+        return response, []
+    if not isinstance(value, dict) or not isinstance(value.get("proposals"), list):
+        return response, []
+    requirements = {
+        item["requirement_id"]: Requirement.model_validate_json(
+            _json(item | {"application_sha256": application_sha256})
+        )
+        for item in handoff.get("requirements", [])
+    }
+    associations = tuple(
+        HistoricalAssociation.model_validate_json(_json(item))
+        for item in handoff.get("historical_candidates", [])
+    )
+    paths: list[str] = []
+    for index, item in enumerate(value["proposals"]):
+        try:
+            proposal = ModelProposal.model_validate_json(_json(item))
+        except ValidationError:
+            # Normal ingestion owns malformed-item diagnostics and bounded correction.
+            continue
+        basis = proposal.historical_basis
+        requirement = requirements.get(proposal.requirement_id)
+        if (
+            proposal.outcome != "proposed"
+            or not isinstance(proposal.value, SingleSelectValue)
+            or proposal.value.write_ins
+            or basis is None
+            or not isinstance(basis.prior_question, HistoricalContextCitation)
+            or basis.additional_contexts
+            or basis.tenure is not None
+            or basis.reading_resolution is not None
+            or requirement is None
+            or requirement.kind != "single_select"
+            or len(proposal.citations) != 1
+            or not isinstance(proposal.citations[0], Citation)
+        ):
+            continue
+        matches = {
+            a.model_dump_json(): a
+            for a in associations
+            if a.context_citation == basis.prior_question
+        }
+        if len(matches) != 1:
+            continue
+        association = next(iter(matches.values()))
+        checked = {
+            c.model_dump_json(): c
+            for c in checks
+            if c.context_citation == association.context_citation
+        }
+        if len(checked) != 1:
+            continue
+        check = next(iter(checked.values()))
+        original = proposal.citations[0]
+        if (
+            association.write_in is not None
+            or check.field.write_in is not None
+            or check.answer != association.answer_citation
+            or check.field.control is None
+            or check.field.control.state != "selected"
+            or check.answer_disputed
+            or any(d.part == "control" for d in check.discrepancies)
+            or original.source_id != check.answer.source_id
+            or original.page != check.answer.page
+            or not explicit_choice_answer(requirement, proposal.value, check.answer.quote)
+            or not check.supports(
+                proposal.model_copy(update={"citations": (check.answer,)}), requirement
+            )
+        ):
+            continue
+        replacement = check.answer.model_dump(mode="json")
+        if item["citations"][0] != replacement:
+            item["citations"] = [replacement]
+            paths.append(f"proposals.{index}.citations.0")
+    return (_json(value) if paths else response), paths
 
 
 def _technical_error(error: BaseException) -> dict[str, Any]:
@@ -351,6 +674,7 @@ async def _attempt_group(
     can_followup: bool,
     *,
     json_retry_of_attempt: int | None = None,
+    proposal_retry_of_attempt: int | None = None,
     timeout_seconds: float = GROUP_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
@@ -360,8 +684,10 @@ async def _attempt_group(
         "response": None,
         "status": "technical_failure",
         "error": None,
-        "citation_resolution": "checked-citations-v2",
+        "citation_resolution": "checked-citations-and-historical-choices-v4",
         "resolved_citation_paths": [],
+        "historical_binding_paths": [],
+        "reference_resolution_paths": [],
         "instructions_sha256": _digest(ANSWER_INSTRUCTIONS),
         "response_schema_sha256": _digest(group_response_format()),
         "response_bytes": None,
@@ -371,6 +697,10 @@ async def _attempt_group(
     if json_retry_of_attempt is not None:
         record["json_retry_of_attempt"] = request_marker["json_retry_of_attempt"] = (
             json_retry_of_attempt
+        )
+    if proposal_retry_of_attempt is not None:
+        record["proposal_retry_of_attempt"] = request_marker["proposal_retry_of_attempt"] = (
+            proposal_retry_of_attempt
         )
     tools.answer_checkpoint(
         name.replace(".json", "-request.json"),
@@ -394,10 +724,23 @@ async def _attempt_group(
         record["error"] = {"code": "group_response_too_large"}
         return record
     record["response"] = response
-    resolved, paths = _resolve_citations(response, payload)
+    checks = tuple(
+        HistoricalContextCheck.model_validate_json(_json(item))
+        for item in json.loads(tools.answer_artifact("historical_context_checks.json"))["checks"]
+    )
+    resolved, binding_paths = _bind_historical_choice_citations(
+        response, payload, checks, tools.manifest().blank_sha256
+    )
+    record["historical_binding_paths"] = binding_paths
+    resolved, paths = _resolve_citations(resolved, payload)
     record["resolved_citation_paths"] = paths
+    resolved, reference_paths = _resolve_reference_labels(resolved)
+    record["reference_resolution_paths"] = reference_paths
     try:
-        batch = _GroupAnswers.model_validate_json(resolved)
+        batch, proposal_errors = _ingest_group(resolved, payload)
+    except _GroupIdentityError:
+        record.update(status="invalid_response", error={"code": "group_requirement_mismatch"})
+        return record
     except ValidationError as error:
         record.update(
             status="invalid_response",
@@ -410,20 +753,38 @@ async def _attempt_group(
             },
         )
         return record
-    assigned = set(payload["assigned_requirement_ids"])
+    record["canonical_response"] = batch.model_dump_json()
+    record["proposal_errors"] = proposal_errors
+    assigned = {
+        *payload["assigned_requirement_ids"],
+        *(
+            p["requirement_id"]
+            for p in payload.get("retained_group_answers", {}).get("proposals", [])
+        ),
+        *(
+            r["requirement_id"]
+            for r in payload.get("retained_group_answers", {}).get("verification_requests", [])
+        ),
+    }
     ids = [p.requirement_id for p in batch.proposals]
     requested = [r.requirement_id for r in batch.verification_requests]
     instructions = {
         r["requirement_id"]: r["instruction"]
         + "\n"
         + "\n".join(c["instruction"] for c in (r.get("choices") or {}).get("options", []))
-        for r in payload["requirements"]
+        for r in payload.get("group_requirements", payload["requirements"])
     }
     if any(
         not contains_issuer_quote(instructions.get(c.requirement_id, ""), c.criterion_quote)
         for c in batch.condition_assessments
     ):
         record.update(status="invalid_response", error={"code": "condition_not_in_requirement"})
+        return record
+    if proposal_errors:
+        record.update(
+            status="proposal_recovery_requested",
+            error={"code": "proposal_validation_failed", "problems": proposal_errors},
+        )
         return record
     if (
         len(ids) != len(set(ids))
@@ -437,7 +798,12 @@ async def _attempt_group(
         if not can_followup or len(batch.verification_requests) > requests_remaining:
             if set(ids) != assigned:
                 record.update(
-                    status="invalid_response", error={"code": "evidence_followup_limit_exceeded"}
+                    status="proposal_recovery_requested",
+                    proposal_errors=[
+                        {"requirement_id": rid, "code": "evidence_followup_limit_exceeded"}
+                        for rid in sorted(assigned - set(ids))
+                    ],
+                    error={"code": "evidence_followup_limit_exceeded"},
                 )
                 return record
             results = [
@@ -491,7 +857,13 @@ async def _attempt_group(
                     request.requirement_id,
                     request.method,
                 )
-                result = await asyncio.to_thread(tools.verify_answer_evidence, request, payload)
+                verification_scope = {
+                    **payload,
+                    "requirements": payload.get("group_requirements", payload["requirements"]),
+                }
+                result = await asyncio.to_thread(
+                    tools.verify_answer_evidence, request, verification_scope
+                )
                 logging.getLogger(__name__).info(
                     "Answer evidence verification finished: run=%s requirement=%s ok=%s error=%s",
                     tools.manifest().run_id,
@@ -557,7 +929,7 @@ def _finalize_packet(tools: PacketAgentTools, *, submit: bool = True) -> RunMani
 async def run_answer_groups(
     tools: PacketAgentTools, propose: ProposeGroup, *, resume: bool = False
 ) -> RunManifest:
-    """Retry malformed JSON once; other corrections require follow-up or explicit resume."""
+    """Bound retries; isolate attributable proposal errors as explicit review exceptions."""
     handoff = tools.answer_handoff()
     retained = handoff.get("retained_proposals", [])
     retained_ids = {p["requirement_id"] for p in retained}
@@ -576,6 +948,7 @@ async def run_answer_groups(
         "group_size": GROUP_SIZE,
         "max_group_attempts": MAX_GROUP_ATTEMPTS,
         "max_json_retries": MAX_JSON_RETRIES,
+        "max_proposal_retries": MAX_PROPOSAL_RETRIES,
         "timeout_seconds": GROUP_TIMEOUT_SECONDS,
         "group_model_limit": tools.limits.max_turns - tools.limits.max_turns // 2,
         "max_verification_requests": MAX_VERIFICATION_REQUESTS,
@@ -609,6 +982,13 @@ async def run_answer_groups(
     consecutive_transport_failures = 0
     for index, group in enumerate(groups):
         prefix = f"answer-group-{index:03d}-attempt-"
+        completion_name = f"answer-group-{index:03d}-completion.json"
+        if completion_name in names:
+            completion = json.loads(tools.answer_artifact(completion_name))
+            staged = json.loads(tools.call("stage_answers", completion["staging_response"]))
+            if not staged["ok"]:
+                raise ValueError("Saved canonical group completion no longer satisfies staging")
+            continue
         requests = sorted(
             name
             for name in names
@@ -621,6 +1001,10 @@ async def run_answer_groups(
             "json_retry_of_attempt" in json.loads(tools.answer_artifact(request))
             for request in requests
         )
+        proposal_retries_used = sum(
+            "proposal_retry_of_attempt" in json.loads(tools.answer_artifact(request))
+            for request in requests
+        )
         for request in requests:
             response_name = request.replace("-request.json", ".json")
             records.append(
@@ -631,7 +1015,7 @@ async def run_answer_groups(
         accepted = next((r for r in records if r["status"] == "staged_unvalidated"), None)
         if accepted is not None:
             effective = _verification_handoff(tools, handoff, prefix)
-            response, _ = _resolve_citations(accepted["response"], effective)
+            response = accepted["canonical_response"]
             batch = _GroupAnswers.model_validate_json(response)
             staged = json.loads(
                 tools.call(
@@ -640,6 +1024,25 @@ async def run_answer_groups(
             )
             if not staged["ok"]:
                 raise ValueError("Saved answer group no longer satisfies staging contracts")
+            continue
+        partial = next(
+            (r for r in reversed(records) if r["status"] == "proposal_recovery_requested"), None
+        )
+        if records and records[-1]["status"] not in ("proposal_recovery_requested", "interrupted"):
+            partial = None
+        exhausted = (
+            len(records) >= MAX_GROUP_ATTEMPTS
+            or attempts_used >= plan["group_model_limit"]
+            or time.monotonic() - started >= tools.limits.max_seconds
+        )
+        if partial is not None and (proposal_retries_used >= MAX_PROPOSAL_RETRIES or exhausted):
+            _complete_proposal_exceptions(
+                tools,
+                group,
+                partial,
+                _verification_handoff(tools, handoff, prefix),
+                completion_name,
+            )
             continue
         if (
             len(records) >= MAX_GROUP_ATTEMPTS
@@ -650,6 +1053,19 @@ async def run_answer_groups(
             continue
         json_retry_of_attempt = None
         for attempt in range(len(records) + 1, MAX_GROUP_ATTEMPTS + 1):
+            partial = (
+                records[-1]
+                if records and records[-1]["status"] == "proposal_recovery_requested"
+                else None
+            )
+            repair_ids = (
+                [e["requirement_id"] for e in partial["proposal_errors"]]
+                if partial is not None
+                else []
+            )
+            proposal_retry_of_attempt = len(records) if partial is not None else None
+            if partial is not None:
+                proposal_retries_used += 1
             verification_used = sum(
                 len(json.loads(tools.answer_artifact(a.name))["requests"])
                 for a in tools.manifest().artifacts
@@ -659,10 +1075,18 @@ async def run_answer_groups(
                 MAX_GROUP_ATTEMPTS - attempt + 1, plan["group_model_limit"] - attempts_used
             )
             requests_remaining = max(0, MAX_VERIFICATION_REQUESTS - verification_used)
+            retained_answers = _retained_group_answers(records)
+            retained_ids = {p["requirement_id"] for p in retained_answers["proposals"]}
+            assigned_ids = repair_ids or [
+                rid for rid in plan["groups"][index] if rid not in retained_ids
+            ]
             payload = {
                 **_verification_handoff(tools, handoff, prefix),
-                "requirements": group,
-                "assigned_requirement_ids": plan["groups"][index],
+                "requirements": [r for r in group if r["requirement_id"] in assigned_ids],
+                "group_requirements": group,
+                "assigned_requirement_ids": assigned_ids,
+                "repair_requirement_ids": repair_ids,
+                "retained_group_answers": retained_answers,
                 "previous_errors": [r["error"] for r in records if r.get("error")],
                 "verification_budget": {
                     "group_calls_remaining": calls_remaining,
@@ -679,6 +1103,11 @@ async def run_answer_groups(
                 logging.getLogger(__name__).info("%s run=%s", message, tools.manifest().run_id)
                 tools.answer_progress(message)
             attempts_used += 1
+            if proposal_retry_of_attempt is not None:
+                tools.answer_progress(
+                    f"Proposal correction started: group={index}; "
+                    f"requirements={len(repair_ids)}; attempt={attempt}"
+                )
             record = await _attempt_group(
                 tools,
                 propose,
@@ -687,6 +1116,7 @@ async def run_answer_groups(
                 requests_remaining,
                 calls_remaining > 1,
                 json_retry_of_attempt=json_retry_of_attempt,
+                proposal_retry_of_attempt=proposal_retry_of_attempt,
                 timeout_seconds=min(
                     GROUP_TIMEOUT_SECONDS,
                     max(0, tools.limits.max_seconds - (time.monotonic() - started)),
@@ -703,6 +1133,23 @@ async def run_answer_groups(
                 logging.getLogger(__name__).info("%s run=%s", message, tools.manifest().run_id)
                 tools.answer_progress(message)
                 json_retry_of_attempt = None
+            if record["status"] == "proposal_recovery_requested":
+                if (
+                    proposal_retries_used < MAX_PROPOSAL_RETRIES
+                    and attempt < MAX_GROUP_ATTEMPTS
+                    and attempts_used < plan["group_model_limit"]
+                    and time.monotonic() - started < tools.limits.max_seconds
+                ):
+                    continue
+                _complete_proposal_exceptions(
+                    tools,
+                    group,
+                    record,
+                    _verification_handoff(tools, handoff, prefix),
+                    completion_name,
+                )
+                record = {**record, "status": "staged_unvalidated"}
+                break
             invalid_json = record["status"] == "invalid_response" and any(
                 problem["type"] == "json_invalid"
                 for problem in (record["error"] or {}).get("problems", [])

@@ -221,6 +221,34 @@ def setup(tmp_path: Path) -> Setup:
     return Setup(tmp_path, blank_pdf())
 
 
+def test_evidence_completion_preserves_artifact_bytes_and_restart_context(setup: Setup) -> None:
+    tools = setup.tools()
+    assert json.loads(tools.call("interpret_form", "{}"))["ok"]
+    listing = json.loads(tools.call("list_sources", "{}"))
+    assert listing["ok"]
+    identity = listing["result"]["sources"][0]["source_id"]
+    for name, arguments in [
+        ("read_page", {"source_id": identity, "page": 1}),
+        ("locate_quote", {"source_id": identity, "page": 1, "quote": NAME}),
+        ("select_attachment", {"source_id": identity}),
+    ]:
+        assert json.loads(tools.call(name, json.dumps(arguments)))["ok"]
+    before = {artifact.name for artifact in tools.manifest().artifacts}
+
+    finished = json.loads(tools.call("finish_evidence", "{}"))
+
+    assert finished["ok"]
+    after = {artifact.name for artifact in tools.manifest().artifacts}
+    bundle = {
+        name: hashlib.sha256(setup.artifact(name)).hexdigest() for name in sorted(after - before)
+    }
+    assert hashlib.sha256(json.dumps(bundle, sort_keys=True).encode()).hexdigest() == (
+        "8cccd980be0275c995e7aee26444fe3562288cd2b3e2fbb7f43d4ef53b74f90d"
+    )
+    assert setup.tools().answer_handoff() == finished["result"]
+    assert tools.manifest().status == "evidence_collected"
+
+
 class Scripted(FunctionInvocationLayer, BaseChatClient):  # type: ignore[misc]
     """A scripted stand-in for the Foundry model inside the real Agent Framework tool loop."""
 

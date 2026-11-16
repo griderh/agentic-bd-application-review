@@ -191,7 +191,7 @@ def test_final_followup_request_preserves_complete_proposals_without_new_verific
         final = asyncio.run(run_answer_groups(fresh, unexpected, resume=True))
     else:
         final = asyncio.run(run_answer_groups(tools, propose))
-    assert final.status == ("failed" if outcome == "incomplete" else "published")
+    assert final.status == "published"
     assert len(calls) == 3
     assert [p["verification_budget"]["group_calls_remaining"] for p in calls] == [3, 2, 1]
     assert [p["verification_budget"]["followup_allowed"] for p in calls] == [True, True, False]
@@ -200,6 +200,13 @@ def test_final_followup_request_preserves_complete_proposals_without_new_verific
     record = json.loads(setup.artifact("answer-group-000-attempt-3.json"))
     if outcome == "incomplete":
         assert record["error"]["code"] == "evidence_followup_limit_exceeded"
+        assert record["status"] == "proposal_recovery_requested"
+        draft = json.loads(setup.artifact("draft.json"))
+        assert draft["written_requirements"] == []
+        summary = setup.artifact("reviewer-summary.txt").decode()
+        assert "TECHNICAL REVIEW REQUIRED" in summary
+        assert "evidence_followup_limit_exceeded" in summary
+        assert "Checked monetary condition:" not in summary
     else:
         assert record["status"] == "staged_unvalidated"
         blocked = json.loads(setup.artifact("answer-group-000-attempt-3-verification.json"))
@@ -323,7 +330,7 @@ def test_resume_reuses_verified_followup_without_repeating_image_read(tmp_path, 
                     ],
                 }
             )
-        return '{"proposals":[]}'
+        return '{"proposals":[],"unexpected":true}'
 
     assert asyncio.run(run_answer_groups(tools, first)).status == "failed"
     reader.transcribe.side_effect = AssertionError("Recovery must reuse saved blind reading")
@@ -464,9 +471,17 @@ def test_verification_budget_exhaustion_is_explicit_before_tool_work(tmp_path, m
         )
 
     final = asyncio.run(run_answer_groups(tools, propose))
-    assert final.status == "failed"
+    assert final.status == "published"
     record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
     assert record["error"]["code"] == "evidence_followup_limit_exceeded"
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == []
+    summary = setup.artifact("reviewer-summary.txt").decode()
+    assert "TECHNICAL REVIEW REQUIRED" in summary
+    assert "evidence_followup_limit_exceeded" in summary
+    assert "Checked monetary condition:" not in summary
+    assert not any(
+        a.name.endswith("-verification-request.json") for a in tools.manifest().artifacts
+    )
     assert reader.transcribe.call_count == 1
 
 

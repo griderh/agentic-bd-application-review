@@ -1,4 +1,5 @@
 import hashlib
+import json
 from io import BytesIO
 
 import pytest
@@ -9,6 +10,7 @@ from bd_packet_builder.historical_context import (
     question_text_agrees,
     verified_question_requirements,
 )
+from bd_packet_builder.layout import MappedResponse
 
 QUESTION = (
     "6. Has your firm ever been temporarily closed or prohibited from trading "
@@ -116,4 +118,138 @@ def test_blank_anchor_requires_unique_native_text_bound_to_exact_application(cha
     )
     assert verified_question_requirements(blank, (requirement,)) == (
         (requirement,) if change == "none" else ()
+    )
+
+
+def repeated_choice_blank():
+    data = BytesIO()
+    canvas = Canvas(data, pagesize=(612, 792), invariant=True)
+    instruction = "May this representative trade securities?"
+    for role, y in (("Primary representative", 600), ("Backup representative", 300)):
+        canvas.drawString(40, y + 50, role)
+        canvas.drawString(40, y, instruction)
+        for label, x in (("Yes", 450), ("No", 500)):
+            canvas.drawString(x, y, label)
+            canvas.rect(x + 25, y - 2, 10, 10)
+    canvas.save()
+    blank = data.getvalue()
+    mappings = []
+    for index, y in enumerate((600, 300)):
+
+        def region(left, bottom, right, top):
+            return dict(
+                page=1, left=float(left), bottom=float(bottom), right=float(right), top=float(top)
+            )
+
+        mappings.append(
+            MappedResponse.model_validate_json(
+                json.dumps(
+                    {
+                        "requirement": {
+                            "requirement_id": f"field-{index}",
+                            "application_sha256": hashlib.sha256(blank).hexdigest(),
+                            "page": 1,
+                            "instruction": instruction,
+                            "kind": "single_select",
+                            "choices": {
+                                "options": [
+                                    {
+                                        "option_id": label.lower(),
+                                        "label": label,
+                                        "instruction": label,
+                                    }
+                                    for label in ("Yes", "No")
+                                ]
+                            },
+                        },
+                        "options": [
+                            {
+                                "option_id": label.lower(),
+                                "control": "checkbox",
+                                "label_quote": label,
+                                "label_box": region(x, y - 4, x + 23, y + 12),
+                                "box": region(x + 25, y - 2, x + 35, y + 8),
+                            }
+                            for label, x in (("Yes", 450), ("No", 500))
+                        ],
+                    }
+                )
+            )
+        )
+    return blank, tuple(m.requirement for m in mappings), tuple(mappings)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "reverse_order",
+        "missing",
+        "duplicate",
+        "same_row",
+        "overlap",
+        "labels",
+        "hash",
+        "page",
+        "wording",
+        "outside",
+    ],
+)
+def test_repeated_questions_require_complete_distinct_native_mapped_instances(change):
+    blank, requirements, mappings = repeated_choice_blank()
+    if change == "reverse_order":
+        mappings = tuple(reversed(mappings))
+    elif change == "missing":
+        mappings = mappings[:1]
+    elif change == "duplicate":
+        mappings = (*mappings, mappings[0])
+    elif change == "same_row":
+        mappings = (mappings[0], mappings[1].model_copy(update={"options": mappings[0].options}))
+    elif change == "overlap":
+        mappings = (
+            mappings[0].model_copy(
+                update={
+                    "options": tuple(
+                        p.model_copy(
+                            update={"label_box": p.label_box.model_copy(update={"bottom": 290.0})}
+                        )
+                        for p in mappings[0].options
+                    )
+                }
+            ),
+            mappings[1],
+        )
+    elif change == "labels":
+        mappings = (
+            mappings[0].model_copy(
+                update={
+                    "options": tuple(
+                        p.model_copy(update={"label_quote": "Unprinted"})
+                        for p in mappings[0].options
+                    )
+                }
+            ),
+            mappings[1],
+        )
+    elif change in ("hash", "page", "wording"):
+        update = {
+            "hash": {"application_sha256": "0" * 64},
+            "page": {"page": 2},
+            "wording": {"instruction": "May this representative never trade securities?"},
+        }[change]
+        requirements = tuple(r.model_copy(update=update) for r in requirements)
+    elif change == "outside":
+        mappings = (
+            mappings[0].model_copy(
+                update={
+                    "options": tuple(
+                        p.model_copy(update={"box": p.box.model_copy(update={"right": 700.0})})
+                        for p in mappings[0].options
+                    )
+                }
+            ),
+            mappings[1],
+        )
+    assert verified_question_requirements(blank, requirements, mappings=mappings) == (
+        requirements if change in ("none", "reverse_order") else ()
     )

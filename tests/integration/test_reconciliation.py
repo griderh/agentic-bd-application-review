@@ -234,6 +234,35 @@ def test_dependency_uses_written_result_even_when_assessed_later(tmp_path, withh
     assert result["coverage"]["blocked_dependencies"] == (["crd"] if withheld else [])
 
 
+def test_technical_review_exception_does_not_clear_dependent_checklist(tmp_path):
+    request, review, data = prepare(tmp_path)
+    requirement = data["requirements"]["requirements"][3]
+    requirement["kind"] = "attachment"
+    data["layout"]["responses"][3] = dict(
+        requirement=requirement,
+        checklist_box=dict(page=1, left=20.0, right=30.0, bottom=317.0, top=327.0),
+        checklist_label_box=dict(page=1, left=40.0, right=120.0, bottom=315.0, top=332.0),
+    )
+    assessment = reviewed_assessment(data, criteria=[], depends_on=["crd"])
+    data["proposals"]["proposals"][0] = {
+        "requirement_id": "crd",
+        "outcome": "technical_review_required",
+        "explanation": "TECHNICAL REVIEW REQUIRED: proposal processing failed.",
+    }
+    save(request, review, data, [assessment])
+
+    output = run_draft(tmp_path, Path("outputs/request.json"), Path("outputs/review.json"))
+
+    report = json.loads((output / "draft.json").read_bytes())
+    result = next(a for a in report["answers"] if a["requirement_id"] == "missing")
+    assert result["status"] == "blank"
+    assert result["coverage"]["blocked_dependencies"] == ["crd"]
+    assert result["checklist_state"] == "not_satisfied"
+    assert report["completion"]["evidence_satisfied"] == 0
+    assert "missing" not in report["written_requirements"]
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+
+
 @pytest.mark.parametrize("bad_box", ["wrong_label", "overlap"])
 def test_checklist_cannot_write_against_unverified_label_or_existing_answer(tmp_path, bad_box):
     request, review, data = prepare(tmp_path)

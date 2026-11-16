@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -472,6 +473,30 @@ def _review(candidate: dict) -> dict:
     }
 
 
+def test_assembly_review_summary_preserves_exact_text_after_restart(tmp_path: Path) -> None:
+    setup, tools, _ = setup_library(tmp_path)
+    candidates = call(tools, "list_attachment_candidates")["sources"]
+    bio = next(c for c in candidates if c["family"] == "bios")
+    call(tools, "read_page", {"source_id": bio["source_id"], "page": 1})
+    call(
+        tools,
+        "plan_supporting_documents",
+        {"decisions": [_review(bio), *_exclusions(candidates, skip=bio["source_id"])]},
+    )
+    assert json.loads(tools.call("finish_evidence", "{}"))["ok"] is False
+    call(tools, "plan_supporting_document", _review(bio))
+    call(tools, "finish_evidence")
+    call(tools, "submit_answers", {"proposals": []})
+    call(setup.tools(), "assemble_packet")
+
+    summary = setup.artifact("reviewer-summary.txt")
+    supporting_section = summary[summary.index(b"\nSUPPORTING-DOCUMENT REVIEW:") :]
+
+    assert hashlib.sha256(supporting_section).hexdigest() == (
+        "d7707f0d1b0589d30596ed4efe3137200e37e570e40f16e6634975d56d652377"
+    )
+
+
 def test_review_required_decision_can_be_revised_once_with_logged_rationale(tmp_path: Path):
     setup, tools, _ = setup_library(tmp_path)
     events: list[str] = []
@@ -667,7 +692,7 @@ def test_unresolved_visual_inspection_becomes_an_actionable_reviewer_question(tm
 def test_agent_guidance_pairs_official_periods_with_latest_supplement():
     from bd_packet_builder.agent import AGENT_VERSION
 
-    assert AGENT_VERSION == "packet-agent-v50"
+    assert AGENT_VERSION == "packet-agent-v52"
     assert "most recent official full-period" in AGENT_INSTRUCTIONS
     assert "latest printed date" in AGENT_INSTRUCTIONS
     assert "review_required is provisional" in AGENT_INSTRUCTIONS

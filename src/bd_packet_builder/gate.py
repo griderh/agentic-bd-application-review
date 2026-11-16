@@ -158,6 +158,7 @@ def validate_answers(
                 root, Path(request.source), Path("bd_agreements/Blank"), 64 * 1024 * 1024
             ),
             request.requirements.requirements,
+            mappings=request.layout.responses,
         )
         if any(
             c.field.control is not None and any(d.part == "question" for d in c.discrepancies)

@@ -352,6 +352,7 @@ class AnswerProposal(Contract):
         "unreadable_form",
         "unsupported_requirement",
         "deferred_to_signing",
+        "technical_review_required",
     ]
     value: AnswerValue | None = None
     citations: Annotated[tuple[Citation | OcrCitation, ...], Field(max_length=20)] = ()

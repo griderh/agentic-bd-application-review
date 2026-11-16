@@ -2,7 +2,69 @@ from datetime import date
 
 import pytest
 
-from bd_packet_builder.historical_time import anniversary_years, increment_years, signed_date
+from bd_packet_builder.contracts import (
+    AnswerProposal,
+    Citation,
+    HistoricalBasis,
+    HistoricalTenure,
+    TextValue,
+)
+from bd_packet_builder.historical_time import (
+    adjusted_tenure,
+    anniversary_years,
+    increment_years,
+    signed_date,
+)
+
+
+def tenure_proposal(quote: str, supplied_date: date) -> AnswerProposal:
+    citation = Citation(source_id="a" * 64, page=1, start=0, end=len(quote), quote=quote)
+    return AnswerProposal(
+        requirement_id="years",
+        outcome="proposed",
+        value=TextValue(kind="text", value="24"),
+        citations=(citation,),
+        confidence=0.9,
+        historical_basis=HistoricalBasis(
+            category="tenure",
+            context="firm_wide",
+            prior_question=citation,
+            current_checks=(),
+            reviewer_confirmation="Confirm continuity.",
+            tenure=HistoricalTenure(
+                prior_value="24",
+                signed_on=supplied_date,
+                date_citation=citation,
+                date_context=citation,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("year", [2026, 7147, 7202])
+def test_tenure_uses_cited_date_without_mutating_original_proposal(year: int) -> None:
+    proposal = tenure_proposal("7/14/2026", date(year, 7, 14))
+    original = proposal.model_dump_json()
+
+    adjusted = adjusted_tenure(proposal, date(2027, 7, 14))
+
+    assert adjusted.value == TextValue(kind="text", value="25")
+    assert adjusted.historical_basis is not None
+    assert adjusted.historical_basis.tenure is not None
+    assert adjusted.historical_basis.tenure.signed_on == date(2026, 7, 14)
+    assert adjusted.historical_basis.tenure.date_citation == proposal.citations[0]
+    assert proposal.model_dump_json() == original
+    assert adjusted_tenure(adjusted, date(2027, 7, 14)) == adjusted
+
+
+@pytest.mark.parametrize(
+    "quote",
+    ["2026", "7/14/26", "2026-02-30", "7/14/2026 and 7/15/2026", "7/14/2028"],
+)
+def test_tenure_does_not_fall_back_to_model_date_for_unusable_citation(quote: str) -> None:
+    proposal = tenure_proposal(quote, date(2025, 7, 14))
+    with pytest.raises(ValueError, match="date"):
+        adjusted_tenure(proposal, date(2026, 11, 13))
 
 
 @pytest.mark.parametrize(
