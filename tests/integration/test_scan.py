@@ -4,7 +4,10 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import Mock
 
+import httpx
 import pytest
+from openai import APITimeoutError
+from pydantic import ValidationError
 
 from bd_packet_builder.contracts import ReportingPeriod
 from bd_packet_builder.draft import DraftRequest, run_draft
@@ -67,6 +70,18 @@ def test_blind_image_cross_check_is_cached_and_can_fill_a_scalar_without_human_f
     answer = next(a for a in result["answers"] if a["requirement_id"] == "crd")
     assert answer["ocr_review_method"] == "machine_cross_checked_draft_not_human_approval"
     assert "not human visual approval" in (output / "reviewer-summary.txt").read_text()
+
+
+def test_unverified_scan_readings_are_recorded_once_per_page(tmp_path: Path) -> None:
+    request, _, scans, reader, artifact = scan_setup(tmp_path)
+    parsed = DraftRequest.model_validate_json(request.read_bytes())
+    source_id = parsed.proposals.proposals[0].citations[0].source_id
+    reader.transcribe.side_effect = ScanVerificationError("scan_reading_invalid")
+    for _ in range(2):
+        with pytest.raises(ScanVerificationError, match="^scan_reading_invalid$"):
+            scans.locate(source_id, 1, "CRD: 001234", "Example LLC", artifact)
+    assert scans.unverified_readings == [(source_id, 1)]
+    assert scans.checks == []
 
 
 @pytest.mark.parametrize("problem", ["digit", "subject", "confidence", "period", "kind", "role"])
@@ -276,3 +291,66 @@ def test_image_reader_prompt_never_receives_ocr_text_quote_or_proposed_answer() 
     assert "independent_page_transcription" in str(arguments["input"])
     assert "001234" not in str(arguments)
     assert arguments["store"] is False
+
+
+def inconsistent_identification_error() -> ValidationError:
+    try:
+        ScanTranscript.model_validate_json(
+            json.dumps(
+                {
+                    "readable": True,
+                    "subject": "Example LLC",
+                    "text": "Firm: Example LLC",
+                    "reporting_period": None,
+                    "identification": {"description": "Synthetic", "visible_cues": ["Absent"]},
+                }
+            )
+        )
+    except ValidationError as error:
+        return error
+    raise AssertionError("synthetic transcript unexpectedly validated")
+
+
+def scan_reader_with(*outcomes: object) -> tuple[FoundryScanReader, Mock]:
+    api = Mock()
+    api.responses.parse.side_effect = list(outcomes)
+    config = FoundryConfig(
+        endpoint="https://synthetic.openai.azure.com/openai/v1", deployment="test"
+    )
+    return FoundryScanReader(config, allow_paid=True, client_factory=lambda _: api), api
+
+
+def test_scan_reader_requests_one_fresh_reading_after_schema_invalid_output() -> None:
+    valid = ScanTranscript(
+        readable=True, subject="Example LLC", text="Firm: Example LLC", reporting_period=None
+    )
+    reader, api = scan_reader_with(
+        inconsistent_identification_error(),
+        Mock(
+            status="completed",
+            output_parsed=valid,
+            model="test",
+            usage=Mock(input_tokens=100, output_tokens=20, total_tokens=120),
+        ),
+    )
+    assert reader.transcribe(b"\x89PNG\r\n\x1a\nsynthetic-image") == valid
+    assert api.responses.parse.call_count == 2
+
+
+def test_repeated_schema_invalid_scan_reading_is_unverified_evidence_not_run_failure() -> None:
+    reader, api = scan_reader_with(
+        inconsistent_identification_error(), inconsistent_identification_error()
+    )
+    with pytest.raises(ScanVerificationError, match="^scan_reading_invalid$"):
+        reader.transcribe(b"\x89PNG\r\n\x1a\nsynthetic-image")
+    assert api.responses.parse.call_count == 2
+
+
+def test_scan_reader_never_retries_transport_failures() -> None:
+    reader, api = scan_reader_with(
+        APITimeoutError(request=httpx.Request("POST", "https://synthetic.invalid"))
+    )
+    with pytest.raises(FoundryError, match="timed out") as raised:
+        reader.transcribe(b"\x89PNG\r\n\x1a\nsynthetic-image")
+    assert not isinstance(raised.value, ScanVerificationError)
+    assert api.responses.parse.call_count == 1

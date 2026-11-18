@@ -9,6 +9,7 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 
+from bd_packet_builder.draft import TextPlacement, _form_pdf
 from bd_packet_builder.form_layout import FormLayoutError, build_form_layout
 from bd_packet_builder.layout import validate_layout
 from bd_packet_builder.visual import VisualPage
@@ -68,6 +69,32 @@ def nbox(left: float, top: float, right: float, bottom: float) -> dict[str, int]
         "right": round(right * 1000 / WIDTH),
         "bottom": round(bottom * 1000 / HEIGHT),
     }
+
+
+@pytest.mark.parametrize("answer", ["A grounded narrative answer.", "See Supplemental Answers."])
+@pytest.mark.parametrize("occupied", [False, True])
+def test_narrative_starts_on_first_printed_line(answer: str, occupied: bool) -> None:
+    lines = [(40, 190, "Describe the firm."), (40, 221, "_" * 83), (40, 235, "_" * 82)]
+    if occupied:
+        lines.append((40, 215, "Issuer text must stay clear."))
+    blank = make_blank([lines])
+    proposed = item("business", "Describe the firm.", "narrative", nbox(40, 222, 500, 264))
+    result = build_form_layout(blank, {1: page(proposed)})
+    assert result.layout is not None
+    region = result.layout.responses[0].narrative_region
+    assert region is not None
+    packet = _form_pdf(blank, [TextPlacement(region, (answer,))], [], False)
+    baselines: dict[str, float] = {}
+    PdfReader(BytesIO(packet)).pages[0].extract_text(
+        visitor_text=lambda text, cm, tm, font, size: baselines.update(
+            {text.strip(): tm[5] + cm[5]}
+        )
+    )
+    offset = baselines[answer] - baselines["_" * 83]
+    if occupied:
+        assert offset < -8
+    else:
+        assert 0 < offset < 4
 
 
 def item(item_id: str, instruction: str, kind: str, region: dict | None, **extra: object) -> dict:

@@ -697,15 +697,26 @@ class EvidenceTools:
         return citation
 
     def read_historical_page(self, source_id: str, page: int) -> HistoricalPageResult:
-        """Force OCR of question labels, even when filled answers have native PDF text."""
+        """Associate historical fields using native text first, with OCR where needed."""
         self._tick()
         source = self._pdf(source_id, page)
         if source.family != "historical_reference":
             raise ToolInputError("Historical page reading requires an approved reference source")
-        if self.historical_context is None or not self._allow_ocr:
-            raise ToolInputError("Historical image/OCR relationship reading is not enabled")
+        if self.historical_context is None:
+            raise ToolInputError("Historical image relationship reading is not enabled")
+        if self._limits.max_ocr_pages == 0:
+            raise ToolLimitError("Historical page reading reached the OCR page limit")
         # Share page and OCR allowances with ordinary evidence reading.
         self._page(source, page, ocr=False)
+        try:
+            native = self.historical_context.read_native(source_id, page)
+        except ScanVerificationError as error:
+            raise ToolInputError(str(error)) from None
+        if native is not None:
+            self._spend_chars(len(native.model_dump_json()))
+            return native
+        if not self._allow_ocr:
+            raise ToolInputError("Historical OCR relationship reading is not enabled")
         artifact = self._ocr_artifacts.get((source_id, page))
         if artifact is None:
             if self._ocr >= self._limits.max_ocr_pages:

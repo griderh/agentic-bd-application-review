@@ -408,7 +408,11 @@ def test_cli_rejects_ambiguous_or_compact_as_of_dates(
         main(["fact-sheet-check", "--root", str(root), "--source", str(DRAFT), "--as-of", as_of])
         == 1
     )
-    assert "YYYY-MM-DD" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "Fact-sheet-check command rejected: Validation as-of date must be YYYY-MM-DD\n"
+    )
+    assert captured.out == ""
     assert not list((root / "outputs").glob("fact-sheet-check-*"))
 
 

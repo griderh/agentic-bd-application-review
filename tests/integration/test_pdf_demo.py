@@ -152,6 +152,7 @@ def test_cli_errors_are_actionable_without_leaking_source_content(
     assert main(["demo", "--root", str(project), "--source", "../outside.pdf"]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
+    assert captured.err.startswith("PDF command rejected: ")
     assert "relative PDF path within the blank forms folder" in captured.err
     assert str(project) not in captured.err
 
@@ -175,7 +176,7 @@ def test_cli_reports_missing_file_without_success(
 
     assert main(["inspect", str(project / "missing.pdf")]) == 1
     captured = capsys.readouterr()
-    assert "Check the input exists" in captured.err
+    assert captured.err == "PDF I/O failed. Check the input exists and output folder is writable.\n"
     assert captured.out == ""
 
 

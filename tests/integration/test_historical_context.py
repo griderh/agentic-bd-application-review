@@ -336,7 +336,7 @@ def test_supplement_pointer_is_a_question_link_not_answer_text(
     assert (not issues and bool(snapshots)) == accepted
     if accepted:
         # The pointer is navigation only; it never becomes answer evidence.
-        answer_citations = historical_answer_citations(proposal, snapshots)
+        answer_citations = historical_answer_citations(proposal, snapshots, checks)
         assert answer_citations
         assert all(c.quote != "See supplement" for c in answer_citations)
     else:
@@ -660,6 +660,8 @@ def setup_page(
     unboxed_control: bool = False,
     check_rise: int = 21,
     native_questions: bool = False,
+    native_context: bool = False,
+    hidden_native_answer: str | None = None,
     draft_schema_version: int = 1,
     primary_ocr_answer: str | None = None,
     primary_ocr_confidence: int = 96,
@@ -720,9 +722,19 @@ def setup_page(
     ):
         canvas = Canvas(str(target), pagesize=(600, 800), invariant=True)
         canvas.drawImage(ImageReader(image), 0, 0, 600, 800)
+        if hidden_native_answer is not None:
+            hidden = canvas.beginText(180, 710)
+            hidden.setTextRenderMode(3)
+            hidden.setLeading(12)
+            for line in hidden_native_answer.splitlines():
+                hidden.textLine(line)
+            canvas.drawText(hidden)
         if native_questions:
             canvas.drawString(40, 710, primary_question)
             canvas.drawString(40, 570, secondary_question)
+        if native_context:
+            canvas.drawString(40, 740, primary_role)
+            canvas.drawString(40, 600, secondary_role)
         if primary_write_in is not None:
             for index, line in enumerate(primary_write_in.splitlines()):
                 canvas.drawString(240 + primary_x_offset, 710 - index * 12, line)
@@ -1425,7 +1437,8 @@ def validated_page(setup, tools, prior, current, expected_answered=1, answer=NAM
         },
     }
     call(tools, "finish_evidence")
-    assert call(tools, "submit_answers", {"proposals": [proposal]})["answered"] == expected_answered
+    submitted = call(tools, "submit_answers", {"proposals": [proposal]})
+    assert submitted["answered"] == expected_answered, submitted
     raw = setup.artifact("draft_request.json")
     request = DraftRequest.model_validate_json(raw)
     review = DraftReview.model_validate_json(setup.artifact("answer_review.json"))
@@ -1473,7 +1486,8 @@ def test_native_verified_narrative_is_not_vetoed_by_weaker_layout_signals(
 
 
 def test_native_verified_narrative_with_imperfect_ocr_reaches_the_supplement(tmp_path, monkeypatch):
-    answer = "Managing Director\nInstitutional Sales"
+    # A paragraph break cannot be reflowed into one line, so the one-line region overflows.
+    answer = "Managing Director\n\nInstitutional Sales"
     setup, tools, reader, prior, current = setup_page(
         tmp_path,
         monkeypatch,
@@ -1520,6 +1534,66 @@ def test_native_verified_narrative_with_imperfect_ocr_reaches_the_supplement(tmp
         assert line in packet.pages[1].extract_text()
     assert "See Supplemental Answers, Response 1, packet page 2." in packet.pages[0].extract_text()
     assert reader.transcribe.call_count == 1
+
+
+@pytest.mark.parametrize("placement", ["inline", "supplement"])
+def test_historical_only_narrative_prints_no_reviewer_text_and_reflows_source_wrapping(
+    tmp_path, monkeypatch, placement
+):
+    # A paragraph break forces the supplement; a single newline is source wrapping.
+    separator = "\n" if placement == "inline" else "\n\n"
+    answer = f"Managing Director{separator}Institutional Sales"
+    setup, tools, _, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_answer=answer,
+        primary_ocr_answer=answer,
+        historical_policy="answer_first_review",
+    )
+    request, review = validated_page(setup, tools, prior, current, answer=answer)
+    raw = request.model_dump(mode="json")
+    requirement = raw["requirements"]["requirements"][0]
+    requirement["kind"] = "narrative"
+    raw["requirements"]["requirements"] = [requirement]
+    mapping = raw["layout"]["responses"][0]
+    mapping["requirement"] = requirement
+    region = dict(mapping["text_region"])
+    if placement == "inline":
+        region.update(left=72.0, right=540.0, bottom=region["top"] - 4 * region["leading"])
+    else:
+        region.update(left=72.0, right=540.0, bottom=region["top"] - 2 * region["leading"])
+    mapping["narrative_region"] = region
+    mapping["text_region"] = None
+    raw["layout"]["responses"] = [mapping]
+    raw["proposals"]["proposals"] = raw["proposals"]["proposals"][:1]
+    raw["proposals"]["proposals"][0]["value"] = {"kind": "narrative", "value": answer}
+    request = DraftRequest.model_validate_json(json.dumps(raw))
+    data = request.model_dump_json().encode()
+    gated = validate_answers(
+        setup.evidence_root,
+        request,
+        hashlib.sha256(data).hexdigest(),
+        historical_context_checks=review.historical_context_checks,
+    )
+    assert gated.decisions[0].decision == "draft_verified"
+    blank = setup.evidence_root / request.source
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    blank.write_bytes(setup.blank)
+    path = Path("outputs/historical-narrative.json")
+    (setup.evidence_root / path).write_bytes(data)
+    output = publish_draft(
+        setup.evidence_root, path, data, request, gated, gated.model_dump_json().encode(), None
+    )
+    report = json.loads((output / "draft.json").read_bytes())
+    assert report["placements"]["p1.name"]["mode"] == placement
+    text = "\n".join(page.extract_text() for page in PdfReader(output / "draft-packet.pdf").pages)
+    if placement == "inline":
+        assert "Managing Director Institutional Sales" in text
+    else:
+        assert "Supplemental Answers" in text
+        assert "Managing Director" in text and "Institutional Sales" in text
+    for internal in ("reviewer", "Historical draft basis", "confirmation required"):
+        assert internal.lower() not in text.lower()
 
 
 @pytest.mark.parametrize(
@@ -2175,15 +2249,18 @@ def test_historical_tool_obeys_existing_ocr_budget_before_remote_call(tmp_path, 
     reader.transcribe.assert_not_called()
 
 
-def test_native_partial_word_is_not_a_verified_image_answer(tmp_path, monkeypatch):
+def test_native_region_recovers_full_word_instead_of_verifying_a_model_prefix(
+    tmp_path, monkeypatch
+):
     _, tools, reader, prior, _ = setup_page(tmp_path, monkeypatch)
     raw = reader.transcribe.return_value.model_dump(mode="json")
     raw["historical_fields"][0]["answer"]["text"] = "Ave"
     reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(raw))
     result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
-    assert len(result["associations"]) == 1
-    assert result["associations"][0]["answer_citation"]["quote"] == "Blair Example"
-    assert result["issues"][0]["code"] == "historical_text_or_region_disagrees"
+    assert len(result["associations"]) == 2
+    assert result["associations"][0]["answer_citation"]["quote"] == NAME
+    assert result["associations"][0]["candidate_answer"] == NAME
+    assert result["associations"][0]["candidate_answer"] != "Ave"
 
 
 def test_model_cannot_shorten_a_verified_answer_to_a_partial_word(tmp_path, monkeypatch):
@@ -2304,7 +2381,7 @@ def test_large_image_box_cannot_hide_cross_role_native_answer(tmp_path, monkeypa
     result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
     assert len(result["associations"]) == 1
     assert result["associations"][0]["role"].split()[0] == "Backup"
-    assert result["issues"][0]["code"] == "historical_answer_not_adjacent_to_question"
+    assert result["issues"][0]["code"] == "historical_answer_region_overlaps_peer"
 
 
 def test_historical_scanned_narrative_uses_relationship_not_scalar_receipt(tmp_path, monkeypatch):
@@ -2334,6 +2411,619 @@ def test_historical_scanned_narrative_uses_relationship_not_scalar_receipt(tmp_p
 
 
 NARRATIVE = "Agency bond desk"
+
+
+def field_reading_case(
+    tmp_path,
+    monkeypatch,
+    *,
+    image,
+    ocr,
+    scanned=False,
+    focused=None,
+    complete="Agency bond desk\nService continues",
+):
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        historical_policy="answer_first_review",
+        scanned_answer=scanned,
+        primary_answer=complete,
+        primary_image_answer=image,
+        primary_ocr_answer=ocr,
+    )
+    initial = reader.transcribe.return_value.model_dump(mode="json")
+    initial["historical_fields"][0]["answer"]["box"]["bottom"] = 150
+    initial["historical_fields"][0]["answer"]["box"]["right"] = 650
+    initial = ScanTranscript.model_validate_json(json.dumps(initial))
+    if focused is None:
+        reader.transcribe.return_value = initial
+    else:
+        reader.transcribe.side_effect = [
+            initial,
+            ScanTranscript(readable=True, subject=None, text=focused, reporting_period=None),
+        ]
+    return setup, tools, reader, prior, current
+
+
+@pytest.mark.parametrize(
+    ("complete", "image", "ocr"),
+    [
+        (
+            "Agency bond desk\nService continues",
+            "AgencX bond desk\nService continues",
+            "Agency bond desk",
+        ),
+        (
+            "Agency bond desk\nService continues",
+            "Agency bond desk",
+            "Agency bond desk\nService continues",
+        ),
+        ("Agency bond desk\nService continues", "Agency bond desk", "Agency bond desk"),
+        (
+            "Agency bond desk\nService continues",
+            "AgencX bond desk\nService continues",
+            "Service continues",
+        ),
+        (
+            "Agency bond desk\nService continues",
+            "AgencX desk\nService continues",
+            "Agency bond desk",
+        ),
+        (
+            "Agency bond desk\nTreasury service\nService continues",
+            "Agency bond desk\nService continues",
+            "Agency bond desk",
+        ),
+        ("Agency bond desk\nNo personal accounts", "Agency bond desk", "Agency bond desk"),
+    ],
+)
+def test_native_region_not_a_transcribed_substring_is_the_full_answer(
+    tmp_path, monkeypatch, complete, image, ocr
+):
+    setup, tools, reader, prior, current = field_reading_case(
+        tmp_path,
+        monkeypatch,
+        image=image,
+        ocr=ocr,
+        complete=complete,
+    )
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] == complete
+    assert first["answer_citation"]["quote"] == complete
+    assert first["text_reading"]["method"] == "native"
+    assert first["text_reading"]["status"] == "supported"
+    assert reader.transcribe.call_count == 1
+    assert_complete_narrative_output(setup, tools, prior, current, complete, "PDFium")
+    restarted = setup.tools(scan_reader=reader)
+    assert restarted.answer_handoff()["historical_candidates"][0]["candidate_answer"] == complete
+    assert reader.transcribe.call_count == 1
+
+
+def assert_complete_narrative_output(setup, tools, prior, current, complete, method):
+    request, _ = validated_page(setup, tools, prior, current, answer=complete)
+    raw = request.model_dump(mode="json")
+    requirement = raw["requirements"]["requirements"][0]
+    requirement["kind"] = "narrative"
+    raw["requirements"]["requirements"] = [requirement]
+    mapping = raw["layout"]["responses"][0]
+    mapping["requirement"] = requirement
+    mapping["narrative_region"] = mapping["text_region"]
+    mapping["text_region"] = None
+    raw["layout"]["responses"] = [mapping]
+    raw["proposals"]["proposals"] = raw["proposals"]["proposals"][:1]
+    raw["proposals"]["proposals"][0]["value"] = {
+        "kind": "narrative",
+        "value": complete,
+    }
+    request = DraftRequest.model_validate_json(json.dumps(raw))
+    checks = tuple(
+        HistoricalContextCheck.model_validate_json(json.dumps(c))
+        for c in json.loads(setup.artifact("historical_context_checks.json"))["checks"]
+    )
+    payload = request.model_dump_json().encode()
+    review = validate_answers(
+        setup.evidence_root,
+        request,
+        hashlib.sha256(payload).hexdigest(),
+        historical_context_checks=checks,
+    )
+    assert review.decisions[0].decision == "draft_verified"
+    shortened = request.model_copy(
+        update={
+            "proposals": request.proposals.model_copy(
+                update={
+                    "proposals": (
+                        request.proposals.proposals[0].model_copy(
+                            update={
+                                "value": NarrativeValue(
+                                    kind="narrative", value=complete.splitlines()[0]
+                                )
+                            }
+                        ),
+                    )
+                }
+            )
+        }
+    )
+    refused = validate_answers(
+        setup.evidence_root,
+        shortened,
+        hashlib.sha256(payload).hexdigest(),
+        historical_context_checks=checks,
+    )
+    assert refused.decisions[0].decision == "withhold"
+    blank = setup.evidence_root / request.source
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    blank.write_bytes(setup.blank)
+    path = Path("outputs/complete-native-field.json")
+    (setup.evidence_root / path).write_bytes(payload)
+    output = publish_draft(
+        setup.evidence_root,
+        path,
+        payload,
+        request,
+        review,
+        review.model_dump_json().encode(),
+        None,
+    )
+    text = "\n".join(p.extract_text() for p in PdfReader(output / "draft-packet.pdf").pages)
+    for line in complete.splitlines():
+        assert line in text
+    assert method in (output / "reviewer-summary.txt").read_text()
+    report = json.loads((output / "draft.json").read_bytes())
+    assert report["render_checks"]["outside_allowed_regions_changed_pixels"] == 0
+
+
+@pytest.mark.parametrize(
+    ("focused", "expected"),
+    [
+        ("Agency bond desk\nService continues", "Agency bond desk\nService continues"),
+        ("Agency bond desk", None),
+        ("Treasury bond desk\nService continues", None),
+    ],
+)
+def test_scanned_recovery_cannot_resolve_a_missing_line_with_a_matching_prefix(
+    tmp_path, monkeypatch, focused, expected
+):
+    setup, tools, reader, prior, current = field_reading_case(
+        tmp_path,
+        monkeypatch,
+        scanned=True,
+        image="Agency bond desk\nService continues",
+        ocr="Agency bond desk",
+        focused=focused,
+    )
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] == expected
+    assert first["text_reading"]["status"] == ("supported" if expected else "disagrees")
+    assert reader.transcribe.call_count == 2
+    if expected is not None:
+        assert_complete_narrative_output(setup, tools, prior, current, expected, "Foundry")
+    else:
+        call(tools, "finish_evidence")
+    restarted = setup.tools(scan_reader=reader)
+    assert restarted.answer_handoff()["historical_candidates"][0]["candidate_answer"] == expected
+    assert reader.transcribe.call_count == 2
+
+
+def test_fully_native_historical_context_does_not_require_tesseract(tmp_path, monkeypatch):
+    setup, tools, reader, prior, current = setup_page(
+        tmp_path,
+        monkeypatch,
+        native_questions=True,
+        native_context=True,
+        historical_policy="answer_first_review",
+    )
+    monkeypatch.setattr("bd_packet_builder.ocr.shutil.which", lambda _: None)
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert result["associations"][0]["candidate_answer"] == NAME
+    _, review = validated_page(setup, tools, prior, current)
+    assert tools.answer_handoff()["reading_usage"]["ocr_pages"] == 0
+    assert review.decisions[0].decision == "draft_verified"
+    call(tools, "assemble_packet")
+    call(tools, "publish_results")
+    assert NAME in PdfReader(BytesIO(setup.artifact("packet.pdf"))).pages[0].extract_text()
+    restarted = setup.tools(scan_reader=reader)
+    assert restarted.answer_handoff()["historical_candidates"][0]["candidate_answer"] == NAME
+    assert reader.transcribe.call_count == 1
+
+
+@pytest.mark.parametrize("focused", ["Agency bond desk\nService continues", "Agency bond desk", ""])
+@pytest.mark.parametrize("hidden", ["Agency bond desk\nService continues", "Obsolete desk"])
+def test_invisible_native_text_requires_rendered_region_corroboration(
+    tmp_path, monkeypatch, focused, hidden
+):
+    complete = "Agency bond desk\nService continues"
+    setup, tools, reader, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        scanned_answer=True,
+        hidden_native_answer=hidden,
+        primary_answer=complete,
+        primary_image_answer=complete,
+        primary_ocr_answer=complete,
+        historical_policy="answer_first_review",
+    )
+    initial = reader.transcribe.return_value
+    reader.transcribe.side_effect = [
+        initial,
+        ScanTranscript(readable=bool(focused), text=focused, subject=None, reporting_period=None),
+    ]
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] == (complete if focused == complete else None)
+    assert "native_text_not_visible" in first["text_reading"]["coverage_issues"]
+    assert first["text_reading"]["status"] == (
+        "supported" if focused == complete else "coverage_uncertain"
+    )
+    assert result["associations"][1]["candidate_answer"] == "Blair Example"
+    call(tools, "finish_evidence")
+    restarted = setup.tools(scan_reader=reader)
+    assert restarted.answer_handoff()["historical_candidates"][0]["candidate_answer"] == (
+        complete if focused == complete else None
+    )
+    assert reader.transcribe.call_count == 2
+
+
+def test_invalid_focused_reading_retains_supported_peer_and_an_explicit_issue(
+    tmp_path, monkeypatch
+):
+    from bd_packet_builder.scan import ScanVerificationError
+
+    _, tools, reader, prior, _ = field_reading_case(
+        tmp_path,
+        monkeypatch,
+        scanned=True,
+        image="Agency bond desk\nService continues",
+        ocr="Agency bond desk",
+    )
+    initial = reader.transcribe.return_value
+    reader.transcribe.side_effect = [initial, ScanVerificationError("scan_reading_invalid")]
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    assert len(result["associations"]) == 1
+    assert result["associations"][0]["candidate_answer"] == "Blair Example"
+    assert result["issues"][0]["code"] == "scan_reading_invalid"
+    assert reader.transcribe.call_count == 2
+
+
+@pytest.mark.parametrize("edge", ["clipped_character", "omitted_line", "omitted_word"])
+def test_native_region_boundary_uncertainty_never_certifies_an_excerpt(tmp_path, monkeypatch, edge):
+    observed = "Agency bond" if edge == "omitted_word" else "Agency bond desk"
+    _, tools, reader, prior, _ = field_reading_case(
+        tmp_path,
+        monkeypatch,
+        image=observed,
+        ocr=observed,
+        focused=observed,
+        complete="Agency bond desk"
+        if edge == "omitted_word"
+        else "Agency bond desk\nService continues",
+    )
+    initial = next(reader.transcribe.side_effect).model_dump(mode="json")
+    if edge == "omitted_word":
+        initial["historical_fields"][0]["answer"]["box"]["right"] = 420
+    else:
+        initial["historical_fields"][0]["answer"]["box"]["bottom"] = (
+            117 if edge == "clipped_character" else 115
+        )
+    reader.transcribe.side_effect = [
+        ScanTranscript.model_validate_json(json.dumps(initial)),
+        ScanTranscript(readable=True, text=observed, subject=None, reporting_period=None),
+    ]
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] is None
+    assert first["text_reading"]["status"] == "coverage_uncertain"
+    assert first["text_reading"]["coverage_issues"]
+    assert result["associations"][1]["candidate_answer"] == "Blair Example"
+
+
+@pytest.mark.parametrize(
+    ("complete", "image", "ocr", "expected"),
+    [
+        # Spacing-only difference: the native PDF text is the exact printed value.
+        ("Agencybond desk", "Agency bond desk", "Agencybond desk", "Agencybond desk"),
+        ("Agencybond desk", "Agency bend desk", "Agency bend desk", None),
+        # Column-ordered native text with the same words; image and confident OCR agree.
+        ("Desk 2 Agency 10", "Agency 10 Desk 2", "Agency 10 Desk 2", "Agency 10 Desk 2"),
+        ("Desk 3 Agency 10", "Agency 10 Desk 2", "Agency 10 Desk 2", None),
+        ("Desk 2 Agency 10", "Agency 10 Desk 2", "Agency 10 Desk 3", None),
+    ],
+)
+def test_native_spacing_and_reading_order_differences_resolve_only_when_words_agree(
+    tmp_path, monkeypatch, complete, image, ocr, expected
+):
+    _, tools, _, prior, _ = field_reading_case(
+        tmp_path, monkeypatch, image=image, ocr=ocr, complete=complete
+    )
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] == expected
+    if expected is None:
+        assert first["text_reading"]["status"] != "supported"
+    assert result["associations"][1]["candidate_answer"] == "Blair Example"
+
+
+def test_descender_overhang_is_not_clipping(tmp_path, monkeypatch):
+    answer = "Agency bond desk"
+    _, tools, reader, prior, _ = field_reading_case(
+        tmp_path, monkeypatch, image=answer, ocr=answer, complete=answer
+    )
+    initial = reader.transcribe.return_value.model_dump(mode="json")
+    # Baseline is at 112.5/1000; "g" and "y" descend to 115.6 with centers near 110.
+    initial["historical_fields"][0]["answer"]["box"]["bottom"] = 114
+    reader.transcribe.return_value = ScanTranscript.model_validate_json(json.dumps(initial))
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] == answer
+    assert first["text_reading"]["status"] == "supported"
+    assert not first["text_reading"]["coverage_issues"]
+
+
+def dense_native_context(tmp_path, *, change=None, layout="rows", raster_labels=False):
+    from bd_packet_builder.historical_context import HistoricalContextEvidence
+    from bd_packet_builder.history import with_historical_sources
+    from bd_packet_builder.inventory import build_inventory
+    from bd_packet_builder.scan import ScanEvidence
+
+    root = tmp_path.resolve()
+    target = root / PRIOR
+    target.parent.mkdir(parents=True)
+    (root / "bd_agreements/supporting_data").mkdir(parents=True)
+    canvas = Canvas(str(target), pagesize=(600, 800), invariant=True)
+    transcripts = []
+    for page in range(2):
+        labels = BytesIO()
+        label_canvas = (
+            Canvas(labels, pagesize=(600, 800), invariant=True) if raster_labels else canvas
+        )
+        answer_placements = []
+        fields = []
+        for row in range(10):
+            column = row % 2 if layout == "columns" else 0
+            y = 740 - (row // 2 if layout == "columns" else row) * 16
+            question_x, answer_x = 40 + column * 252, 180 + column * 250
+            question = f"Field {row + 1}:"
+            answer = f"Sample value {page + 1}-{row + 1}"
+            label_canvas.drawString(question_x, y, question)
+            answer_placements.append((answer_x, y, answer))
+            if layout == "interleaved":
+                answer += " Reference"
+            fields.append(
+                {
+                    "role": None,
+                    "question": {
+                        "text": question,
+                        "box": box(
+                            (question_x - 4) * 1000 // 600,
+                            (790 - y) * 1000 // 800,
+                            (question_x + 100) * 1000 // 600,
+                            (804 - y) * 1000 // 800,
+                        ),
+                    },
+                    "answer": {
+                        "text": answer,
+                        "box": box(
+                            (answer_x - 6) * 1000 // 600,
+                            (790 - y) * 1000 // 800,
+                            (answer_x + (250 if layout == "interleaved" else 110)) * 1000 // 600,
+                            (804 - y) * 1000 // 800,
+                        ),
+                    },
+                }
+            )
+        if change == "invented_neighbor":
+            fields[1]["answer"]["text"] = "Not in the source"
+        elif change == "invalid_neighbor":
+            fields[1]["question"]["box"] = box(60, 800, 230, 820)
+        if raster_labels:
+            label_canvas.save()
+            with (
+                pdfium.PdfDocument(labels.getvalue()) as document,
+                closing(document[0]) as pdf_page,
+                closing(pdf_page.render(scale=3)) as bitmap,
+                bitmap.to_pil() as image,
+            ):
+                canvas.drawImage(ImageReader(image), 0, 0, 600, 800)
+        for answer_x, y, answer in answer_placements:
+            canvas.drawString(answer_x, y, answer)
+        if layout == "interleaved":
+            for _, y, _ in answer_placements:
+                canvas.drawString(360, y, " Reference")
+        transcripts.append(
+            ScanTranscript.model_validate_json(
+                json.dumps(
+                    {
+                        "readable": True,
+                        "text": "",
+                        "subject": None,
+                        "reporting_period": None,
+                        "historical_fields": fields,
+                    }
+                )
+            )
+        )
+        canvas.showPage()
+    canvas.save()
+    archive = ArchiveManifest(
+        entries=(
+            ArchiveEntry(
+                path=PRIOR,
+                sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+                partition="reference",
+                issuer="Broward",
+            ),
+        )
+    )
+    inventory = with_historical_sources(root, build_inventory(root), archive)
+    source = next(s for s in inventory.sources if s.path == PRIOR)
+    reader = Mock()
+    reader.transcribe.side_effect = transcripts
+    scans = ScanEvidence(
+        root,
+        inventory,
+        reader,
+        endpoint="https://example.openai.azure.com/openai/v1",
+        deployment="test",
+        max_pages=2,
+    )
+    return HistoricalContextEvidence(scans, allow_disagreements=True), source, reader, transcripts
+
+
+@pytest.mark.parametrize(
+    "layout,raster_labels",
+    [("rows", False), ("columns", False), ("rows", True), ("interleaved", False)],
+)
+def test_dense_native_fields_preserve_all_answers_and_leave_budget_for_the_next_page(
+    tmp_path, layout, raster_labels
+):
+    from bd_packet_builder.ocr import run_ocr
+
+    context, source, reader, _ = dense_native_context(
+        tmp_path, layout=layout, raster_labels=raster_labels
+    )
+    artifacts = {}
+    for page in (1, 2):
+        result = context.read_native(source.source_id, page)
+        if raster_labels or layout == "interleaved":
+            assert result is None
+            artifact = (
+                run_ocr(
+                    context.scans.root,
+                    Path(PRIOR),
+                    page,
+                    inventory=context.scans.inventory,
+                )
+                / "ocr.json"
+            )
+            path = artifact.relative_to(context.scans.root).as_posix()
+            artifacts[page] = artifact.read_bytes()
+            result = context.read(source.source_id, page, path)
+            assert context.read(source.source_id, page, path) == result
+        assert result is not None
+        assert result.issues == ()
+        assert [a.candidate_answer for a in result.associations] == [
+            f"Sample value {page}-{row}" + (" Reference" if layout == "interleaved" else "")
+            for row in range(1, 11)
+        ]
+        assert all(a.text_reading["status"] == "supported" for a in result.associations)
+        if not raster_labels and layout != "interleaved":
+            assert context.read_native(source.source_id, page) == result
+    assert reader.transcribe.call_count == context.scans.pages_attempted == 2
+    assert all(
+        c.recheck(context.scans.root, context.scans.inventory, artifacts.get(c.question.page))
+        for c in context.checks
+    )
+
+
+@pytest.mark.parametrize("change", ["invented_neighbor", "invalid_neighbor"])
+def test_ungrounded_neighbor_cannot_hide_a_possible_answer_continuation(tmp_path, change):
+    from bd_packet_builder.historical_context import _make_check
+
+    context, source, _, transcripts = dense_native_context(tmp_path, change=change)
+    transcript = transcripts[0]
+    check = _make_check(
+        context.scans.root,
+        context.scans.inventory,
+        None,
+        None,
+        source.source_id,
+        1,
+        transcript.historical_fields[0],
+        transcript,
+        context.scans.endpoint,
+        context.scans.deployment,
+        True,
+    )
+    assert check.answer_disputed
+    assert "native_region_possible_continuation" in check.printed_readings[0].coverage_issues
+
+
+def test_v12_dense_receipt_keeps_original_hash_and_focused_replay(tmp_path):
+    from bd_packet_builder.historical_context import _make_check
+
+    context, source, reader, transcripts = dense_native_context(tmp_path)
+    transcript = transcripts[0]
+    legacy = _make_check(
+        context.scans.root,
+        context.scans.inventory,
+        None,
+        None,
+        source.source_id,
+        1,
+        transcript.historical_fields[0],
+        transcript,
+        context.scans.endpoint,
+        context.scans.deployment,
+        True,
+        context_version="historical-page-context-v12",
+        scans=context.scans,
+    )
+    assert legacy.answer_disputed
+    assert legacy.printed_readings[0].focused is not None
+    assert reader.transcribe.call_count == 1
+    payload = legacy.model_dump_json(exclude={"discrepancies"}).encode()
+    assert legacy.context_citation.check_sha256 == hashlib.sha256(payload).hexdigest()
+    assert legacy.recheck(context.scans.root, context.scans.inventory, allow_disagreements=True)
+    assert reader.transcribe.call_count == 1
+
+
+def test_unrecoverable_boundary_does_not_spend_a_crop_call(tmp_path, monkeypatch):
+    _, tools, reader, prior, _ = field_reading_case(
+        tmp_path,
+        monkeypatch,
+        image="Agency bond desk",
+        ocr="Agency bond desk",
+    )
+    raw = reader.transcribe.return_value.model_dump(mode="json")
+    raw["historical_fields"][0]["answer"]["box"]["bottom"] = 115
+    reader.transcribe.side_effect = [
+        ScanTranscript.model_validate_json(json.dumps(raw)),
+        AssertionError("A crop cannot resolve missing text outside its own boundary"),
+    ]
+    result = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
+    first = result["associations"][0]
+    assert first["candidate_answer"] is None
+    assert first["text_reading"]["status"] == "coverage_uncertain"
+    assert result["associations"][1]["candidate_answer"] == "Blair Example"
+    assert reader.transcribe.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("native", "image"),
+    [("Volume is 100", "Volume is 900"), ("We do not clear", "We do clear")],
+)
+@pytest.mark.parametrize("corroborated", [False, True])
+def test_native_substantive_disagreement_needs_a_full_focused_reading(
+    tmp_path, monkeypatch, native, image, corroborated
+):
+    _, tools, reader, prior, _ = setup_page(
+        tmp_path,
+        monkeypatch,
+        primary_answer=native,
+        primary_image_answer=image,
+        primary_ocr_answer=native,
+        historical_policy="answer_first_review",
+    )
+    initial = reader.transcribe.return_value
+    reader.transcribe.side_effect = [
+        initial,
+        ScanTranscript(
+            readable=corroborated,
+            text=native if corroborated else "",
+            subject=None,
+            reporting_period=None,
+        ),
+    ]
+    first = call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})[
+        "associations"
+    ][0]
+    assert first["candidate_answer"] == (native if corroborated else None)
+    assert "native_substantive_reading_conflict" in first["text_reading"]["coverage_issues"]
+    assert reader.transcribe.call_count == 2
 
 
 def narrative_dispute(
@@ -2536,7 +3226,9 @@ def recovered_narrative_draft(
     return setup, reader, request, gated
 
 
-@pytest.mark.parametrize("tamper", ["none", "crop_hash", "transcription", "confidence"])
+@pytest.mark.parametrize(
+    "tamper", ["none", "crop_hash", "transcription", "confidence", "selected_text", "method"]
+)
 @pytest.mark.parametrize("low_question_confidence", [False, True])
 def test_recovered_narrative_survives_gate_writer_and_rejects_tampering(
     tmp_path, monkeypatch, tamper, low_question_confidence
@@ -2546,13 +3238,17 @@ def test_recovered_narrative_survives_gate_writer_and_rejects_tampering(
     )
     assert review.decisions[0].decision == "draft_verified"
     checks = review.historical_context_checks
-    if tamper in ("crop_hash", "transcription"):
+    if tamper in ("crop_hash", "transcription", "selected_text", "method"):
         raw = checks[0].model_dump(mode="json")
         reading = raw["printed_readings"][0]
         if tamper == "crop_hash":
             reading["crop_sha256"] = "0" * 64
-        else:
+        elif tamper == "transcription":
             reading["focused"]["text"] = "Agency desk"
+        elif tamper == "selected_text":
+            reading["selected_text"] = "Agency desk"
+        else:
+            reading["method"] = "native"
         checks = (HistoricalContextCheck.model_validate_json(json.dumps(raw)),)
         basis = request.proposals.proposals[0].historical_basis
         assert basis is not None
@@ -2658,6 +3354,8 @@ def test_unresolved_narrative_is_blank_with_recovery_outcome_in_summary(
     assert report["answers"][0]["status"] == "blank"
     summary = (output / "reviewer-summary.txt").read_text()
     assert f"PRINTED-WORDING CHECK: answer; status={status}" in summary
+    if max_pages == 1:
+        assert "reread budget exhausted" in summary
     assert NARRATIVE not in PdfReader(output / "draft-packet.pdf").pages[0].extract_text()
     assert reader.transcribe.call_count == (1 if max_pages == 1 else 2)
 
@@ -2880,28 +3578,50 @@ def test_v8_plain_answer_receipts_replay_without_new_recovery(tmp_path, monkeypa
     assert legacy.recheck(setup.evidence_root, inventory, artifact, allow_disagreements=True)
 
 
-def test_v9_recovery_receipt_keeps_its_hash_and_replays_without_layout_checks(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("version", ["historical-page-context-v9", "historical-page-context-v11"])
+def test_legacy_recovery_receipt_keeps_its_hash_and_replays_without_layout_checks(
+    tmp_path, monkeypatch, version
 ):
+    from bd_packet_builder.historical_context import _make_check
     from bd_packet_builder.history import with_historical_sources
     from bd_packet_builder.inventory import build_inventory
 
     setup, tools, _, prior, _ = narrative_dispute(tmp_path, monkeypatch)
     call(tools, "read_historical_page", {"source_id": prior["source_id"], "page": 1})
     call(tools, "finish_evidence")
-    raw = json.loads(setup.artifact("historical_context_checks.json"))["checks"][0]
-    raw["version"] = "historical-page-context-v9"
-    raw["prompt_version"] = "scan-cross-check-v6"
-    payload = json.dumps(raw, separators=(",", ":"), ensure_ascii=False).encode()
-    legacy = HistoricalContextCheck.model_validate_json(payload)
-    assert legacy.context_citation.check_sha256 == hashlib.sha256(payload).hexdigest()
-    assert not legacy.answer_disputed
+    current = HistoricalContextCheck.model_validate_json(
+        json.dumps(json.loads(setup.artifact("historical_context_checks.json"))["checks"][0])
+    )
     inventory = with_historical_sources(
         setup.evidence_root,
         build_inventory(setup.evidence_root),
         setup.store.load(setup.manifest.run_id).request.historical_archive,
     )
-    artifact = (setup.evidence_root / legacy.question.artifact_path).read_bytes()
+    artifact = (setup.evidence_root / current.question.artifact_path).read_bytes()
+    legacy = _make_check(
+        setup.evidence_root,
+        inventory,
+        artifact,
+        current.question.artifact_path,
+        prior["source_id"],
+        1,
+        current.field,
+        current.transcript,
+        current.endpoint,
+        current.deployment,
+        True,
+        "scan-cross-check-v6",
+        version,
+        printed_readings=current.printed_readings,
+    )
+    raw = legacy.model_dump(mode="json")
+    for reading in raw["printed_readings"]:
+        for key in ("method", "selected_text", "coverage_issues"):
+            del reading[key]
+    payload = json.dumps(raw, separators=(",", ":"), ensure_ascii=False).encode()
+    legacy = HistoricalContextCheck.model_validate_json(payload)
+    assert legacy.context_citation.check_sha256 == hashlib.sha256(payload).hexdigest()
+    assert not legacy.answer_disputed
     assert legacy.recheck(setup.evidence_root, inventory, artifact, allow_disagreements=True)
 
 

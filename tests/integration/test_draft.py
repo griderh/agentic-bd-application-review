@@ -937,7 +937,8 @@ def test_long_narrative_has_real_supplement_and_final_attachment_reference(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("additional_form", "long_middle"), [(False, False), (True, False), (False, True)]
+    ("additional_form", "long_middle"),
+    [(False, False), (True, False), (False, True), (True, True)],
 )
 def test_supplement_groups_numbered_answers_with_readable_labels_and_final_references(
     tmp_path, additional_form, long_middle
@@ -958,6 +959,8 @@ def test_supplement_groups_numbered_answers_with_readable_labels_and_final_refer
     requirements = data["requirements"]["requirements"]
     original = requirements[2]
     original.update(requirement_id=identities[0], instruction="10. Describe services.")
+    # Reflowed source wrapping fits the default region; keep Question 10 an overflow case.
+    data["layout"]["responses"][2]["narrative_region"]["bottom"] = 455.0
     data["proposals"]["proposals"][2].update(
         requirement_id=identities[0], value={"kind": "narrative", "value": answer}
     )
@@ -1121,6 +1124,76 @@ def test_render_failure_leaves_no_partial_run(
     monkeypatch.setattr(module, "_render_checks", fail)
     with pytest.raises(OSError):
         execute(tmp_path, request, review)
+    assert not list((tmp_path / "outputs").glob("draft-*"))
+    assert not list((tmp_path / "outputs").glob(".staging-*"))
+
+
+@pytest.mark.parametrize("phase", ["additional-form", "supplement"])
+def test_companion_preview_write_failure_prevents_atomic_publication(tmp_path, monkeypatch, phase):
+    from PIL import Image
+
+    request, review, data = prepare(tmp_path, long=True)
+    add_issuer_form(tmp_path, data)
+    request.write_text(json.dumps(data))
+    write_review(request, review)
+    save = Image.Image.save
+    attempted = []
+
+    def fail_preview(image, filename, *args, **kwargs):
+        name = Path(filename).name
+        attempted.append(name)
+        if name.startswith(phase + "-"):
+            raise OSError(f"synthetic {phase} preview failure")
+        return save(image, filename, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", fail_preview)
+
+    with pytest.raises(OSError, match=f"synthetic {phase} preview failure"):
+        execute(tmp_path, request, review)
+
+    assert attempted[:2] == ["page-1-before.png", "page-1-after.png"]
+    assert attempted[-1].startswith(phase + "-")
+    if phase == "additional-form":
+        assert not any(name.startswith("supplement-") for name in attempted)
+    else:
+        assert "additional-form-1-page-1-after.png" in attempted
+    assert not list((tmp_path / "outputs").glob("draft-*"))
+    assert not list((tmp_path / "outputs").glob(".staging-*"))
+
+
+@pytest.mark.parametrize("omitted", ["answer", "reference"])
+def test_missing_supplement_text_rejects_before_any_supplement_preview(
+    tmp_path, monkeypatch, omitted
+):
+    from PIL import Image
+
+    request, review, _ = prepare(tmp_path, long=True)
+    draw_string = Canvas.drawString
+    save = Image.Image.save
+    previews = []
+
+    def omit_text(canvas, x, y, text, *args, **kwargs):
+        prefix = "Service 0:" if omitted == "answer" else "Supporting evidence:"
+        if x == 72.0 and text.startswith(prefix):
+            return None
+        return draw_string(canvas, x, y, text, *args, **kwargs)
+
+    def record_preview(image, filename, *args, **kwargs):
+        if Path(filename).name.startswith("supplement-page-"):
+            previews.append(Path(filename).name)
+        return save(image, filename, *args, **kwargs)
+
+    monkeypatch.setattr(Canvas, "drawString", omit_text)
+    monkeypatch.setattr(Image.Image, "save", record_preview)
+
+    page = 2 if omitted == "answer" else 4
+    with pytest.raises(
+        DraftError,
+        match=f"Supplemental answer/evidence is missing or clipped: services, page {page}",
+    ):
+        execute(tmp_path, request, review)
+
+    assert previews == []
     assert not list((tmp_path / "outputs").glob("draft-*"))
     assert not list((tmp_path / "outputs").glob(".staging-*"))
 

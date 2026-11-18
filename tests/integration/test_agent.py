@@ -242,6 +242,23 @@ def test_evidence_completion_preserves_artifact_bytes_and_restart_context(setup:
     bundle = {
         name: hashlib.sha256(setup.artifact(name)).hexdigest() for name in sorted(after - before)
     }
+    handoff = json.loads(setup.artifact("answer_handoff.json"))
+    policy = handoff["completion_policy"]
+    new_wording = (
+        "source-native text or a blind focused reread corroborating the full reading, not from the "
+    )
+    coverage_rule = (
+        "text_reading describes the method and coverage issues. Preserve the complete "
+        "candidate_answer; a matching excerpt is not a complete recovered narrative. "
+    )
+    assert policy.count(new_wording) == policy.count(coverage_rule) == 1
+    # Pin every old artifact byte except these two explicitly asserted v55 instructions.
+    handoff["completion_policy"] = policy.replace(
+        new_wording, "source-native text or a blind focused reread agreeing with OCR, not from the "
+    ).replace(coverage_rule, "")
+    bundle["answer_handoff.json"] = hashlib.sha256(
+        json.dumps(handoff, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
     assert hashlib.sha256(json.dumps(bundle, sort_keys=True).encode()).hexdigest() == (
         "8cccd980be0275c995e7aee26444fe3562288cd2b3e2fbb7f43d4ef53b74f90d"
     )
@@ -641,6 +658,85 @@ def test_scanned_quote_survives_agent_gates_staging_and_publication(
     assert any(a.name.startswith("ocr-") for a in final.artifacts)
     assert "not human visual approval" in setup.artifact("reviewer-summary.txt").decode()
     reader.transcribe.assert_called_once()
+
+
+def test_repeated_malformed_scan_reading_leaves_quote_unverified_and_run_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bd_packet_builder.foundry import FoundryConfig
+    from bd_packet_builder.scan import FoundryScanReader
+    from tests.integration.test_scan import inconsistent_identification_error
+
+    setup = Setup(tmp_path, blank_pdf(), scanned=True)
+    monkeypatch.setattr("bd_packet_builder.ocr.shutil.which", lambda _: "/local/tesseract")
+    text = f"Firm legal name: {NAME}"
+    header = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+        "left\ttop\twidth\theight\tconf\ttext\n"
+    )
+    tsv = header + "".join(
+        f"5\t1\t1\t1\t1\t{i + 1}\t{20 + i * 100}\t20\t90\t30\t96\t{word}\n"
+        for i, word in enumerate(text.split())
+    )
+    monkeypatch.setattr(
+        "bd_packet_builder.ocr._execute",
+        lambda command, *_: "tesseract 5.5.0\n" if "--version" in command else tsv,
+    )
+    api = Mock()
+    api.responses.parse.side_effect = [
+        inconsistent_identification_error(),
+        inconsistent_identification_error(),
+    ]
+    reader = FoundryScanReader(
+        FoundryConfig(endpoint="https://synthetic.openai.azure.com/openai/v1", deployment="test"),
+        allow_paid=True,
+        client_factory=lambda _: api,
+    )
+    state: dict[str, Any] = {}
+
+    def read(listing: dict) -> tuple[str, object]:
+        state["id"] = source_id(listing)
+        return "read_page", {"source_id": state["id"], "page": 1}
+
+    def verify(_: dict) -> tuple[str, object]:
+        return "verify_scan_quote", {
+            "source_id": state["id"],
+            "page": 1,
+            "quote": text,
+            "expected_subject": NAME,
+        }
+
+    def after_unverified(verified: dict) -> tuple[str, object]:
+        assert verified["ok"] is False
+        assert verified["error"]["code"] == "invalid_input"
+        assert verified["error"]["message"] == "scan_reading_invalid"
+        return "finish_evidence", {}
+
+    final = setup.run(
+        [
+            call("interpret_form"),
+            call("list_sources", {"family": "FINRA_Certification"}),
+            with_result(read),
+            with_result(verify),
+            with_result(after_unverified),
+            call("submit_answers", {"proposals": []}),
+            call("assemble_packet"),
+            call("publish_results"),
+        ],
+        scan_reader=reader,
+        scan_endpoint="synthetic",
+        scan_deployment="test",
+    )
+    assert final.failure is None
+    assert final.status == "published" and final.outcome == "incomplete"
+    assert json.loads(setup.artifact("draft.json"))["written_requirements"] == []
+    assert "p1.name" in {e.requirement_id for e in final.exceptions()}
+    unread = [e for e in final.exceptions() if e.code == "scan_reading_unverified"]
+    assert len(unread) == 1 and unread[0].requirement_id is None
+    assert "page 1" in unread[0].message and "not used as evidence" in unread[0].message
+    assert "scan_reading_unverified" in setup.artifact("reviewer-summary.txt").decode()
+    assert api.responses.parse.call_count == 2
 
 
 def test_fabricated_value_is_withheld_not_written(setup: Setup) -> None:

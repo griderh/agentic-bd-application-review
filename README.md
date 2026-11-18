@@ -5,9 +5,234 @@ This agentic AI application reviews broker-dealer application requirements and c
 
 - [Phase 1 scoping document](Broker-Dealer%20Packet%20Automation%20Phase%201%20Scoping%20Document.md): business requirements, boundaries, and evaluation criteria.
 - [Development plan](docs/development-plan.md): milestones, dependencies, acceptance criteria, and open implementation decisions.
+- Initiative checklists: [native-first extraction](docs/native-first-extraction-plan.md) and
+  [completed code cleanup](docs/code-cleanup-plan.md), including verification and remaining gates.
 - [Copilot coding instructions](.github/copilot-instructions.md): repository-wide Python, test-driven development (TDD), grounding, and data-handling standards.
 
+## Local setup
+
+The supported Python range is 3.12-3.13; both versions pass the offline suite. Use Python 3.12 for the existing local setup. The hosted Foundry code runtime uses Python 3.13. From the repository root on macOS or Linux:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+python -m pip install --no-build-isolation --no-deps -e .
+python -m pip check
+```
+
+On Windows, create the environment with `py -3.12 -m venv .venv` and activate it with `.venv\Scripts\Activate.ps1`, then use the same `python -m pip` commands. Windows execution has not yet been validated.
+
+Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for the offline commands or tests.
+
+## Quality checks
+
+With the venv activated:
+
+```bash
+python -m pytest --cov --cov-report=term-missing
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy
+```
+
+Tests generate synthetic PDFs in pytest temporary directories; they do not read business samples, use network drives, or call models. The [CI workflow](.github/workflows/ci.yml) runs the same checks on Linux and macOS without uploading document artifacts. Local checks are verified separately from GitHub-hosted CI, which runs after changes are pushed.
+
+## Workflow navigation
+
+- [Live workstation runs and explicit paid opt-in](#opt-in-live-agent-runs).
+- [Saved-run recovery and historical prefills](#historical-business-evidence-and-flagged-prefills).
+- [Readable run artifacts](#navigating-the-readable-run-artifacts).
+- [Controlled draft writing and verification](#controlled-draft-completion).
+- [Earlier Excel prototype commands](#earlier-excel-fact-sheet-prototype-retained-not-the-target-workflow), retained for compatibility, not the target workflow.
+
 ## Development status
+
+The entries below record implementation history. Older versions, withdrawn experiments and
+past limitations provide audit context; they do not override newer behavior or authorize
+resuming incompatible saved runs. Setup and validation commands are above; current workflow
+entry points are linked in [Workflow navigation](#workflow-navigation).
+
+On ruled narrative fields, new drafts start inline answers and supplemental-answer
+references on the first blank line when the PDF confirms the line and there is room
+above it. If that space cannot be confirmed, the existing placement is kept.
+
+### Historical text answers: native-first extraction (agent v57, context v14)
+
+**Rollout status:** the v55 user run regressed from 47 written fields to 24.
+The v56 correction is offline verified, not live accepted. See the
+[regression checklist and saved-page replay results](docs/native-first-extraction-plan.md#live-regression-dense-form-boundaries-and-recovery-budget).
+The v56 run `a0116aa0...` then lost five fields and printed an internal review note in the
+packet. v57/context v14 fixes both; see the
+[incident checklist](docs/native-first-extraction-plan.md#v56-published-run-five-regressed-blanks-and-an-internal-note-printed-in-the-packet).
+Packet text never includes reviewer-only notes: an answer supported only by a historical
+packet prints no evidence line, and its historical basis appears in the internal reviewer
+summary instead.
+
+This changes how `read_historical_page` reads plain historical answers, including narratives.
+It does not replace financial extraction, graphical choice/write-in checks, numeric-identifier
+reconciliation, historical reuse policy, or human review.
+
+The steps, and the tools doing them, are:
+
+1. **Find the relationship - Foundry image model.** PDFium renders the source page as an image.
+   The model proposes which question, answer region and role belong together. Its spelling
+   is an observation, not the string the PDF reader must reproduce.
+2. **Read the answer - PDFium through pypdfium2.** Python asks PDFium for *all embedded text
+   inside the proposed answer region*, not for an excerpt matching the model's answer.
+   It records an exact source citation and character positions. A model spelling mistake or
+   an omitted line no longer makes complete, sound native text unusable.
+3. **Check the region - deterministic Python checks.** Code checks the question/role
+   relationship, neighboring fields, character boundaries, nearby native continuation,
+   unique citation, encoding and invisible text. Observable numeric/negation conflicts
+   require corroboration. Extracting a string successfully does not by itself prove that
+   the region contains the whole answer. Nearby text counts as another field only after
+   its question/role and source text are grounded using native citations or localized OCR.
+   Ordinary dense rows and columns are not automatically treated as missing answer text.
+   Context v14 does not treat three harmless differences as disagreements:
+   - **Glyph overhang:** a comma or "y" tail that extends past the model's box is not clipping
+     when the character's center is inside the box.
+   - **Spacing only:** if the native and image readings match after removing spaces, the
+     embedded PDF text is used as printed.
+   - **Reading order only:** if the native text has exactly the same words in another order,
+     such as a table stored column by column, it is flagged `native_reading_order_differs`.
+     The image reading is used only when confident Tesseract OCR matches it exactly.
+   Any changed letter or digit still blocks the answer.
+4. **Read raster or questionable regions - Tesseract.** Tesseract recognizes the rendered
+   pixels and supplies words, positions and confidence. Native and raster regions can
+   coexist on one page. Fully native question/role/answer pages need no Tesseract call;
+   mixed pages may still need it for their raster labels.
+   A complete table row may need an OCR citation because the PDF stores its columns out of
+   reading order. When that citation-order limitation is the only native issue, complete,
+   confident OCR agreeing with the page-image observation remains usable.
+5. **Resolve remaining differences - Pillow and Foundry.** When necessary, Pillow crops
+   the source region and Foundry reads that crop without being shown the desired answer.
+   Code compares the *whole readings*. A cropped reread agreeing only with an OCR prefix
+   cannot resolve a longer observed answer. A complete image reading corroborated by the
+   crop can survive missing OCR lines. Suspect hidden text can be replaced by corroborated
+   visible readings; it is not automatically preferred because it is embedded.
+   Genuine clipping or unassigned continuation outside a region remains a review exception.
+   Code does not spend a crop call when the same region cannot resolve that boundary.
+6. **Accept and write - shared Python checks and the PDF writer.** One versioned receipt
+   carries the selected text, method, original observations and remaining issues into the
+   answer handoff, gate and independent writer recheck. A historical narrative must retain
+   the complete checked answer, not a matching substring. Scalar extraction retains its
+   existing rules. Replaying a receipt makes no new model calls.
+7. **Explain uncertainty - separate internal reviewer summary.** The summary names PDFium,
+   Tesseract or the focused Foundry reread and records unresolved coverage or exhausted
+   recovery. Unsupported answers stay blank; a source-reading problem is not mislabeled as
+   missing business information. Historical continuity and approval remain separate.
+
+Recovery uses the existing shared image-call limits and cache. No new extraction engine,
+dependency, majority voting, arbitrary region expansion or fragments stitched into answers.
+Graphical choices, linked write-ins and digit-only identifiers keep their existing checks.
+Supported legacy receipts, including v12, retain their original hashes/recheck behavior; context v10 remains
+withdrawn. For separately approved live validation, restart workers and use a fresh
+agent-v57 run; existing runs are not upgraded. v13 receipts keep their original rules and hashes.
+
+Offline verification after correction: **1,931 passed, 81 skipped** on each of Python 3.12 and 3.13.
+Ruff lint/format, strict mypy on both targets and whitespace checks passed. The focused
+exhausted-budget summary regression also passes. Synthetic gate/writer tests check every
+expected answer line, refuse shortened narratives, preserve untouched form pixels and
+exercise restart/tampering; a rendered three-part supplemental answer was inspected.
+
+A read-only replay of Q12 from `c69444c3...` selects **361 native characters / 52 words**
+instead of the old **283-character excerpt**. All 52 visual-reading words align, except
+one one-word spelling substitution. The v11 receipt still rechecks; the v12 receipt selects
+the native region and rechecks without inference. All **75 inspected saved files** remain
+unchanged. This is source-extraction regression evidence, not a new answering run, a
+regenerated packet, or proof that a future model will propose the same region.
+
+**Limits and rollout:** the offline synthetic tests exercise logic, receipts and actual PDF
+outputs, not model quality. Correlated image/OCR omissions with no observable native or
+boundary signal can still escape detection. Twelve opt-in synthetic extraction evaluations
+(four layouts, three repetitions each) are defined in the existing historical evaluation
+module. They require separate paid approval. The v55 private run failed; the corrected
+v56 user attempt failed with a connection error during attachment inspection, before
+historical extraction or answering; live coverage remains unverified. Saved-observation replay
+restores 30/33 supported candidates on its historical page versus 17/33, uses one image call
+and no crops, and leaves three exceptions explicit. All six earlier historical pages and
+old/new receipts were also replayed without inference. Those counts are extraction evidence,
+not regenerated packet coverage or model-quality results. Do not treat this implementation
+as live-certified or a guarantee of zero extraction errors.
+
+A subsequent v56 run (`ef5d5333...`) reached all six historical pages, retained 70/73
+historical extraction candidates and staged seven answer groups, then lost its connection
+during an answer-evidence follow-up. An escaped exception incorrectly left its manifest at
+`evidence_collected`; no packet was published. The follow-up boundary now checkpoints the
+technical failure and produces an explicit failed run. Full offline suites after this fix:
+**1,932 passed, 81 skipped** on each Python target. Final live packet coverage is still
+unverified; see the [incident and recovery checklist](docs/native-first-extraction-plan.md#later-v56-run-escaped-follow-up-failure-left-a-nonterminal-status).
+
+### Scan-reading resilience (agent v54)
+
+This is a behavior fix, separate from the cleanup slices. Previously, one schema-invalid scanned-page
+transcription ended the whole run with `scan_verification_failed`. For example, the model
+might list a visible identification cue that is missing from its own transcribed text. The
+scan reader now requests one fresh reading after a schema-invalid response. If the second
+response is also invalid, the reader raises `scan_reading_invalid`. That error reaches
+the agent as a per-item `invalid_input` tool error, so the quote, page or exhibit stays
+unverified and the run continues. Unsupported answers are left blank as review exceptions.
+Timeout, connection and authentication failures are not retried and still end the run.
+Transcript consistency checks remain strict, and the scan prompt (v7) is unchanged.
+
+Reviewer visibility (agent v54): each page whose reading fails twice is recorded once, by
+source and page. The reviewer summary gets an "Unverified scanned pages" section with a
+`scan_reading_unverified` review exception for each such page, stating that the page was not
+used as evidence. The draft is marked incomplete. The exception is not linked to a specific
+question, because the scan tool does not receive one. The affected answer still shows as a
+generic blank, so reviewers connect the two by the page reference. Runs with no failed
+readings produce byte-identical evidence artifacts.
+
+Validation: five new offline tests cover the following:
+- retry success
+- a repeated invalid reading
+- no retry on timeout
+- once-per-page recording
+- an end-to-end run that publishes an incomplete draft with the summary section
+
+Full offline suites passed **1,893 tests, 69 skipped** on Python 3.12 and 3.13. Ruff
+lint/format, strict mypy on both targets and whitespace checks passed. No paid calls were
+made. The failed run `cc394602dce0463aa5ae2fe728e84663` is unchanged and cannot be resumed
+under v54.
+
+### Behavior-preserving cleanup, Slice 5 (final writer verification)
+
+Additional-form render checks and supplemental text/evidence verification now live in two
+private typed helpers in the existing writer module. The publication callback shrinks from
+97 to 38 lines. Checks retain their original order inside atomic staging: all supplemental
+fragments and evidence notes pass before any supplemental preview is written. Input/source
+rechecks, failure propagation, preview filenames and final atomic publication are unchanged.
+
+Validation: **92 writer tests passed before and after** extraction, including five new
+characterization cases for combined continuation/additional-form output, preview-write
+failures and missing answer/evidence text. All **38 artifact fingerprints across five
+synthetic scenarios** match the pre-extraction baseline; only manifest creation timestamps
+are excluded from comparison. Inlining the helpers reproduces the entire original writer
+AST. Full offline suites passed **1,888 tests, 69 skipped** on each Python target (3.12 and
+3.13); Ruff lint/format, strict mypy on both targets and whitespace checks passed.
+
+Writer v21, packet presentation, evidence policy, prompts, schemas and dependencies are
+unchanged. Pending Slice 4 work is preserved. No paid calls or existing-packet rewrites.
+
+### Behavior-preserving cleanup, Slice 4 (CLI and maintenance documentation)
+
+The CLI shares its identical strict validation-date parser between the retained `poc` and
+`fact-sheet-check` commands, and computes their common command-error labels once for both
+domain and I/O diagnostics. Agent-run date semantics, all command registrations, errors,
+return codes and opt-in behavior are unchanged. No helper was proven obsolete, so none was
+deleted speculatively. This is separate from the withdrawn narrative-layout experiment.
+
+Setup and quality checks are now above the implementation history, with workflow navigation
+and original section anchors preserved. The contributor overview reflects the implemented
+bounded draft-builder workflow rather than the earlier foundation-only milestone.
+
+Validation: the affected **132 tests passed before and after** extraction; all **19 CLI help
+outputs are byte-for-byte unchanged**. Expanding the shared parser and error-label expression
+reproduces the original CLI AST exactly. Full offline suites remain **1,883 passed, 69 skipped**
+on each Python target (3.12 and 3.13); Ruff lint/format, strict mypy on both targets and
+whitespace checks passed. Agent/gate/writer code, component versions, dependencies, saved-run
+formats and packet presentation are unchanged. No paid calls or existing-packet rewrites.
 
 ### Supplemental-answer presentation (writer v21)
 
@@ -934,22 +1159,6 @@ This increment adds explicit historical **reference versus evaluation** partitio
 
 Treat business samples and generated outputs as potentially confidential. Do not publish them, copy them into ordinary test fixtures, or upload them to model/OCR services without approved access. Use synthetic or sanitized fixtures for offline development and CI.
 
-## Local setup
-
-The supported Python range is 3.12-3.13; both versions pass the offline suite. Use Python 3.12 for the existing local setup. The hosted Foundry code runtime uses Python 3.13. From the repository root on macOS or Linux:
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-dev.txt
-python -m pip install --no-build-isolation --no-deps -e .
-python -m pip check
-```
-
-On Windows, create the environment with `py -3.12 -m venv .venv` and activate it with `.venv\Scripts\Activate.ps1`, then use the same `python -m pip` commands. Windows execution has not yet been validated.
-
-Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for the offline commands or tests.
-
 ## Blob staging and Foundry hosting (slice 7)
 
 The [Blob adapter](src/bd_packet_builder/blob_storage.py) uses original bytes, hashes and immutable bundle manifests, not a vector index. The [hosted entry](src/bd_packet_builder/hosted.py) accepts strict JSON commands containing IDs, never arbitrary paths. It calls the same model-driven workflow as workstation runs. Cloud clients use managed identity through `DefaultAzureCredential`; staging/download commands use your Azure CLI sign-in.
@@ -1168,6 +1377,14 @@ scan receipts still withhold the answer. Current-check-only OCR artifacts are ar
 receipts retained during completion recovery.
 
 **Explicit recovery, not automatic retries:** each execution attempts each unfinished group once. Recovery rechecks the blank, every source snapshot, saved artifact hashes, workflow/model configuration and OCR receipts, then reloads successful groups and calls the model only for unfinished ones with their prior errors. There are at most three attempts per group, also bounded by the cumulative 30-call group budget. No evidence discovery, mapping or blind-image model calls are repeated on recovery. Old v11 failures did not save this handoff/progress and cannot be retroactively resumed.
+
+Foundry failures during code-owned answer-evidence follow-up are technical failures, not
+missing business evidence: the attempt records `group_verification_failed` with safe
+exception classes, and the execution finishes `failed / answer_groups_incomplete`.
+Requests whose paid result is unknown retain their durable request marker and are not
+automatically repeated during recovery. Prior interrupted local runs left at
+`evidence_collected` can also enter explicit recovery after the same checks; do not edit
+their manifests or restart discovery merely to change the displayed status.
 
 Local recovery also accepts `packet_assembly_failed` from `answers_validated`, provided the
 validated request and review artifacts were saved. After the same compatibility and source checks,
@@ -2084,19 +2301,6 @@ The v1 real result included qualifying bullets in a label box and excess space a
 V2 usage: real subset 4,586 input + 4,848 output = **9,434 tokens** across two calls; synthetic 7,844 input + 5,583 output = **13,427 tokens** across four calls. The earlier v1 reports remain unchanged. The real evaluation covers Q1/Q2/Q11 only, not nine other proposed items, unselected pages, or all cross-page conditions. Continued answers without their prior page and overly thin single-line regions illustrate remaining review needs. Images and native text from only the authorized blank pages were uploaded; no supporting/confidential business evidence or completed packets were sent.
 
 Broader forms, cross-page interpretation and automatic semantic/source approval remain unfinished. The later [scanned-evidence increment](#machine-cross-checked-scanned-evidence) supports narrow scalar drafts through independent OCR/image agreement, not general scanned-document approval. The [controlled draft writer](#controlled-draft-completion) implements bounded deterministic assembly, not automatic promotion of visual form-mapping output. A passing geometry evaluation does not approve facts, eligibility or a generated packet.
-
-## Quality checks
-
-With the venv activated:
-
-```bash
-python -m pytest --cov --cov-report=term-missing
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy
-```
-
-Tests generate synthetic PDFs in pytest temporary directories; they do not read business samples, use network drives, or call models. The [CI workflow](.github/workflows/ci.yml) runs the same checks on Linux and macOS without uploading document artifacts. Local checks are verified separately from GitHub-hosted CI, which runs after changes are pushed.
 
 ## PDF feasibility demo
 

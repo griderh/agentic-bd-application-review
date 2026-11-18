@@ -3,8 +3,9 @@
 ## Authority and scope
 
 - Read the [Phase 1 scope](../Broker-Dealer%20Packet%20Automation%20Phase%201%20Scoping%20Document.md) and [development plan](../docs/development-plan.md) before changing behavior. The scope governs business requirements; the plan governs implementation sequencing. Surface conflicts rather than silently changing either.
+- Keep substantial initiative plans in `docs/`, linked from the development-plan dashboard, with task checkboxes, verification evidence, blockers and a next action. Update checkboxes only as work is verified; distinguish code completion, offline verification and live acceptance. Keep one authoritative repository checklist per initiative; session plans should link to it rather than maintain competing status.
 - Build a Python document-builder application with grounded model-assisted interpretation and deterministic document operations. Prefer one bounded workflow over autonomous or multi-agent complexity.
-- The repository currently implements a local Python foundation, supporting-document inventory, native-PDF text/date evidence, and a narrow PDF demo, not the complete agent workflow. Use the README for actual setup and validation commands. Do not invent existing dependencies, services, capabilities, or test results; update commands when tooling changes.
+- The repository implements a bounded Python packet-builder workflow with supporting-document inventory, native-PDF/OCR and visual evidence handling, historical-prefill review, independent validation, and deterministic PDF assembly. It produces incomplete, unsigned drafts, not business approval or issuer submission. Use the README for actual setup and validation commands. Do not invent existing dependencies, services, capabilities, or test results; update commands when tooling changes.
 
 ## Test-driven development (TDD)
 

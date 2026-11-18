@@ -441,7 +441,9 @@ def test_source_access_failure_does_not_skip_evidence_or_expose_payload(
     monkeypatch.setattr(Path, "open", fail_open)
     assert main(["inventory", "--root", str(root)]) == 1
     output = capsys.readouterr()
-    assert "Inventory I/O failed" in output.err
+    assert output.err == (
+        "Inventory I/O failed. Check the input exists and output folder is writable.\n"
+    )
     assert "synthetic confidential payload" not in output.err
     assert output.out == ""
     assert not (root / "outputs").exists()
@@ -454,6 +456,7 @@ def test_missing_support_root_is_clear_cli_failure(
 
     assert main(["inventory", "--root", str(tmp_path)]) == 1
     output = capsys.readouterr()
+    assert output.err.startswith("Inventory command rejected: ")
     assert "supporting-data" in output.err
     assert output.out == ""
 

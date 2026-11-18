@@ -213,8 +213,12 @@ def _assignment_status(
             or any(d.part == "role" for d in check.discrepancies)
         ):
             raise ToolInputError("Historical assignment requires a checked matching name and role")
-        artifact = read_local_input(
-            root, Path(check.question.artifact_path), Path("outputs"), 2 * 1024 * 1024
+        artifact = (
+            read_local_input(
+                root, Path(check.ocr_citations[0].artifact_path), Path("outputs"), 2 * 1024 * 1024
+            )
+            if check.ocr_citations
+            else None
         )
         if not check.recheck(root, inventory, artifact, allow_disagreements=True):
             raise ToolInputError("Historical representative assignment no longer verifies")

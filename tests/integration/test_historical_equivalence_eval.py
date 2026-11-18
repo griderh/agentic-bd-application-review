@@ -12,6 +12,121 @@ from bd_packet_builder.foundry import FoundryConfig, request_structured
 
 @pytest.mark.skipif(
     os.environ.get("BD_RUN_HISTORICAL_EVAL") != "1",
+    reason="Opt in with BD_RUN_HISTORICAL_EVAL=1; paid full-answer extraction evaluation",
+)
+@pytest.mark.parametrize("layout", ["native", "raster", "mixed", "hidden_layer"])
+@pytest.mark.parametrize("repetition", range(3))
+def test_full_answer_extraction_preserves_lines_and_qualifiers(
+    tmp_path, layout, repetition, record_property
+):
+    import hashlib
+    import time
+    from contextlib import closing
+    from io import BytesIO
+    from pathlib import Path
+
+    import pypdfium2 as pdfium
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen.canvas import Canvas
+
+    from bd_packet_builder.historical_context import HistoricalContextEvidence
+    from bd_packet_builder.history import ArchiveEntry, ArchiveManifest, with_historical_sources
+    from bd_packet_builder.inventory import build_inventory
+    from bd_packet_builder.ocr import run_ocr
+    from bd_packet_builder.scan import FoundryScanReader, ScanEvidence, normalized
+
+    root = tmp_path.resolve()
+    relative = Path("bd_agreements/Completed/Synthetic/application.pdf")
+    target = root / relative
+    target.parent.mkdir(parents=True)
+    (root / "bd_agreements/supporting_data").mkdir(parents=True)
+    complete = "Agency securities\nTreasury instruments\nService is limited to institutions."
+    native = BytesIO()
+    canvas = Canvas(native, pagesize=(600, 800), invariant=True)
+    canvas.drawString(40, 740, "Firm profile")
+    canvas.drawString(40, 700, "12. Describe products and service limits.")
+    if layout != "mixed":
+        for index, line in enumerate(complete.splitlines()):
+            canvas.drawString(40, 670 - index * 16, line)
+    canvas.drawString(40, 500, "Separate contact section")
+    canvas.drawString(40, 470, "13. Who is the contact?")
+    canvas.drawString(40, 440, "Avery Example")
+    canvas.save()
+    if layout == "native":
+        target.write_bytes(native.getvalue())
+    else:
+        with (
+            pdfium.PdfDocument(native.getvalue()) as pdf,
+            closing(pdf[0]) as page,
+            closing(page.render(scale=3)) as bitmap,
+            closing(bitmap.to_pil()) as image,
+        ):
+            canvas = Canvas(str(target), pagesize=(600, 800), invariant=True)
+            canvas.drawImage(ImageReader(image), 0, 0, 600, 800)
+            if layout == "mixed":
+                for index, line in enumerate(complete.splitlines()):
+                    canvas.drawString(40, 670 - index * 16, line)
+            if layout == "hidden_layer":
+                hidden = canvas.beginText(40, 670)
+                hidden.setTextRenderMode(3)
+                hidden.textLine("Obsolete products")
+                canvas.drawText(hidden)
+            canvas.save()
+    manifest = ArchiveManifest(
+        entries=(
+            ArchiveEntry(
+                path=relative.as_posix(),
+                sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+                partition="reference",
+                issuer="Synthetic",
+            ),
+        )
+    )
+    inventory = with_historical_sources(root, build_inventory(root), manifest)
+    source = next(s for s in inventory.sources if s.path == relative.as_posix())
+    config = FoundryConfig(
+        endpoint=os.environ["BD_FOUNDRY_ENDPOINT"],
+        deployment=os.environ["BD_FOUNDRY_DEPLOYMENT"],
+        timeout_seconds=180,
+    )
+    scans = ScanEvidence(
+        root,
+        inventory,
+        FoundryScanReader(config, allow_paid=True),
+        endpoint=config.endpoint,
+        deployment=config.deployment,
+        max_pages=4,
+    )
+    context = HistoricalContextEvidence(scans, allow_disagreements=True)
+    started = time.perf_counter()
+    result = context.read_native(source.source_id, 1)
+    used_ocr = result is None
+    if used_ocr:
+        artifact = run_ocr(root, relative, 1, inventory=inventory)
+        result = context.read(
+            source.source_id, 1, (artifact.relative_to(root) / "ocr.json").as_posix()
+        )
+    record_property("layout", layout)
+    record_property("repetition", repetition)
+    record_property("seconds", time.perf_counter() - started)
+    record_property("image_calls", scans.pages_attempted)
+    record_property("used_ocr", used_ocr)
+    assert result is not None
+    candidates = [a for a in result.associations if "products" in normalized(a.question)]
+    record_property(
+        "full_answer_correct",
+        len(candidates) == 1
+        and normalized(candidates[0].candidate_answer or "") == normalized(complete),
+    )
+    assert len(candidates) == 1
+    assert normalized(candidates[0].candidate_answer or "") == normalized(complete)
+    assert candidates[0].text_reading is not None
+    assert candidates[0].text_reading["status"] == "supported"
+    assert scans.pages_attempted <= 4
+
+
+@pytest.mark.skipif(
+    os.environ.get("BD_RUN_HISTORICAL_EVAL") != "1",
     reason="Opt in with BD_RUN_HISTORICAL_EVAL=1; paid synthetic image extraction evaluation",
 )
 @pytest.mark.parametrize("layout", ["left", "right_column", "wrapped"])

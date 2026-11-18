@@ -91,12 +91,14 @@ class _Page:
     native: str
     geometry: bool
     anchorable: bool
+    rules: tuple[tuple[float, float, float], ...]
 
 
 @dataclass(frozen=True)
 class _Candidate:
     mapped: MappedResponse
     writable: tuple[PageBox | NarrativeRegion, ...]
+    lined_region: NarrativeRegion | None = None
 
 
 def _normalized_token(token: str) -> str:
@@ -203,6 +205,47 @@ def _region(box: NormalizedBox, page: _Page) -> NarrativeRegion | str:
         font_size=FONT_SIZE,
         leading=leading,
     )
+
+
+def _printed_rules(
+    pdf_page: pdfium.PdfPage, text: pdfium.PdfTextPage
+) -> tuple[tuple[float, float, float], ...]:
+    rules = []
+    for obj in pdf_page.get_objects(textpage=text):
+        if not isinstance(obj, pdfium.PdfTextObj):
+            continue
+        left, bottom, right, top = obj.get_bounds()
+        if right - left >= 60 and 0 < top - bottom <= 2 and obj.extract().strip("_ \t\r\n") == "":
+            rules.append((left, right, top))
+    return tuple(rules)
+
+
+def _first_line_region(region: NarrativeRegion, page: _Page) -> NarrativeRegion | None:
+    # A model box starting at the first underline excludes the writing cell above it.
+    width = region.right - region.left
+    rows = sorted(
+        {
+            y
+            for left, right, y in page.rules
+            if region.bottom - 2 <= y <= region.top + 2
+            and min(right, region.right) - max(left, region.left) >= 0.9 * width
+        },
+        reverse=True,
+    )
+    if len(rows) < 2 or abs(rows[0] - region.top) > 2:
+        return None
+    leading = rows[0] - rows[1]
+    if not MIN_LEADING <= leading <= 24 or any(
+        abs((a - b) - leading) > 1 for a, b in zip(rows, rows[1:], strict=False)
+    ):
+        return None
+    top = rows[0] + FONT_SIZE + 2
+    if (
+        top > page.height
+        or _bounded(page, region.left, region.top - 2, region.right, top).replace("_", "").strip()
+    ):
+        return None
+    return region.model_copy(update={"top": top, "leading": leading})
 
 
 def _overlap(a: PageBox | NarrativeRegion, b: PageBox | NarrativeRegion) -> bool:
@@ -395,7 +438,10 @@ class _Builder:
         for answer in (mapped.narrative_region, mapped.text_region):
             if answer is not None:
                 writable.append(answer)
-        self.candidates.append(_Candidate(mapped, tuple(writable)))
+        lined_region = (
+            _first_line_region(mapped.narrative_region, page) if mapped.narrative_region else None
+        )
+        self.candidates.append(_Candidate(mapped, tuple(writable), lined_region))
 
     @staticmethod
     def _message(code: str, rid: str) -> str:
@@ -422,7 +468,29 @@ class _Builder:
                 "so it was not placed.",
                 rid,
             )
-        return tuple(c.mapped for i, c in enumerate(self.candidates) if i not in conflicted)
+        placed = []
+        added_regions: list[NarrativeRegion] = []
+        for index, candidate in enumerate(self.candidates):
+            if index in conflicted:
+                continue
+            mapped, lined = candidate.mapped, candidate.lined_region
+            if lined is not None and not any(
+                _overlap(lined, region)
+                for region in (
+                    *self.protected,
+                    *added_regions,
+                    *(
+                        region
+                        for other_index, other in enumerate(self.candidates)
+                        if other_index != index
+                        for region in other.writable
+                    ),
+                )
+            ):
+                mapped = mapped.model_copy(update={"narrative_region": lined})
+                added_regions.append(lined)
+            placed.append(mapped)
+        return tuple(placed)
 
 
 def build_form_layout(blank: bytes, pages: Mapping[int, VisualPage]) -> FormInterpretation:
@@ -477,6 +545,13 @@ def build_form_layout(blank: bytes, pages: Mapping[int, VisualPage]) -> FormInte
                         native=native,
                         geometry=geometry,
                         anchorable=geometry and bool(native.strip()),
+                        rules=(
+                            _printed_rules(pdf_page, text)
+                            if geometry
+                            and native.strip()
+                            and any(item.kind == "narrative" for item in visual.items)
+                            else ()
+                        ),
                     )
                     for item in visual.items:
                         builder.item(item, page)

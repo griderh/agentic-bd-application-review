@@ -42,6 +42,7 @@ from bd_packet_builder.followup import (
     VerificationRequest,
     contains_issuer_quote,
 )
+from bd_packet_builder.foundry import FoundryError
 from bd_packet_builder.historical_context import HistoricalAssociation, HistoricalContextCheck
 from bd_packet_builder.historical_time import adjusted_tenure
 from bd_packet_builder.proposals import ModelAnswerValue, ModelProposal
@@ -861,9 +862,16 @@ async def _attempt_group(
                     **payload,
                     "requirements": payload.get("group_requirements", payload["requirements"]),
                 }
-                result = await asyncio.to_thread(
-                    tools.verify_answer_evidence, request, verification_scope
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        tools.verify_answer_evidence, request, verification_scope
+                    )
+                except FoundryError as error:
+                    record["error"] = {
+                        **_technical_error(error),
+                        "code": "group_verification_failed",
+                    }
+                    return record
                 logging.getLogger(__name__).info(
                     "Answer evidence verification finished: run=%s requirement=%s ok=%s error=%s",
                     tools.manifest().run_id,

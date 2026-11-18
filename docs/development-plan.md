@@ -2,6 +2,197 @@
 
 Status: implementation roadmap, rebaselined October 28, 2026.
 
+## Current initiative dashboard
+
+Detailed progress lives in the linked repository plans, not the Copilot session folder.
+Checked means the stated work has been verified; code completion, offline verification and
+live acceptance are separate gates.
+
+| Initiative | Code | Offline verification | Live acceptance / next step |
+| --- | --- | --- | --- |
+| [Native-first extraction](native-first-extraction-plan.md) | v57/context v14 correction complete (five regressed blanks, internal note printed in packet) | Complete, including replay of all 70 saved checks from v56 run `a0116aa0...` | Fresh agent-v57 private run awaits approval |
+| [Code cleanup, Slices 1-5](code-cleanup-plan.md) | Complete | Complete | Closed cleanup scope; subsequent behavior fixes tracked separately |
+
+Each linked plan owns its task checkboxes, evidence, blockers and next action. Update it as
+slices are verified and keep this dashboard synchronized when an initiative's overall status
+changes. The dated implementation notes below remain historical evidence, not a competing
+task checklist.
+
+## Implementation history
+
+**v56 regressions and packet note leak (agent v57/context v14): completed offline; live
+acceptance pending.** Run `a0116aa0...` lost five fields versus v54 because comparison rules
+treated glyph overhang, a missing space and table reading order as text disagreements, and it
+printed an internal review note in the packet. See the
+[incident checklist](native-first-extraction-plan.md#v56-published-run-five-regressed-blanks-and-an-internal-note-printed-in-the-packet).
+
+**Dense-form regression correction (agent v56/context v13): completed offline; live
+acceptance remains pending.**
+
+The v55 paid run wrote 24 fields versus 47 previously. Overbroad continuation checks
+misclassified neighboring native answers and wasted focused image calls; all five later
+historical-page attempts failed with an exhausted image budget. The correction validates
+neighbor ownership against native/OCR source anchors, retains genuine boundary exceptions,
+and does not spend same-sized crop calls on boundaries those crops cannot repair.
+Interleaved table text can retain complete OCR citations when native reading order alone
+prevents a contiguous citation. v12 receipts retain their original semantics and hashes.
+
+Both Python targets now pass **1,931 tests, 81 skipped**, with Ruff and strict mypy clean.
+The two-page layout/budget matrix retains 80/80 controlled synthetic answers. Latest-page
+saved-observation replay supports 30/33 candidates versus 17/33 and uses one image call.
+All six older historical pages and all 106 old/new receipt pairs were replayed without
+inference; genuine unresolved cases remain explicit. No fresh private packet or paid call
+was made. See the [authoritative checklist](native-first-extraction-plan.md) for counts,
+remaining exceptions and the separate live-acceptance gates.
+
+**Original native-first implementation (agent v55/context v12): completed offline,
+subsequently failed user live validation. Historical verification below is not acceptance.**
+
+Replace the plain-answer recovery contract that treated a matched OCR excerpt as a complete
+answer. This is a behavior change, not another cleanup slice. The existing native-first
+documentation in the README explains each operation and tool in plain language:
+
+- Foundry proposes question/answer/role regions from a PDFium-rendered page.
+- PDFium/pypdfium2 extracts the full bounded native answer, without requiring the model's
+  spelling to match. Native question/role anchors no longer require artificial OCR receipts.
+- Deterministic Python checks validate association, source citation, neighboring fields,
+  character clipping/possible continuation, invisible text, encoding and substantive
+  numeric/negation disagreements.
+- Tesseract supplies raster words/positions/confidence where native reading is unavailable
+  or questionable. Pillow crops and a blind focused Foundry reread conditionally corroborates
+  complete readings, not merely an OCR-selected passage.
+- Shared receipts carry method, selected text and coverage issues through handoff, gate,
+  independent writer recheck, reviewer summary and restart without new inference.
+  Complete historical narratives cannot be replaced by a supported substring.
+
+Keep controls, linked write-ins, digit-only identifier reconciliation, financial/period rules,
+historical eligibility, source protection and signing behavior unchanged. Retain v8/v9/v11
+receipt compatibility and the withdrawn-v10 exclusion. The new bounded source-character
+checks do not restore the withdrawn blanket raster-layout veto.
+
+New synthetic regressions were observed failing before the relevant code changes. They cover
+image spelling errors with missing OCR lines; image/OCR jointly missing native content;
+first/middle/final-line preservation; lists/qualifiers; hidden/stale native text; clipped and
+overbroad regions; native numeric/negation conflicts; full/partial/third/unreadable/invalid
+focused readings; budget limits; native-only operation; gate/writer output; tampering and
+restart. Existing source-mutation, choice, role, period and disclosure tests remain required.
+
+Verification:
+- `.venv/bin/python -m pytest -q` and `.venv313/bin/python -m pytest -q`:
+  **1,923 passed, 81 skipped** on each target.
+- `.venv/bin/ruff check .`, `.venv/bin/ruff format --check .`, `.venv/bin/mypy`,
+  `.venv313/bin/python -m mypy --python-version 3.13`, `git diff --check` and
+  `git diff --cached --check`: passed. A final focused summary regression verifies that
+  exhausted recovery is explicitly described as such, not as a completed reread.
+- Synthetic PDFs retain every expected answer line and untouched form pixels; the actual
+  rendered three-part supplemental answer was inspected.
+- Read-only replay of Q12 in `c69444c3...`: old v11 receipt rechecks; v12 selects
+  361 native characters/52 words rather than the old 283-character passage. Its 52 words
+  align with the original complete visual reading except one one-word substitution.
+  The new receipt rechecks without new inference. All 75 inspected saved files are unchanged;
+  no old run or packet was rewritten. This does not establish a fresh agent-run outcome.
+
+Rollout gates remain separate: obtain approval for paid synthetic evaluation and fresh private
+real-packet regression validation. Twelve extraction-quality cases are defined (native, raster,
+mixed, hidden layer;
+three repetitions each), recording full-answer correctness, OCR use, image calls and latency.
+Provider billing cost is not inferred from call counts. No paid cases have been executed;
+model-quality metrics are not applicable, not a pass. Saved transcripts and approved prior
+packets are not independent held-out answers. No finite suite guarantees detection of
+correlated omissions without an observable source signal.
+
+**Scan-reading resilience (agent v54): completed offline; live confirmation pending.**
+A schema-invalid scan transcription now gets one fresh request. If the response is invalid
+again, the reader raises `scan_reading_invalid`, and the agent handles it as a per-item
+unverified-evidence error instead of a run-fatal `scan_verification_failed`. Transport,
+authentication and timeout failures remain fatal and are not retried. Consistency checks
+stay strict. Each failed page appears once in a reviewer-summary section, "Unverified scanned
+pages", as a `scan_reading_unverified` exception identified by source and page, not by
+question. Offline suites: 1,893 passed, 69 skipped on Python 3.12 and 3.13.
+
+**Behavior-preserving cleanup, Slice 5: completed and verified.**
+Extend the original four-slice cleanup with a bounded writer-verification extraction.
+Two private typed helpers in the existing writer module now own additional-form render
+checks and supplemental answer/evidence verification plus once-per-page previews. The
+publication callback is 38 lines rather than 97. No public signature or module boundary
+changes; no changes to answer acceptance, fitting, pagination, merging or summary content.
+
+Both helpers run at their original positions inside atomic staging. Preserve main-form
+checks before additional-form checks, then every supplemental body/evidence text check
+before any supplemental preview. Keep the PDFium document lifetime, page offsets, strict
+zip, filenames, error text and exception propagation intact, including opening the document
+when no supplements exist. The publisher's source/input rechecks and atomic rename remain
+untouched.
+
+Verification:
+- Added five characterization cases before extracting application code: additional forms
+  with continued shared supplements, two preview-write failures, and two missing answer/
+  evidence cases. The failures leave neither a published draft nor a staging directory.
+- `.venv/bin/python -m pytest -q tests/integration/test_draft.py`: **92 passed** both before
+  and after extraction.
+- Five synthetic scenarios (inline, supplement, additional form, combined shared and
+  combined continued) reproduce all 38 pre-extraction PDF, manifest, reviewer-summary and
+  PNG fingerprints. Only manifest creation timestamps are excluded; two baseline passes
+  established determinism before extraction.
+- Mechanically inlining both helpers reproduces the entire pre-extraction writer AST.
+  All 48 protected application/Slice-4 file hashes remain unchanged. Pylance confirms the
+  single caller of each new helper is signature-compatible.
+- `.venv/bin/python -m pytest -q` and `.venv313/bin/python -m pytest -q`:
+  **1,888 passed, 69 skipped** on each Python target.
+- `.venv/bin/ruff check .`, `.venv/bin/ruff format --check .`, `.venv/bin/mypy`,
+  `.venv313/bin/python -m mypy --python-version 3.13` and `git diff --check`: passed.
+
+Writer v21, other component versions, prompts, schemas, dependencies and saved formats
+remain unchanged. Preserve pending Slice 4 edits. No paid calls, real-document fixture
+additions, existing-run edits or packet rewrites. Live model evaluation is not applicable
+(zero live cases); these are deterministic equivalence checks, not model-quality acceptance.
+
+**Behavior-preserving cleanup, Slice 4: bounded maintenance plan (November 16, 2026).**
+Resume the cleanup sequence, not the withdrawn narrative-layout experiment. Starting commit
+is `f9859dd`, with a clean worktree and the latest verified 1,883-passed/69-skipped baseline.
+Inspection found two identical strict-date parsing blocks and two identical command-error
+label selections in the CLI. Consolidate only these transformations at their existing CLI
+boundary. Preserve the separate agent-run date semantics, argument registration/help,
+command dispatch, exception categories, diagnostics, return codes and opt-in behavior.
+No private helper was proven obsolete, so no dead-code deletion is proposed.
+
+Strengthen existing error/date characterization assertions and run them before application
+edits. Capture all 19 CLI help outputs and the CLI AST before refactoring; compare them
+afterward, accounting only for the two explicit equivalent transformations. Make setup and
+validation prominent in the README, distinguish historical notes from current instructions
+and correct the stale contributor description of the implemented workflow. Keep history and
+supported prototype commands. Do not change agent/gate/writer code, prompts, versions,
+schemas, SDKs, dependencies, saved runs, evidence rules or packet presentation. Validate
+targeted tests, both complete offline suites, Ruff, strict mypy and whitespace checks.
+
+**Behavior-preserving cleanup, Slice 4: completed and verified (November 16, 2026).**
+Only CLI application source changed. Its two validation-date blocks now use one private typed
+parser; the identical error-label expression is computed once for domain/I/O handlers.
+The existing commands, argument registration, date defaults, exception classes, messages,
+output streams and return codes remain intact, including distinct agent-run parsing.
+No speculative deletion, parser framework, dependency or unrelated domain refactor was added.
+Existing characterization tests were strengthened, not replaced or weakened.
+
+Verification against `f9859dd`:
+- Expanding the shared date parser and error-label expression reproduces the original entire
+  CLI AST, including imports, argument registration, dispatch and exception handlers.
+- All 19 top-level/subcommand help outputs retain their exact pre-cleanup hashes.
+- README setup and quality-check sections moved verbatim; original section anchors are
+  retained and all five new workflow navigation anchors resolve. Historical records and
+  supported prototype commands remain available. The stale contributor milestone overview
+  now describes the implemented incomplete-draft builder without implying approval/submission.
+- `.venv/bin/python -m pytest -q tests/integration/test_poc.py tests/integration/test_fact_sheet.py tests/integration/test_inventory.py tests/integration/test_pdf_demo.py`:
+  **132 passed** both before and after the application change.
+- `.venv/bin/python -m pytest -q` and `.venv313/bin/python -m pytest -q`:
+  **1,883 passed, 69 skipped** on each Python target.
+- `.venv/bin/ruff check .`, `.venv/bin/ruff format --check .`, `.venv/bin/mypy`,
+  `.venv313/bin/python -m mypy --python-version 3.13` and `git diff --check`: passed.
+
+Agent/gate/writer implementation, prompts, tool contracts, component versions, dependencies,
+saved formats, recovery behavior and packet output fingerprints remain unchanged. No paid
+calls, real-document fixture additions, existing-run edits or packet regeneration. Live model
+evaluation is not applicable (zero live cases); these are deterministic equivalence checks.
+
 **Supplemental-answer presentation: implementation plan (November 16, 2026).**
 Keep audit requirement IDs unchanged, but derive reader-facing question numbers from issuer
 wording, not opaque IDs. Use readable response labels for unnumbered fields. Replace the

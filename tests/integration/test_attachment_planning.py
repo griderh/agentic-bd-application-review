@@ -692,7 +692,7 @@ def test_unresolved_visual_inspection_becomes_an_actionable_reviewer_question(tm
 def test_agent_guidance_pairs_official_periods_with_latest_supplement():
     from bd_packet_builder.agent import AGENT_VERSION
 
-    assert AGENT_VERSION == "packet-agent-v52"
+    assert AGENT_VERSION == "packet-agent-v57"
     assert "most recent official full-period" in AGENT_INSTRUCTIONS
     assert "latest printed date" in AGENT_INSTRUCTIONS
     assert "review_required is provisional" in AGENT_INSTRUCTIONS

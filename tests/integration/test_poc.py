@@ -193,7 +193,10 @@ def test_poc_date_errors_are_explicit(
     value: str,
 ) -> None:
     assert main(["poc", "--root", str(tmp_path), "--as-of", value]) == 1
-    assert "YYYY-MM-DD" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == "Poc command rejected: Validation as-of date must be YYYY-MM-DD\n"
+    assert captured.out == ""
+    assert not list((tmp_path / "outputs").glob("fact-sheet-check-*"))
 
 
 def test_poc_defaults_to_today_without_a_separate_validation_command(

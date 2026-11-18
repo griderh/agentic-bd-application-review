@@ -25,13 +25,19 @@ from bd_packet_builder.contracts import (
     Sha256,
     TextValue,
 )
-from bd_packet_builder.foundry import FoundryConfig, FoundryError, request_structured
+from bd_packet_builder.foundry import (
+    FoundryConfig,
+    FoundryError,
+    FoundrySchemaError,
+    request_structured,
+)
 from bd_packet_builder.inventory import Inventory, read_source_bytes
 from bd_packet_builder.local_inputs import read_local_input
 from bd_packet_builder.ocr import OcrWordEvidence, ocr_text
 from bd_packet_builder.visual import NormalizedBox
 
 SCAN_VERSION = "scan-cross-check-v7"
+_SCHEMA_ATTEMPTS = 2
 SUPPORTED_SCAN_VERSIONS = (
     "scan-cross-check-v2",
     "scan-cross-check-v3",
@@ -233,17 +239,24 @@ class FoundryScanReader:
         self.client_factory = client_factory
 
     def transcribe(self, image: bytes) -> ScanTranscript:
-        return request_structured(
-            self.config,
-            allow_paid=True,
-            instructions=SCAN_INSTRUCTIONS,
-            input_json='{"task":"independent_page_transcription"}',
-            image_png=image,
-            response_type=ScanTranscript,
-            max_output_tokens=16384,
-            output_token_limit=16384,
-            client_factory=self.client_factory,
-        ).value
+        """Malformed output gets one fresh request; transport, auth and timeout errors do not."""
+        for _attempt in range(_SCHEMA_ATTEMPTS):
+            try:
+                return request_structured(
+                    self.config,
+                    allow_paid=True,
+                    instructions=SCAN_INSTRUCTIONS,
+                    input_json='{"task":"independent_page_transcription"}',
+                    image_png=image,
+                    response_type=ScanTranscript,
+                    max_output_tokens=16384,
+                    output_token_limit=16384,
+                    client_factory=self.client_factory,
+                ).value
+            except FoundrySchemaError:
+                continue
+        # A repeatedly inconsistent reading is unverified evidence, not a technical failure.
+        raise ScanVerificationError("scan_reading_invalid")
 
 
 class ScanCheck(Contract):
@@ -435,6 +448,7 @@ class ScanEvidence:
         self._attempts = 0
         self.checks: list[ScanCheck] = []
         self.exhibit_checks: list[ExhibitImageCheck] = []
+        self.unverified_readings: list[tuple[str, int]] = []
 
     @property
     def pages_attempted(self) -> int:
@@ -548,10 +562,20 @@ class ScanEvidence:
             png = _render_image(self.root, self.inventory, source_id, page)
             if hashlib.sha256(png).hexdigest() != render_sha256:
                 raise ScanVerificationError("scan_render_mismatch")
-            transcript = self.reader.transcribe(png)
+            transcript = self._transcribe(source_id, page, png)
             self._transcripts[key] = transcript
         read_source_bytes(self.root, self.inventory, source_id)
         return transcript
+
+    def _transcribe(self, source_id: str, page: int, png: bytes) -> ScanTranscript:
+        try:
+            return self.reader.transcribe(png)
+        except ScanVerificationError as error:
+            if str(error) == "scan_reading_invalid" and (source_id, page) not in (
+                self.unverified_readings
+            ):
+                self.unverified_readings.append((source_id, page))
+            raise
 
     def transcribe_region(
         self, source_id: str, page: int, render_sha256: str, box: NormalizedBox
@@ -563,7 +587,7 @@ class ScanEvidence:
             if self._attempts >= self.max_pages:
                 return None
             self._attempts += 1
-            self._transcripts[key] = self.reader.transcribe(png)
+            self._transcripts[key] = self._transcribe(source_id, page, png)
         read_source_bytes(self.root, self.inventory, source_id)
         return self._transcripts[key], digest
 

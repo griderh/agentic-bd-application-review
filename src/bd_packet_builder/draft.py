@@ -23,6 +23,7 @@ from bd_packet_builder.contracts import (
     AnswerProposal,
     ApplicationRequirements,
     BooleanValue,
+    Citation,
     Contract,
     EvidenceStatus,
     HistoricalBasis,
@@ -502,12 +503,21 @@ def verify_ocr_citation(
 
 
 def historical_answer_citations(
-    proposal: AnswerProposal, snapshots: tuple[tuple[OcrCitation, bytes], ...]
-) -> tuple[OcrCitation, ...]:
+    proposal: AnswerProposal,
+    snapshots: tuple[tuple[OcrCitation, bytes], ...],
+    checks: tuple[HistoricalContextCheck, ...],
+) -> tuple[Citation | OcrCitation, ...]:
     basis = proposal.historical_basis
     if basis is None:
         return ()
-    return tuple(
+    native = tuple(
+        check.answer
+        for check in checks
+        if check.context_citation in (basis.prior_question, *basis.additional_contexts)
+        and isinstance(check.answer, Citation)
+        and check.answer in proposal.citations
+    )
+    return native + tuple(
         citation
         for citation, _ in snapshots
         if citation.source_id == basis.prior_question.source_id
@@ -749,8 +759,11 @@ def verify_historical_context(
             if issue or raw is None:
                 return (issue or "historical_relationship_artifact_unavailable",), ()
             current.append((citation, raw))
-        if not current or not checked.recheck(
-            root, inventory, current[0][1], allow_disagreements=allow_disagreements
+        if not checked.recheck(
+            root,
+            inventory,
+            current[0][1] if current else None,
+            allow_disagreements=allow_disagreements,
         ):
             return ("historical_relationship_text_or_geometry_disagrees",), ()
         snapshots.extend(current)
@@ -847,8 +860,11 @@ def _verify_question_links(
             if issue or raw is None:
                 return issue or "historical_relationship_artifact_unavailable"
             current.append(raw)
-        if not current or not checked.recheck(
-            root, inventory, current[0], allow_disagreements=allow_disagreements
+        if not checked.recheck(
+            root,
+            inventory,
+            current[0] if current else None,
+            allow_disagreements=allow_disagreements,
         ):
             return "historical_question_link_text_or_geometry_disagrees"
     return None
@@ -1427,12 +1443,28 @@ def _supplement_labels(requirements: tuple[Requirement, ...]) -> dict[str, str]:
 
 
 def _evidence_text(pages: tuple[int, ...]) -> str:
+    # Historical-only provenance belongs in the internal reviewer summary, never the packet.
     if pages:
         return "Supporting evidence: " + "; ".join(f"packet page {p}" for p in pages) + "."
-    return "Historical draft basis; internal reviewer confirmation required."
+    return ""
+
+
+def _reflow(text: str) -> str:
+    # Single newlines are source wrapping; retain blank paragraphs and explicit list items.
+    paragraphs = [
+        re.sub(r"\n(?![ \t]*(?:[-*]|\d+[.)])[ \t]+)", " ", paragraph).strip()
+        for paragraph in re.split(r"\n\s*\n", text.strip())
+    ]
+    return "\n\n".join(paragraphs)
+
+
+def _with_evidence(answer: str, evidence_text: str) -> str:
+    return _reflow(answer) + ("\n" + evidence_text if evidence_text else "")
 
 
 def _supplement_reference_lines(text: str) -> tuple[str, ...]:
+    if not text:
+        return ()
     lines = wrap_text(text, SUPPLEMENT_WIDTH, 10.0, _measure)
     if lines is None or len(lines) > 4:
         raise DraftError("Supplemental evidence references exceed reserved space")
@@ -1445,12 +1477,7 @@ def _plan_supplement(
     reference_line_count: int,
     previous: SupplementPlacement | None,
 ) -> list[SupplementPlacement]:
-    # Single newlines are source wrapping; retain blank paragraphs and explicit list items.
-    paragraphs = [
-        re.sub(r"\n(?![ \t]*(?:[-*]|\d+[.)])[ \t]+)", " ", paragraph).strip()
-        for paragraph in re.split(r"\n\s*\n", text.strip())
-    ]
-    remaining = wrap_text("\n\n".join(paragraphs), SUPPLEMENT_WIDTH, SUPPLEMENT_FONT, _measure)
+    remaining = wrap_text(_reflow(text), SUPPLEMENT_WIDTH, SUPPLEMENT_FONT, _measure)
     if remaining is None:
         raise DraftError("Answer has an unbreakable word that cannot fit")
     page = previous.page if previous else 1
@@ -1465,6 +1492,8 @@ def _plan_supplement(
                 / SUPPLEMENT_LEADING
             )
             + 1
+            if reference_line_count
+            else capacity
         )
         final = len(remaining) <= final_capacity
         count = len(remaining) if final else min(capacity, len(remaining) - 2)
@@ -1570,6 +1599,91 @@ def _merge_packet(
     if len(PdfReader(BytesIO(packet)).pages) != sum(s.page_count for s in pagination.sections):
         raise DraftError("Final packet pagination does not match assembled output")
     return packet
+
+
+def _additional_form_render_checks(
+    packet: bytes,
+    output: Path,
+    main_page_count: int,
+    additional_forms_data: list[tuple[DraftAdditionalForm, bytes, PdfReader]],
+    additional_form_texts: list[list[TextPlacement]],
+) -> list[dict[str, object]]:
+    additional_render_checks: list[dict[str, object]] = []
+    page_offset = main_page_count
+    for index, ((_form_request, form_bytes, form_reader), form_texts) in enumerate(
+        zip(additional_forms_data, additional_form_texts, strict=True), start=1
+    ):
+        additional_render_checks.append(
+            _render_checks(
+                form_bytes,
+                packet,
+                output,
+                [placement.region for placement in form_texts],
+                [],
+                form_texts,
+                packet_page_offset=page_offset,
+                filename_prefix=f"additional-form-{index}-",
+            )
+        )
+        page_offset += len(form_reader.pages)
+    return additional_render_checks
+
+
+def _check_supplement_outputs(
+    packet: bytes,
+    output: Path,
+    form_count: int,
+    supplements: list[SupplementPlacement],
+    supplement_evidence: dict[str, str],
+    supplement_page_count: int,
+) -> None:
+    with pdfium.PdfDocument(packet) as document:
+        for placement in supplements:
+            number = form_count + placement.page
+            with (
+                closing(document[number - 1]) as page,
+                closing(page.get_textpage()) as text,
+            ):
+                regions = [
+                    (
+                        placement.lines,
+                        placement.body_bottom,
+                        placement.body_top,
+                        SUPPLEMENT_FONT,
+                    )
+                ]
+                if placement.reference_line_count:
+                    reference_lines = _supplement_reference_lines(
+                        supplement_evidence[placement.requirement_id]
+                    )
+                    regions.append(
+                        (
+                            reference_lines,
+                            placement.bottom,
+                            placement.reference_top,
+                            10.0,
+                        )
+                    )
+                for lines, bottom, top, size in regions:
+                    extracted = text.get_text_bounded(
+                        left=SUPPLEMENT_LEFT,
+                        bottom=bottom - 3.0,
+                        right=SUPPLEMENT_LEFT + SUPPLEMENT_WIDTH,
+                        top=top + size,
+                        errors="strict",
+                    )
+                    # PDFium replaces a visible line-ending hyphen and break with STX.
+                    actual = " ".join(extracted.replace("\x02", "- ").split())
+                    expected = " ".join(" ".join(lines).split())
+                    if expected not in actual:
+                        raise DraftError(
+                            "Supplemental answer/evidence is missing or clipped: "
+                            f"{placement.requirement_id}, page {number}"
+                        )
+        for offset in range(1, supplement_page_count + 1):
+            number = form_count + offset
+            with _render_image(packet, number - 1) as image:
+                image.save(output / f"supplement-page-{number}.png")
 
 
 def publish_draft(
@@ -1846,7 +1960,9 @@ def publish_draft(
             review.scan_checks,
             question_requirements=question_requirements,
         )
-        answer_citations = historical_answer_citations(proposal, context_snapshots)
+        answer_citations = historical_answer_citations(
+            proposal, context_snapshots, review.historical_context_checks
+        )
         context_verified = bool(answer_citations) and not context_issues
         for context_citation, context_snapshot in context_snapshots:
             ocr_artifact_snapshots[Path(context_citation.artifact_path)] = context_snapshot
@@ -2071,11 +2187,15 @@ def publish_draft(
                 if mapped.narrative_region is None:
                     raise DraftError("Narrative answer has no reviewed writable region")
                 # Use the largest allowed page number during allocation to avoid under-reserving.
-                provisional_refs = "; ".join(
-                    f"packet page {MAX_PACKET_PAGES}"
-                    for _ in {(c.source_id, c.page) for c in proposal.citations}
+                provisional_refs = tuple(
+                    MAX_PACKET_PAGES
+                    for _ in {
+                        (c.source_id, c.page)
+                        for c in proposal.citations
+                        if sources[c.source_id].family != "historical_reference"
+                    }
                 )
-                complete = value.value + "\nSupporting evidence: " + provisional_refs + "."
+                complete = _with_evidence(value.value, _evidence_text(provisional_refs))
                 narrative_region = mapped.narrative_region
                 if any(not (32 <= ord(c) <= 126 or c == "\n") for c in complete):
                     raise DraftError("Unsupported font characters; narrative needs font review")
@@ -2271,7 +2391,7 @@ def publish_draft(
                     TextPlacement(
                         answer_narrative_region,
                         _lines(
-                            proposal.value.value + "\n" + evidence_text,
+                            _with_evidence(proposal.value.value, evidence_text),
                             answer_narrative_region,
                         ),
                     )
@@ -2397,72 +2517,13 @@ def publish_draft(
             marks,
             texts,
         )
-        additional_render_checks: list[dict[str, object]] = []
-        page_offset = len(reader.pages)
-        for index, ((_form_request, form_bytes, form_reader), form_texts) in enumerate(
-            zip(additional_forms_data, additional_form_texts, strict=True), start=1
-        ):
-            additional_render_checks.append(
-                _render_checks(
-                    form_bytes,
-                    packet,
-                    output,
-                    [placement.region for placement in form_texts],
-                    [],
-                    form_texts,
-                    packet_page_offset=page_offset,
-                    filename_prefix=f"additional-form-{index}-",
-                )
-            )
-            page_offset += len(form_reader.pages)
+        additional_render_checks = _additional_form_render_checks(
+            packet, output, len(reader.pages), additional_forms_data, additional_form_texts
+        )
         render["additional_forms"] = additional_render_checks
-        with pdfium.PdfDocument(packet) as document:
-            for placement in supplements:
-                number = form_count + placement.page
-                with (
-                    closing(document[number - 1]) as page,
-                    closing(page.get_textpage()) as text,
-                ):
-                    regions = [
-                        (
-                            placement.lines,
-                            placement.body_bottom,
-                            placement.body_top,
-                            SUPPLEMENT_FONT,
-                        )
-                    ]
-                    if placement.reference_line_count:
-                        reference_lines = _supplement_reference_lines(
-                            supplement_evidence[placement.requirement_id]
-                        )
-                        regions.append(
-                            (
-                                reference_lines,
-                                placement.bottom,
-                                placement.reference_top,
-                                10.0,
-                            )
-                        )
-                    for lines, bottom, top, size in regions:
-                        extracted = text.get_text_bounded(
-                            left=SUPPLEMENT_LEFT,
-                            bottom=bottom - 3.0,
-                            right=SUPPLEMENT_LEFT + SUPPLEMENT_WIDTH,
-                            top=top + size,
-                            errors="strict",
-                        )
-                        # PDFium replaces a visible line-ending hyphen and break with STX.
-                        actual = " ".join(extracted.replace("\x02", "- ").split())
-                        expected = " ".join(" ".join(lines).split())
-                        if expected not in actual:
-                            raise DraftError(
-                                "Supplemental answer/evidence is missing or clipped: "
-                                f"{placement.requirement_id}, page {number}"
-                            )
-            for offset in range(1, supplement_page_count + 1):
-                number = form_count + offset
-                with _render_image(packet, number - 1) as image:
-                    image.save(output / f"supplement-page-{number}.png")
+        _check_supplement_outputs(
+            packet, output, form_count, supplements, supplement_evidence, supplement_page_count
+        )
         render["supplement_pages_rendered_and_text_checked"] = supplement_page_count
         payload["render_checks"] = render
         # The shared publisher writes its initial report before companion validation.

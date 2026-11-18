@@ -191,7 +191,9 @@ def validate_answers(
                 scan_checks,
                 question_requirements=question_requirements,
             )
-            answer_citations = historical_answer_citations(proposal, context_snapshots)
+            answer_citations = historical_answer_citations(
+                proposal, context_snapshots, historical_context_checks
+            )
             context_verified = bool(answer_citations) and not context_issues
             issues.extend(context_issues)
             history_issues, evidence_status = historical_issues(

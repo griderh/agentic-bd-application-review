@@ -43,6 +43,16 @@ from bd_packet_builder.run import RunInputError
 from bd_packet_builder.visual import map_visual
 
 
+def _validation_date(text: str) -> date:
+    try:
+        as_of = date.fromisoformat(text)
+    except ValueError:
+        raise FactSheetError("Validation as-of date must be YYYY-MM-DD") from None
+    if as_of.isoformat() != text:
+        raise FactSheetError("Validation as-of date must be YYYY-MM-DD")
+    return as_of
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local PDF tools; model smoke test is opt-in")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -245,6 +255,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     broward_demo.add_argument("--requirement-assessments", type=Path)
     broward_demo.add_argument("--allow-paid", action="store_true")
     args = parser.parse_args(argv)
+    command_label = (
+        args.command.capitalize()
+        if args.command
+        in (
+            "inventory",
+            "evidence",
+            "ocr",
+            "review",
+            "fact-sheet-check",
+            "poc",
+            "poc-init",
+            "history-check",
+            "foundry-smoke",
+            "discover",
+            "map-visual",
+            "retrieve",
+            "draft",
+            "agent-run",
+            "broward-demo",
+        )
+        else "PDF"
+    )
     try:
         if args.command == "agent-resume":
             manifest = resume_agent_command(
@@ -436,12 +468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Setup complete. The only workbook to maintain: {path}")
         elif args.command == "poc":
             as_of_text = args.as_of or date.today().isoformat()
-            try:
-                as_of = date.fromisoformat(as_of_text)
-            except ValueError:
-                raise FactSheetError("Validation as-of date must be YYYY-MM-DD") from None
-            if as_of.isoformat() != as_of_text:
-                raise FactSheetError("Validation as-of date must be YYYY-MM-DD")
+            as_of = _validation_date(as_of_text)
             result = run_poc(args.root, as_of=as_of)
             print(
                 f"PoC intake checked. No packet or answers generated. "
@@ -492,12 +519,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Review report: {result / 'review.json'}"
             )
         elif args.command == "fact-sheet-check":
-            try:
-                as_of = date.fromisoformat(args.as_of)
-            except ValueError:
-                raise FactSheetError("Validation as-of date must be YYYY-MM-DD") from None
-            if as_of.isoformat() != args.as_of:
-                raise FactSheetError("Validation as-of date must be YYYY-MM-DD")
+            as_of = _validation_date(args.as_of)
             result = run_fact_sheet_check(args.root, args.source, as_of=as_of)
             data = json.loads((result / "fact-sheet-check.json").read_text(encoding="utf-8"))
             print(
@@ -522,29 +544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         RetrievalError,
         DraftError,
     ) as error:
-        label = (
-            args.command.capitalize()
-            if args.command
-            in (
-                "inventory",
-                "evidence",
-                "ocr",
-                "review",
-                "fact-sheet-check",
-                "poc",
-                "poc-init",
-                "history-check",
-                "foundry-smoke",
-                "discover",
-                "map-visual",
-                "retrieve",
-                "draft",
-                "agent-run",
-                "broward-demo",
-            )
-            else "PDF"
-        )
-        print(f"{label} command rejected: {error}", file=sys.stderr)
+        print(f"{command_label} command rejected: {error}", file=sys.stderr)
         return 1
     except ValidationError:
         print(
@@ -553,30 +553,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     except OSError:
-        label = (
-            args.command.capitalize()
-            if args.command
-            in (
-                "inventory",
-                "evidence",
-                "ocr",
-                "review",
-                "fact-sheet-check",
-                "poc",
-                "poc-init",
-                "history-check",
-                "foundry-smoke",
-                "discover",
-                "map-visual",
-                "retrieve",
-                "draft",
-                "agent-run",
-                "broward-demo",
-            )
-            else "PDF"
-        )
         print(
-            f"{label} I/O failed. Check the input exists and output folder is writable.",
+            f"{command_label} I/O failed. Check the input exists and output folder is writable.",
             file=sys.stderr,
         )
         return 1

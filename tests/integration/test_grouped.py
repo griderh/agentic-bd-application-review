@@ -13,7 +13,7 @@ from bd_packet_builder.agent import AGENT_INSTRUCTIONS, AGENT_VERSION
 from bd_packet_builder.blob_storage import REVIEWS, PacketBlobStorage
 from bd_packet_builder.draft import DraftReview
 from bd_packet_builder.form_layout import FormInterpretation
-from bd_packet_builder.foundry import FoundryConfig
+from bd_packet_builder.foundry import FoundryConfig, FoundryError
 from bd_packet_builder.grouped import (
     ANSWER_INSTRUCTIONS,
     EVIDENCE_CONTINUATION,
@@ -321,6 +321,70 @@ def test_repair_does_not_skip_verification_or_turn_technical_failures_into_succe
         )
 
 
+def test_verification_connection_failure_is_terminal_checkpointed_and_resumable(
+    tmp_path, monkeypatch, caplog
+):
+    setup, tools, proposal = ready(tmp_path, checked_quote=False)
+    calls = []
+
+    def disconnected(request, handoff):
+        raise FoundryError("PRIVATE TRANSPORT DETAIL") from OSError("PRIVATE SOCKET DETAIL")
+
+    monkeypatch.setattr(tools, "verify_answer_evidence", disconnected)
+
+    async def propose(payload):
+        calls.append(payload)
+        citation = proposal["citations"][0]
+        return json.dumps(
+            {
+                "proposals": [],
+                "verification_requests": [
+                    {
+                        "requirement_id": "p1.name",
+                        "source_id": citation["source_id"],
+                        "page": 1,
+                        "quote": NAME,
+                        "expected_subject": NAME,
+                        "method": "native",
+                    }
+                ],
+            }
+        )
+
+    with caplog.at_level("INFO", logger="bd_packet_builder.grouped"):
+        final = asyncio.run(run_answer_groups(tools, propose))
+    assert final.status == "failed"
+    assert final.failure.code == "answer_groups_incomplete"
+    assert final.failure.during_status == "evidence_collected"
+    assert len(calls) == 1
+    names = {a.name for a in final.artifacts}
+    assert "packet.pdf" not in names
+    assert "answer-group-000-attempt-1-verification-request.json" in names
+    assert "answer-group-000-attempt-1-verification.json" not in names
+    record = json.loads(setup.artifact("answer-group-000-attempt-1.json"))
+    assert record["status"] == "technical_failure"
+    assert record["error"] == {
+        "code": "group_verification_failed",
+        "type": "FoundryError",
+        "causes": ["FoundryError", "OSError"],
+    }
+    assert "PRIVATE" not in setup.artifact("answer-group-000-attempt-1.json").decode()
+    assert "PRIVATE" not in final.model_dump_json()
+    assert "PRIVATE" not in caplog.text
+    before = {a.name: setup.artifact(a.name) for a in final.artifacts}
+
+    async def recover(payload):
+        assert payload["verification_results"][0]["error"] == (
+            "verification_interrupted_do_not_repeat_unknown_paid_work"
+        )
+        return json.dumps({"proposals": [proposal]})
+
+    restored = asyncio.run(run_answer_groups(setup.tools(), recover, resume=True))
+    assert restored.status == "published"
+    for name, data in before.items():
+        assert setup.artifact(name) == data
+
+
 def test_proposal_failure_logs_are_content_free_and_completion_is_auditable(tmp_path, caplog):
     setup, tools, proposal = ready(tmp_path)
     events = []
@@ -403,7 +467,7 @@ def test_evidence_tool_order_includes_attachment_planning_and_continuation_guida
     normalized_instructions = " ".join(AGENT_INSTRUCTIONS.split())
     assert "plan_supporting_document" in ordered_workflow
     assert "plan_supporting_documents" in ordered_workflow
-    assert AGENT_VERSION == "packet-agent-v52"
+    assert AGENT_VERSION == "packet-agent-v57"
     assert GROUP_VERSION == "answer-groups-v16"
     assert "not a subset exempt from a decision" in normalized_instructions
     assert "exactly one decision for every candidate" in normalized_instructions

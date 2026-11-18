@@ -106,7 +106,20 @@ def draft_reviewer_summary(
                     f"PRINTED-WORDING CHECK: {reading['part']}; "
                     f"status={reading['status']}; method="
                     + (
-                        "localized source-native text"
+                        "no supported reading; reread budget exhausted"
+                        if reading["status"] == "budget_exhausted"
+                        else "PDFium native-text extraction of the full bounded answer region"
+                        + (
+                            " with a blind focused Foundry image reread"
+                            if reading["focused"]
+                            else ""
+                        )
+                        if reading.get("method") == "native"
+                        else "Tesseract OCR corroborated by the page image reading"
+                        if reading.get("method") == "ocr"
+                        else "blind focused Foundry image reread (Pillow crop)"
+                        if reading.get("method") == "focused_image"
+                        else "localized source-native text"
                         if reading["native"]
                         else "blind focused image reread"
                         if reading["focused"]
@@ -115,6 +128,16 @@ def draft_reviewer_summary(
                     + ". Original readings remain below; this does not establish "
                     "current business truth or approve a selection."
                 )
+                if reading.get("coverage_issues"):
+                    summary.append(
+                        (
+                            "  Source checks retained after corroboration: "
+                            if reading["status"] == "resolved"
+                            else "  Answer-region coverage needs review: "
+                        )
+                        + ", ".join(str(issue) for issue in reading["coverage_issues"])
+                        + ". A matching excerpt alone does not establish a complete answer."
+                    )
         extraction_details = item.get("historical_extraction_discrepancies")
         extraction_parts = (
             tuple(
