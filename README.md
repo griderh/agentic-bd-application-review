@@ -53,6 +53,33 @@ past limitations provide audit context; they do not override newer behavior or a
 resuming incompatible saved runs. Setup and validation commands are above; current workflow
 entry points are linked in [Workflow navigation](#workflow-navigation).
 
+### SharePoint intake: offline spike
+
+The future intake workflow will let users drag blank PDFs into a SharePoint library.
+The poller is intended to queue an unchanged version after observing it in two
+separate polls. It will include eligible files already present at startup. Queueing
+does not mean a packet has been processed; the future worker must process one packet
+at a time and mark the outcome separately.
+
+Run the **synthetic, offline demonstration**:
+
+```bash
+.venv/bin/python -m bd_packet_builder.intake_poller
+```
+
+It uses temporary local state and an in-memory queue, prints counts, and exits. It
+does not contact SharePoint or Azure, read actual documents, or create a packet.
+The message contract contains a schema version, library ID, item ID, version, and
+stable idempotency key—not a filename or document content. Edits or deletions
+after queueing require review rather than automatically queueing a new version.
+Queue sends can be duplicated after an ambiguous failure; a future worker must
+deduplicate. The local SQLite lock is not a distributed lock.
+
+Actual Graph and Azure Storage Queue adapters, a durable shared state store,
+SharePoint-visible status, a serial worker and a one-minute scheduled Azure
+Container Apps job are **not implemented**. See the [intake checklist](docs/sharepoint-intake-plan.md)
+for the remaining security and live-acceptance gates.
+
 On ruled narrative fields, new drafts start inline answers and supplemental-answer
 references on the first blank line when the PDF confirms the line and there is room
 above it. If that space cannot be confirmed, the existing placement is kept.

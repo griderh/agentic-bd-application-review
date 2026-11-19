@@ -10,6 +10,7 @@ live acceptance are separate gates.
 
 | Initiative | Code | Offline verification | Live acceptance / next step |
 | --- | --- | --- | --- |
+| [SharePoint intake poller spike](sharepoint-intake-plan.md) | Offline prototype complete | 15 targeted tests pass on Python 3.12 and 3.13; static checks pass | SharePoint, Azure Storage Queue, serial worker and scheduled job deferred |
 | [Native-first extraction](native-first-extraction-plan.md) | v57/context v14 correction complete (five regressed blanks, internal note printed in packet) | Complete, including replay of all 70 saved checks from v56 run `a0116aa0...` | Fresh agent-v57 private run awaits approval |
 | [Code cleanup, Slices 1-5](code-cleanup-plan.md) | Complete | Complete | Closed cleanup scope; subsequent behavior fixes tracked separately |
 
