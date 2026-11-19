@@ -1,0 +1,9 @@
+# Allowlist: ignore everything, then include only what the image needs.
+# Business documents (bd_agreements/), outputs, tests, docs and secrets must
+# never be copied into an image.
+*
+!requirements.txt
+!pyproject.toml
+!src/
+**/__pycache__
+**/*.pyc
