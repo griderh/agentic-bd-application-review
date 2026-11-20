@@ -25,6 +25,19 @@ On Windows, create the environment with `py -3.12 -m venv .venv` and activate it
 
 Dependencies, including transitive packages, are pinned in [runtime requirements](requirements.txt) and [development requirements](requirements-dev.txt). Package metadata and tool settings live in [pyproject.toml](pyproject.toml). No uv, Azure credentials, or model access is needed for the offline commands or tests.
 
+## Container image
+
+The [Dockerfile](Dockerfile) packages the application for Azure Container Apps jobs. One image serves every job; each job sets its own command. [.dockerignore](.dockerignore) is an allowlist: only `requirements.txt`, `pyproject.toml` and `src/` enter the image, so business documents, outputs, tests, docs and secrets never do.
+
+Build and smoke-test locally (Docker or Colima must be running). Container Apps runs `linux/amd64`:
+
+```bash
+docker build --platform linux/amd64 -t bd-packet-builder:local .
+docker run --rm --platform linux/amd64 bd-packet-builder:local --help
+```
+
+In Azure, set `AZURE_CLIENT_ID` to the managed identity's client ID so `DefaultAzureCredential` signs in without keys. The registry and Container Apps jobs are defined in the separate infrastructure repository. The intake poller and queue-driven packet commands are not implemented yet; the image runs whichever `bd-packet` command a job specifies.
+
 ## Quality checks
 
 With the venv activated:
